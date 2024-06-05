@@ -1,0 +1,4 @@
+*__pycache__*
+*.gch
+*.pyc
+src/rreal.egg-info/*
