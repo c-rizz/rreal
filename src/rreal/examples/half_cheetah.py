@@ -8,21 +8,21 @@ import numpy as np
 import torch
 import torch as th
 # import jumping_leg.experiments.build_jumping_leg_env as build_jumping_leg_env
-from lr_gym.utils.async_vector_env import AsyncVectorEnvShmem
+from adarl.utils.async_vector_env import AsyncVectorEnvShmem
 import inspect
-import lr_gym.utils.session
-from lr_gym.envs.vector_env_logger import VectorEnvLogger
-from lr_gym.utils.buffers import ThDReplayBuffer
-import lr_gym.utils.sigint_handler
+import adarl.utils.session
+from adarl.envs.vector_env_logger import VectorEnvLogger
+from adarl.utils.buffers import ThDReplayBuffer
+import adarl.utils.sigint_handler
 from rreal.algorithms.sac import SAC, train_off_policy
 from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector
 import wandb 
-from lr_gym.utils.callbacks import EvalCallback, CheckpointCallbackRB
+from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
 import gymnasium as gym
-from lr_gym.envs.RecorderGymWrapper import RecorderGymWrapper
-from lr_gym.envs.GymEnvWrapper import GymEnvWrapper
-from lr_gym.envs.GymToLr import GymToLr
-from lr_gym.envs.lr_wrappers.ObsToDict import ObsToDict
+from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
+from adarl.envs.GymEnvWrapper import GymEnvWrapper
+from adarl.envs.GymToLr import GymToLr
+from adarl.envs.lr_wrappers.ObsToDict import ObsToDict
 from rreal.tmp.gym_transform_observation import DtypeObservation
 
 def half_cheetah_builder(   log_folder,
@@ -38,7 +38,7 @@ def half_cheetah_builder(   log_folder,
                     render_mode="rgb_array")
     gymenv = DtypeObservation(gymenv, dtype=np.float32)
     lrenv = GymToLr(gymenv,
-                    stepSimDuration_sec=0.01,
+                    stepSimDuration_sec=0.05,
                     maxStepsPerEpisode=env_builder_args["max_episode_steps"],
                     copy_observations=True,
                     actions_to_numpy=True)
@@ -79,7 +79,7 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams):
 
 def main(seed, folderName, run_id, args, env_builder_args, hyperparams):
 
-    log_folder, session = lr_gym.utils.session.lr_gym_startup(   __file__,
+    log_folder, session = adarl.utils.session.adarl_startup(   __file__,
                                                         inspect.currentframe(),
                                                         seed=seed,
                                                         experiment_name=os.path.basename(__file__),
@@ -195,7 +195,7 @@ if __name__ == "__main__":
 
     import os
     import argparse
-    from lr_gym.utils.session import launchRun
+    from adarl.utils.session import launchRun
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--seedsNum", default=1, type=int, help="Number of seeds to test with")
@@ -214,5 +214,5 @@ if __name__ == "__main__":
                 resumeFolder = None,
                 args = args,
                 debug_level = -10,
-                start_lr_gym=False,
-                pkgs_to_save=["lr_gym","rreal"])
+                start_adarl=False,
+                pkgs_to_save=["adarl","rreal"])

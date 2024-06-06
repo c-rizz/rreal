@@ -3,9 +3,9 @@ import torch as th
 import torch.nn as nn
 from typing import Tuple, List
 import torchvision
-import lr_gym.utils.dbg.dbg_img as dbg_img
+import adarl.utils.dbg.dbg_img as dbg_img
 from autoencoding_rl.utils import tensorToHumanCvImageRgb
-import lr_gym.utils.dbg.ggLog as ggLog
+import adarl.utils.dbg.ggLog as ggLog
 from torchvision.transforms.functional import InterpolationMode
 
 class MobileNetV3(nn.Module):

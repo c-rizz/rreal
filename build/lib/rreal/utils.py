@@ -2,7 +2,7 @@ from typing import Callable
 import torch as th
 from rreal.nets.Parallel import Parallel
 from rreal.weight_norm import weight_norm
-from lr_gym.utils.tensor_trees import TensorTree
+from adarl.utils.tensor_trees import TensorTree
 import gymnasium as gym
 
 def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,

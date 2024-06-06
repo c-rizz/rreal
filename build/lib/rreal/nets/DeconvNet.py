@@ -3,7 +3,7 @@ import torch as th
 import torch.nn as nn
 from typing import List
 import numpy as np
-import lr_gym.utils.dbg.ggLog as ggLog
+import adarl.utils.dbg.ggLog as ggLog
 
 # from torchsummary import summary
 class ResizeConvolution(nn.Module):

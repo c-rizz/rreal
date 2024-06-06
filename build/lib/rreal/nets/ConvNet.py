@@ -3,7 +3,7 @@ import torch.nn as nn
 from typing import Tuple, List
 from rreal.nets.CoordConv import CoordConv
 # from torchsummary import summary 
-import lr_gym.utils.dbg.ggLog as ggLog
+import adarl.utils.dbg.ggLog as ggLog
 
 class ConvNet(nn.Module):
     def __init__(self,  image_channels : int = 1,

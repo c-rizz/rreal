@@ -6,19 +6,19 @@ import gymnasium as gym
 import numpy as np
 import torch as th
 from typing import List, Union, NamedTuple, Dict, Optional, Callable, Literal, Any
-from lr_gym.utils.tensor_trees import map_tensor_tree, unstack_tensor_tree, stack_tensor_tree
-import lr_gym.utils.dbg.ggLog as ggLog
+from adarl.utils.tensor_trees import map_tensor_tree, unstack_tensor_tree, stack_tensor_tree
+import adarl.utils.dbg.ggLog as ggLog
 import copy
 import threading
-from lr_gym.utils.buffers import BasicStorage
+from adarl.utils.buffers import BasicStorage
 import torch.multiprocessing as mp
-from lr_gym.utils.shared_env_data import SimpleCommander
+from adarl.utils.shared_env_data import SimpleCommander
 import ctypes
 from stable_baselines3.common.vec_env.base_vec_env import CloudpickleWrapper
 import gymnasium as gym
-import lr_gym.utils.mp_helper as mp_helper
-import lr_gym.utils.session as session
-from lr_gym.utils.utils import pyTorch_makeDeterministic
+import adarl.utils.mp_helper as mp_helper
+import adarl.utils.session as session
+from adarl.utils.utils import pyTorch_makeDeterministic
 from rreal.algorithms.rl_policy import RLPolicy
 
 

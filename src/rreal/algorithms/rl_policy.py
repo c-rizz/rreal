@@ -1,5 +1,5 @@
 import torch.nn as nn
-from lr_gym.utils.buffers import TransitionBatch
+from adarl.utils.buffers import TransitionBatch
 from abc import abstractmethod
 
 class RLPolicy(nn.Module):

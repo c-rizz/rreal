@@ -1,9 +1,9 @@
 import sys
-import lr_gym
+import adarl
 import importlib
 
 def launcher():
     command = sys.argv[1]
-    mod = importlib.import_module("lr_gym."+command)
+    mod = importlib.import_module("adarl."+command)
     sys.argv = [str(mod.__file__)]+sys.argv[2:]
     mod.main()

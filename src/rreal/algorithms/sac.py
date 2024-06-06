@@ -3,27 +3,27 @@ import time
 from dataclasses import dataclass, asdict
 
 import gymnasium as gym
-import lr_gym.utils.callbacks
+import adarl.utils.callbacks
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torch as th
-import lr_gym.utils.session
-from lr_gym.utils.buffers import ThDReplayBuffer, TransitionBatch
-from lr_gym.utils.ObsConverter import ObsConverter
+import adarl.utils.session
+from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch
+from adarl.utils.ObsConverter import ObsConverter
 from typing import List, Union, NamedTuple, Dict, Optional, Callable
 from rreal.utils import build_mlp_net
-import lr_gym.utils.dbg.ggLog as ggLog
-import lr_gym.utils.sigint_handler
-import lr_gym.utils.session as session
-from lr_gym.utils.wandb_wrapper import wandb_log
-from lr_gym.utils.callbacks import TrainingCallback, CallbackList
+import adarl.utils.dbg.ggLog as ggLog
+import adarl.utils.sigint_handler
+import adarl.utils.session as session
+from adarl.utils.wandb_wrapper import wandb_log
+from adarl.utils.callbacks import TrainingCallback, CallbackList
 from rreal.algorithms.collectors import ExperienceCollector
 from rreal.algorithms.rl_policy import RLPolicy
 import inspect
 import yaml
-from lr_gym.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree
+from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree
 
 class QNetwork(nn.Module):
     def __init__(self, observation_space : gym.spaces.Space,
@@ -398,8 +398,8 @@ def train_off_policy(collector : ExperienceCollector,
         ep_counter = tmp_buff.added_completed_episodes()
         step_counter = tmp_buff.added_frames()
         t_coll_sl += collector.collection_duration()
-        lr_gym.utils.session.default_session.run_info["collected_episodes"] = ep_counter
-        lr_gym.utils.session.default_session.run_info["collected_steps"] = step_counter
+        adarl.utils.session.default_session.run_info["collected_episodes"] = ep_counter
+        adarl.utils.session.default_session.run_info["collected_steps"] = step_counter
         # callbacks._callbacks[0].set_model(model)
         callbacks.on_collection_end(collected_steps=vsteps_to_collect*num_envs,
                                    collected_episodes=new_episodes,
@@ -421,5 +421,5 @@ def train_off_policy(collector : ExperienceCollector,
         if global_step/num_envs % log_freq == 0:
             ggLog.info(f"OFFTRAIN: expstps:{global_step} trainstps={model._tot_grad_steps_count} coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f}")
             t_train_sl, t_coll_sl, t_tot_sl = 0,0,0
-            lr_gym.utils.sigint_handler.haltOnSigintReceived()
+            adarl.utils.sigint_handler.haltOnSigintReceived()
     callbacks.on_training_end()
