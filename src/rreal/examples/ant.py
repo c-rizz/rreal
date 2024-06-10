@@ -29,11 +29,11 @@ def half_cheetah_builder(   log_folder,
                             seed,
                             env_builder_args):
     os.environ["MUJOCO_GL"]="egl"
-    gymenv = gym.make('HalfCheetah-v4',
-                    forward_reward_weight=env_builder_args["forward_reward_weight"],
-                    ctrl_cost_weight=env_builder_args["ctrl_cost_weight"],
-                    reset_noise_scale=env_builder_args["reset_noise_scale"],
-                    exclude_current_positions_from_observation=env_builder_args["exclude_current_positions_from_observation"],
+    gymenv = gym.make('Ant-v4',
+                    # forward_reward_weight=env_builder_args["forward_reward_weight"],
+                    # ctrl_cost_weight=env_builder_args["ctrl_cost_weight"],
+                    # reset_noise_scale=env_builder_args["reset_noise_scale"],
+                    # exclude_current_positions_from_observation=env_builder_args["exclude_current_positions_from_observation"],
                     max_episode_steps=env_builder_args["max_episode_steps"],
                     render_mode="rgb_array")
     gymenv = DtypeObservation(gymenv, dtype=np.float32)
@@ -177,10 +177,10 @@ def main(seed, folderName, run_id, args, env_builder_args, hyperparams):
 
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
     env_builder_args = {
-        "forward_reward_weight" : 1.0,
-        "ctrl_cost_weight" : 0.1,
-        "reset_noise_scale" : 0.1,
-        "exclude_current_positions_from_observation" : True,
+        # "forward_reward_weight" : 1.0,
+        # "ctrl_cost_weight" : 0.1,
+        # "reset_noise_scale" : 0.1,
+        # "exclude_current_positions_from_observation" : True,
         "video_save_freq" : 0,
         "max_episode_steps" : 1000, # about 50Hz
         }
