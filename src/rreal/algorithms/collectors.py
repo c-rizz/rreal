@@ -271,7 +271,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                 self._vec_env.close()
                 self._running.value = ctypes.c_bool(False)
             elif cmd is None:
-                pass # no command received, wait timed out
+                ggLog.warn(f"Worker timed out waiting for command. Will retry.")
             else:
                 ggLog.warn(f"{type(self)}: Unexpected command {cmd}")
             if cmd is not None: # if a command was actually received
