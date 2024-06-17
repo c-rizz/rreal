@@ -1,4 +1,5 @@
 
+from __future__ import annotations
 import time
 from dataclasses import dataclass, asdict
 
@@ -11,8 +12,7 @@ import torch.optim as optim
 import torch as th
 import adarl.utils.session
 from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch
-from adarl.utils.ObsConverter import ObsConverter
-from typing import List, Union, NamedTuple, Dict, Optional, Callable
+from typing import List, Union
 from rreal.utils import build_mlp_net
 import adarl.utils.dbg.ggLog as ggLog
 import adarl.utils.sigint_handler
@@ -24,20 +24,20 @@ from rreal.algorithms.rl_policy import RLPolicy
 import inspect
 import yaml
 from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree
-
+from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
+from rreal.feature_extractors.feature_extractor import FeatureExtractor
 class QNetwork(nn.Module):
-    def __init__(self, observation_space : gym.spaces.Space,
+    def __init__(self,
                  action_size : int,
                  q_network_arch : List[int],
+                 feature_extractor : FeatureExtractor,
                  torch_device : Union[str,th.device] = "cuda",
                  nets_num : int = 1):
         super().__init__()
         self._nets_num = nets_num
-        self._obs_converter = ObsConverter(observation_shape=observation_space)
-        if self._obs_converter.has_image_part():
-            raise NotImplementedError(f"Not implemented yet")
+        self._feature_extractor = feature_extractor
         self._q_nets = build_mlp_net(arch=q_network_arch,
-                                     input_size=action_size + self._obs_converter.vector_part_size(),
+                                     input_size=action_size + self._feature_extractor.encoding_size(),
                                      output_size=1,
                                      ensemble_size=self._nets_num,
                                      return_ensemble_mean=False).to(device=torch_device)
@@ -51,15 +51,15 @@ class QNetwork(nn.Module):
         return min_q
     
     def forward(self, observations, actions):
-        observations = self._obs_converter.getVectorPart(observation_batch=observations)
+        observations = self._feature_extractor.extract_features(observation_batch=observations)
         qvals = self._q_nets(torch.cat([observations, actions], 1))
         return qvals
 
 
 
 class Actor(nn.Module):
-    def __init__(self,  observation_space,
-                        action_size,
+    def __init__(self,  action_size,
+                        feature_extractor : FeatureExtractor,
                         policy_arch = [256,256],
                         action_max : Union[float, th.Tensor] = 1,
                         action_min : Union[float, th.Tensor] = -1,
@@ -69,14 +69,12 @@ class Actor(nn.Module):
         super().__init__()
         self._log_std_max = log_std_max
         self._log_std_min = log_std_min
-        self._obs_converter = ObsConverter(observation_shape=observation_space)
         self.device = torch_device
-        if self._obs_converter.has_image_part():
-            raise NotImplementedError(f"Not implemented yet")
+        self._feature_extractor = feature_extractor
         if len(policy_arch)<1:
             raise RuntimeError(f"Invalid policy arch {policy_arch}, must have at least 1 layer")
         else:
-            self.act_fc = build_mlp_net(arch=policy_arch[:-1],input_size=self._obs_converter.vector_part_size(), output_size=policy_arch[-1],
+            self.act_fc = build_mlp_net(arch=policy_arch[:-1],input_size=self._feature_extractor.encoding_size(), output_size=policy_arch[-1],
                                     last_activation_class=th.nn.LeakyReLU).to(device=torch_device)
         self.act_fc_mean = nn.Linear(policy_arch[-1], action_size, device=torch_device)
         self.act_fc_logstd = nn.Linear(policy_arch[-1], action_size, device=torch_device)
@@ -90,7 +88,7 @@ class Actor(nn.Module):
         self.register_buffer("action_bias",  torch.as_tensor((action_max + action_min) / 2.0, dtype=torch.float32, device=torch_device))
 
     def forward(self, observation_batch):
-        observation_batch = self._obs_converter.getVectorPart(observation_batch=observation_batch)
+        observation_batch = self._feature_extractor.extract_features(observation_batch=observation_batch)
         observation_batch = self.act_fc(observation_batch)
         mean = self.act_fc_mean(observation_batch)
         log_std = self.act_fc_logstd(observation_batch)
@@ -122,7 +120,7 @@ class SAC(RLPolicy):
         policy_lr : float
         gamma : float
         auto_entropy_temperature : bool
-        constant_entropy_temperature : Optional[float]
+        constant_entropy_temperature : float | None
         action_size : int
         action_min : th.Tensor
         action_max : th.Tensor
@@ -132,7 +130,7 @@ class SAC(RLPolicy):
         q_network_arch : List[int]
         policy_arch : List[int]
         torch_device : Union[str,th.device]
-        target_entropy : Optional[float]
+        target_entropy : float | None
         observation_space : gym.spaces.Space
 
     def __init__(self,
@@ -146,12 +144,13 @@ class SAC(RLPolicy):
                  action_max : Union[float, List[float]] = 1.0,
                  torch_device : Union[str,th.device] = "cuda",
                  auto_entropy_temperature : bool = True,
-                 constant_entropy_temperature : Optional[float] = None,
-                 target_entropy : Optional[float] = None,
+                 constant_entropy_temperature : float | None = None,
+                 target_entropy : float | None = None,
                  gamma : float = 0.99,
                  target_tau = 0.005,
                  policy_update_freq = 2,
-                 target_update_freq = 1):
+                 target_update_freq = 1,
+                 feature_extractor : FeatureExtractor | None = None):
         super().__init__()
         _, _, _, values = inspect.getargvalues(inspect.currentframe())
         self._init_args = values
@@ -177,19 +176,23 @@ class SAC(RLPolicy):
         self.device = torch_device
         self._value_func_updates = 0
         self._policy_updates = 0
-        self._q_net = QNetwork(observation_space=observation_space,
-                                action_size=self._hp.action_size,
+        if feature_extractor is None:
+            self._feature_extractor = StackVectorsFeatureExtractor(observation_space=observation_space)
+        else:
+            self._feature_extractor = feature_extractor
+        self._q_net = QNetwork( action_size=self._hp.action_size,
+                                feature_extractor=self._feature_extractor,
                                 q_network_arch=q_network_arch,
                                 torch_device=self._hp.torch_device,
                                 nets_num=2)
-        self._q_net_target = QNetwork(observation_space=observation_space,
-                                action_size=self._hp.action_size,
-                                q_network_arch=q_network_arch,
-                                torch_device=self._hp.torch_device,
-                                nets_num=2)
+        self._q_net_target = QNetwork(  feature_extractor=self._feature_extractor,
+                                        action_size=self._hp.action_size,
+                                        q_network_arch=q_network_arch,
+                                        torch_device=self._hp.torch_device,
+                                        nets_num=2)
         self._q_net_target.load_state_dict(self._q_net.state_dict())
         self._q_optimizer = optim.Adam(self._q_net.parameters(), lr=self._hp.q_lr)
-        self._actor = Actor(observation_space = observation_space,
+        self._actor = Actor(feature_extractor=self._feature_extractor,
                             policy_arch=policy_arch,
                             action_size = self._hp.action_size,
                             action_min = self._hp.action_min,
@@ -354,7 +357,7 @@ def train_off_policy(collector : ExperienceCollector,
           grad_steps : int,
           batch_size : int,
           log_freq : int = -1,
-          callbacks : Optional[Union[TrainingCallback, List[TrainingCallback]]] = None):
+          callbacks : Union[TrainingCallback, List[TrainingCallback]] | None = None):
     if log_freq == -1: log_freq = train_freq
     num_envs = collector.num_envs()
 

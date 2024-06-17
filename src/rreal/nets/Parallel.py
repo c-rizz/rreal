@@ -42,6 +42,7 @@ class Parallel(nn.ModuleList):
     """
     def __init__(self, modules, return_mean : bool = False, return_std = False):
         super().__init__( modules )
+        self._modules_num = len(modules)
         self._output_mean : Final[bool] = return_mean
         self._output_std : Final[bool] = return_std
         # self._streams = [th.cuda.Stream() for _ in range(len(modules))]
@@ -65,8 +66,11 @@ class Parallel(nn.ModuleList):
 
         # This gets parallelized if the moduled is compiled in torchscript
         # to compile you can do 'net = th.jit.script(Parallel(...))'
-        futures = [th.jit.fork(model, x) for model in self]
-        results = [th.jit.wait(fut) for fut in futures]
+        if self._modules_num > 1:
+            futures = [th.jit.fork(model, x) for model in self]
+            results = [th.jit.wait(fut) for fut in futures]
+        else:
+            results = [model(x) for model in self] # avoid the fork
         stacked_outs = th.stack(results, dim=1)
 
         # modules = list(self)
