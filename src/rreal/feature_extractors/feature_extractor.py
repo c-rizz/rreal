@@ -1,9 +1,7 @@
-import torch.nn as nn
-from adarl.utils.buffers import TransitionBatch
-from abc import abstractmethod
+from abc import abstractmethod, ABC
+import torch as th
 
-
-class FeatureExtractor():
+class FeatureExtractor(ABC, th.nn.Module):
     @abstractmethod
     def extract_features(self, observation_batch):
         raise NotImplementedError
@@ -11,3 +9,19 @@ class FeatureExtractor():
     @abstractmethod
     def encoding_size(self) -> int:
         raise NotImplementedError()
+    
+    @classmethod
+    @abstractmethod
+    def load(cls, path : str):
+        raise NotImplementedError()
+    
+    @abstractmethod
+    def save(self, path : str):
+        raise NotImplementedError()
+    
+    @abstractmethod
+    def train(self, global_step, grad_steps, buffer):
+        raise NotImplementedError()
+    
+    def get_init_args(self):
+        return self._init_args

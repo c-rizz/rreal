@@ -20,9 +20,9 @@ import adarl.utils.mp_helper as mp_helper
 import adarl.utils.session as session
 from adarl.utils.utils import pyTorch_makeDeterministic
 from rreal.algorithms.rl_policy import RLPolicy
+from abc import ABC, abstractmethod
 
-
-class ExperienceCollector():
+class ExperienceCollector(ABC):
     def __init__(self, vec_env : gym.vector.VectorEnv,
                         base_model : Optional[RLPolicy] = None,
                         buffer : Optional[BasicStorage] = None):
@@ -38,6 +38,14 @@ class ExperienceCollector():
     def reset(self):
         if self._vec_env is not None:
             self._current_obs, info = self._vec_env.reset()
+            
+    @abstractmethod
+    def observation_space(self) -> gym.Space:
+        raise NotImplementedError()
+    
+    @abstractmethod
+    def action_space(self) -> gym.Space:
+        raise NotImplementedError()
 
     def collect_experience(self, policy, vsteps_to_collect, global_vstep_count, random_vsteps, policy_device,
                            buffer : BasicStorage):
