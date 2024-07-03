@@ -98,27 +98,25 @@ def main(seed, folderName, run_id, args, env_builder_args, hyperparams):
     num_envs = 16
     use_processes = True
     if use_processes:
-        vec_env_builder = lambda: build_vec_env(env_builder_args=env_builder_args, log_folder=log_folder, seed=seed, num_envs=num_envs)
-        collector = AsyncProcessExperienceCollector(vec_env_builder=vec_env_builder, 
-                                            base_model_builder=lambda o,a: build_sac(o,a,hyperparams),
-                                            storage_torch_device=device,
-                                            buffer_size=hyperparams["train_freq"]*num_envs,
-                                            session=session)
-        observation_space = collector.observation_space()
-        action_space = collector.action_space()
-        model = build_sac(observation_space, action_space, hyperparams)
+        collector = AsyncProcessExperienceCollector(
+                            vec_env_builder=lambda: build_vec_env(env_builder_args=env_builder_args,
+                                                                log_folder=log_folder,
+                                                                seed=seed,
+                                                                num_envs=num_envs),
+                            storage_torch_device=device,
+                            buffer_size=hyperparams["train_freq"]*num_envs,
+                            session=session)
     else:
-        vec_env = build_vec_env(env_builder_args=env_builder_args,
-                            log_folder=log_folder,
-                            seed=seed,
-                            num_envs=num_envs)
-        observation_space = vec_env.single_observation_space
-        action_space = vec_env.single_action_space
-        model = build_sac(observation_space, action_space, hyperparams)
-        collector = AsyncThreadExperienceCollector(vec_env=vec_env,
-                                    base_model=model,
-                                    buffer_size=hyperparams["train_freq"]*num_envs,
-                                    storage_torch_device=device)
+        collector = AsyncThreadExperienceCollector( vec_env=build_vec_env(env_builder_args=env_builder_args,
+                                                                log_folder=log_folder,
+                                                                seed=seed,
+                                                                num_envs=num_envs),
+                                                    buffer_size=hyperparams["train_freq"]*num_envs,
+                                                    storage_torch_device=device)
+    observation_space = collector.observation_space()
+    action_space = collector.action_space()
+    collector.set_base_collector_model(lambda o,a: build_sac(o,a,hyperparams))
+    model = build_sac(observation_space, action_space, hyperparams)
 
     # torchexplorer.watch(model, backend="wandb")
     wandb.watch((model, model._actor, model._q_net), log="all", log_freq=1000, log_graph=True)

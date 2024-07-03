@@ -476,7 +476,7 @@ def train_off_policy(collector : ExperienceCollector,
             ggLog.info(f"OFFTRAIN: expstps:{global_step}"
                        f" trainstps={model._tot_grad_steps_count}"
                     #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"
-                       f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f}")
+                       f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f} tfps={steps_to_collect/t_tot_sl:.2f} cfps={steps_to_collect/t_coll_sl:.2f}")
             t_train_sl, t_coll_sl, t_tot_sl = 0,0,0
             adarl.utils.sigint_handler.haltOnSigintReceived()
     callbacks.on_training_end()

@@ -24,12 +24,10 @@ from abc import ABC, abstractmethod
 
 class ExperienceCollector(ABC):
     def __init__(self, vec_env : gym.vector.VectorEnv,
-                        base_model : Optional[RLPolicy] = None,
                         buffer : Optional[BasicStorage] = None):
         self._vec_env = vec_env
         self._current_obs = None
-
-        self._collector_model = copy.deepcopy(base_model)
+        self._collector_model : th.nn.Module
         self._buffer = buffer
 
     def num_envs(self):
@@ -130,14 +128,13 @@ class ExperienceCollector(ABC):
 
 class AsyncThreadExperienceCollector(ExperienceCollector):
     def __init__(self, vec_env : gym.vector.VectorEnv,
-                        base_model,
                         buffer_size : int,
                         storage_torch_device):
         super().__init__(vec_env=vec_env)
 
         self._start_collect = threading.Event()
         self._collect_done = threading.Event()
-        self._collector_model = copy.deepcopy(base_model)
+        self._collector_model : th.nn.Module
         self._running = True
         self._buffer_size = buffer_size
         self._storage_torch_device = storage_torch_device
@@ -150,6 +147,9 @@ class AsyncThreadExperienceCollector(ExperienceCollector):
                                     allow_rollover=False)
         self._collector_thread = threading.Thread(target=self._worker, name="AsyncThreadExperienceCollector_worker")
         self._collector_thread.start()
+
+    def set_base_collector_model(self, model_builder : Callable[[gym.spaces.Space, gym.spaces.Space],th.nn.Module]):
+        self._collector_model = copy.deepcopy(model_builder(self.observation_space(), self.action_space()))
 
     def _worker(self):
         while self._running and not session.default_session.is_shutting_down():
@@ -196,7 +196,6 @@ class AsyncThreadExperienceCollector(ExperienceCollector):
 
 class AsyncProcessExperienceCollector(ExperienceCollector):
     def __init__(self, vec_env_builder : Callable[[],gym.vector.VectorEnv],
-                 base_model_builder : Callable[[gym.spaces.Space, gym.spaces.Space],th.nn.Module],
                  buffer_size, storage_torch_device, start_method : Literal['fork', 'spawn', 'forkserver']= "forkserver",
                  session : session.Session = None,
                  seed : int = 0):
@@ -204,7 +203,8 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         self._buffer_size = buffer_size
         self._storage_torch_device = storage_torch_device
         self._vec_env_builder = CloudpickleWrapper(vec_env_builder)
-        self._base_model_builder = CloudpickleWrapper(base_model_builder)
+        self._state_dict : dict[str,th.Tensor]
+        
         ctx = mp_helper.get_context(method=start_method)
         self._commander = SimpleCommander(mp_context=ctx, n_envs=1, timeout_s=60)
         self._collect_args = ctx.Array(ctypes.c_uint64, 3, lock = False)
@@ -219,11 +219,14 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         self._seed = seed
         p2.close()
 
-        self._commander.set_command("build")
+        self._build_env()
+
+    def _build_env(self):
+        self._commander.set_command("build_env")
         self._commander.wait_done(timeout=60)
         self._obs_space : gym.Space
         self._action_space : gym.Space
-        self._buffer, self._obs_space, self._action_space, self._num_envs, self._collector_model = self._pipe.recv()
+        self._buffer, self._obs_space, self._action_space, self._num_envs = self._pipe.recv()
 
     def observation_space(self) -> gym.Space:
         return self._obs_space
@@ -233,6 +236,13 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
 
     def num_envs(self):
         return self._num_envs    
+
+    def set_base_collector_model(self, model_builder : Callable[[gym.spaces.Space, gym.spaces.Space],th.nn.Module]):
+        self._base_model_builder = CloudpickleWrapper(model_builder)
+        self._pipe.send(self._base_model_builder)
+        self._commander.set_command("build_model")
+        self._commander.wait_done(timeout=60)
+        self._state_dict = self._pipe.recv()
 
     def _worker(self, pipe, parent_session):
         ggLog.info(f"AsyncProcessExperienceCollector worker started with pid {os.getpid()}")
@@ -244,7 +254,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
             # ggLog.info(f"waiting command")
             cmd = self._commander.wait_command()
             # ggLog.info(f"got command {cmd}")
-            if cmd == b"build":
+            if cmd == b"build_env":
                 self._vec_env : gym.vector.VectorEnv = self._vec_env_builder.var()
                 self.reset()
                 self._buffer = BasicStorage(buffer_size = self._buffer_size,
@@ -257,12 +267,18 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                 self._obs_space = self._vec_env.single_observation_space
                 self._action_space = self._vec_env.single_action_space
                 self._num_envs = self._vec_env.num_envs
-                self._collector_model = self._base_model_builder.var(self._obs_space, self._action_space)
                 self._pipe.send((self._buffer, 
                                  self._obs_space,
                                  self._action_space,
-                                 self._num_envs,
-                                 self._collector_model))
+                                 self._num_envs))
+            if cmd == b"build_model":
+                # To ensure the correctly built model is used for collection we build it
+                # directyl in the worker, to avoid any issue that may arise by sending it 
+                # throucgh the pipe. Then we update its parameters by sharing the state dict
+                self._base_model_builder = self._pipe.recv()
+                self._collector_model = self._base_model_builder.var(self._obs_space, self._action_space)
+                self._state_dict = self._collector_model.state_dict()
+                self._pipe.send(self._state_dict)
             elif cmd == b"collect":
                 vsteps_to_collect, global_vstep_count, random_vsteps = self._collect_args
                 self._buffer.clear()
@@ -288,7 +304,8 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         ggLog.info(f"Collector worker terminating")
 
     def collect_experience_async(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):
-        self._collector_model.load_state_dict(model_state_dict, assign=False)
+        for n,t in model_state_dict.items():
+            self._state_dict[n].copy_(t)
         self._collect_args[:] = vsteps_to_collect, global_vstep_count, random_vsteps
         self._commander.set_command("collect")
 
