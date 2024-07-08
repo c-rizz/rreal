@@ -48,6 +48,24 @@ def half_cheetah_builder(   log_folder,
     
     return GymEnvWrapper(env=lrenv,
                         episodeInfoLogFile = log_folder+f"/GymEnvWrapper_log.{seed:010d}.csv")
+
+
+def half_cheetah_builder(   log_folder,
+                            seed,
+                            env_builder_args):
+    os.environ["MUJOCO_GL"]="egl"
+    gymenv = gym.make('InvertedPendulum-v4', render_mode="rgb_array")
+    gymenv = DtypeObservation(gymenv, dtype=np.float32)
+    lrenv = GymToLr(gymenv,
+                    stepSimDuration_sec=0.05,
+                    maxStepsPerEpisode=env_builder_args["max_episode_steps"],
+                    copy_observations=True,
+                    actions_to_numpy=True)
+    lrenv = ObsToDict(env=lrenv)
+    lrenv.seed(seed=seed)
+    
+    return GymEnvWrapper(env=lrenv,
+                        episodeInfoLogFile = log_folder+f"/GymEnvWrapper_log.{seed:010d}.csv")
     
 
 def build_vec_env(env_builder_args, log_folder, seed, num_envs) -> gym.vector.VectorEnv:
