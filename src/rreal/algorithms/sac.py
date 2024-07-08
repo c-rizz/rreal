@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch as th
 import adarl.utils.session
-from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch
+from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch, BaseBuffer
 from typing import List, Union
 from rreal.utils import build_mlp_net
 import adarl.utils.dbg.ggLog as ggLog
@@ -26,6 +26,7 @@ from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flat
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors import get_feature_extractor
+
 class QNetwork(nn.Module):
     def __init__(self,
                  action_size : int,
@@ -131,6 +132,7 @@ class SAC(RLPolicy):
         target_entropy : float | None
         observation_space : gym.spaces.Space
         feature_extractor_lr : float
+        batch_size : int
 
     def __init__(self,
                  observation_space : gym.spaces.Space,
@@ -150,7 +152,8 @@ class SAC(RLPolicy):
                  policy_update_freq = 2,
                  target_update_freq = 1,
                  feature_extractor : FeatureExtractor | None = None,
-                 feature_extractor_lr = 0.0):
+                 feature_extractor_lr = 0.0,
+                 batch_size = 512):
         super().__init__()
         _, _, _, values = inspect.getargvalues(inspect.currentframe())
         self._init_args = values
@@ -173,7 +176,8 @@ class SAC(RLPolicy):
                                    torch_device = torch_device,
                                    target_entropy = target_entropy,
                                    observation_space = observation_space,
-                                   feature_extractor_lr = feature_extractor_lr)
+                                   feature_extractor_lr = feature_extractor_lr,
+                                   batch_size = batch_size)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = torch_device
         self._value_func_updates = 0
@@ -222,6 +226,9 @@ class SAC(RLPolicy):
         self._last_alpha_loss = th.as_tensor(float("nan"), device=self.device)
         self._tot_grad_steps_count = 0
 
+    def get_feature_extractor(self):
+        return self._feature_extractor
+
     def save(self, path : str):
         th.save(self.state_dict(), path)
         extra = {}
@@ -246,13 +253,13 @@ class SAC(RLPolicy):
             ggLog.warn(f"load init_args  = \n{yaml.dump(extra['init_args'])}")
             raise RuntimeError("Unmatched init_args")
         if self._feature_extractor.__class__.__name__ != extra["feature_extractor_class_name"]:
-            ggLog.warn("feature_extractor_class_name of loaded model differs from that of self.")
-            ggLog.warn(f"loaded = {extra['feature_extractor_class_name']}, self's = {self._feature_extractor.__class__.__name__}")
+            ggLog.warn(f"feature_extractor_class_name of loaded model differs from that of self.\n"
+                       f"loaded = {extra['feature_extractor_class_name']}, self's = {self._feature_extractor.__class__.__name__}")
             raise RuntimeError("Unmatched init_args")
         if  self._feature_extractor.get_init_args() != extra["feature_extractor_init_args"]:
-            ggLog.warn("init args of loaded model differ from those of self.")
-            ggLog.warn(f"self._init_args = \n{yaml.dump(self._init_args)}")
-            ggLog.warn(f"load init_args  = \n{yaml.dump(extra['feature_extractor_init_args'])}")
+            ggLog.warn(f"init args of loaded model differ from those of self.\n"
+                       f"self._init_args = \n{yaml.dump(self._init_args)}\n"
+                       f"load init_args  = \n{yaml.dump(extra['feature_extractor_init_args'])}")
             raise RuntimeError("Unmatched init_args")
         self.load_state_dict(th.load(path))
 
@@ -265,7 +272,7 @@ class SAC(RLPolicy):
         feature_extractor_class = get_feature_extractor(extra["feature_extractor_class_name"])
         extra["feature_extractor"] = feature_extractor_class.load(path+".feature_extractor")
         model = SAC(**extra["init_args"])
-        model.load_state_dict(th.load(path))
+        model.load_(path)
         return model
 
     def predict_action(self, observation_batch, deterministic = False):
@@ -379,11 +386,11 @@ class SAC(RLPolicy):
             self._update_feature_extractor()
         return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
 
-    def train(self, global_step, iterations, batch_size, buffer):
+    def train(self, global_step, iterations, buffer):
         q_loss, actor_loss, alpha_loss = float("nan"), float("nan"), float("nan")
         q_act_alpha_losses = th.zeros(size=(iterations, 3), dtype=th.float32, device=self.device)
         for i in range(iterations):
-            data = buffer.sample(batch_size)
+            data = buffer.sample(self._hp.batch_size)
             nq_loss, nactor_loss, nalpha_loss = self.update(transitions = data)
             q_act_alpha_losses[i] = th.stack((nq_loss,nactor_loss,nalpha_loss))
             self._tot_grad_steps_count += 1
@@ -400,12 +407,11 @@ class SAC(RLPolicy):
 
 def train_off_policy(collector : ExperienceCollector,
           model : SAC,
-          buffer : ThDReplayBuffer,
+          buffer : BaseBuffer,
           total_timesteps : int,
           train_freq : int,
           learning_starts : int,
           grad_steps : int,
-          batch_size : int,
           log_freq : int = -1,
           callbacks : Union[TrainingCallback, List[TrainingCallback]] | None = None):
     if log_freq == -1: log_freq = train_freq
@@ -427,8 +433,9 @@ def train_off_policy(collector : ExperienceCollector,
     callbacks.on_training_start()
     ep_counter = 0
     step_counter = 0
+    steps_sl = 0
     while global_step < total_timesteps and not adarl.utils.session.default_session.is_shutting_down():
-        s0b = buffer.stored_frames()
+        s0b = buffer.collected_frames()
         t0 = time.monotonic()
 
         # ------------------  Start experience collection  ------------------
@@ -443,7 +450,7 @@ def train_off_policy(collector : ExperienceCollector,
         # ------------------             Train             ------------------
         t_before_train = time.monotonic()
         if global_step > learning_starts:
-            model.train(global_step, grad_steps, batch_size, buffer)
+            model.train(global_step, grad_steps, buffer)
         t_after_train = time.monotonic()
 
         # ------------------   Store collected experience  ------------------
@@ -458,17 +465,16 @@ def train_off_policy(collector : ExperienceCollector,
         callbacks.on_collection_end(collected_steps=vsteps_to_collect*num_envs,
                                    collected_episodes=new_episodes,
                                    collected_data=tmp_buff)
-        s = 0
+        
         for (obs, next_obs, action, reward, terminated, truncated) in tmp_buff.replay():
-            # ggLog.info(f"replaying step {s} ")
-            s+=1
             buffer.add(obs=obs, next_obs=next_obs, action=action, reward=reward,
                         truncated=truncated, terminated=terminated)
 
         # ------------------      Wrap up and restart      ------------------
-        if buffer.stored_frames()-s0b != steps_to_collect and not buffer.full:
+        if buffer.collected_frames()-s0b != steps_to_collect:
             raise RuntimeError(f"Expected to collect {steps_to_collect} but got {buffer.stored_frames()-s0b}")
         global_step += steps_to_collect
+        steps_sl += steps_to_collect
         tf = time.monotonic()
         t_train_sl += t_after_train - t_before_train
         t_tot_sl += tf-t0
@@ -476,7 +482,7 @@ def train_off_policy(collector : ExperienceCollector,
             ggLog.info(f"OFFTRAIN: expstps:{global_step}"
                        f" trainstps={model._tot_grad_steps_count}"
                     #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"
-                       f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f} tfps={steps_to_collect/t_tot_sl:.2f} cfps={steps_to_collect/t_coll_sl:.2f}")
-            t_train_sl, t_coll_sl, t_tot_sl = 0,0,0
+                       f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f} tfps={steps_sl/t_tot_sl:.2f} cfps={steps_sl/t_coll_sl:.2f}")
+            t_train_sl, t_coll_sl, t_tot_sl, steps_sl = 0,0,0,0
             adarl.utils.sigint_handler.haltOnSigintReceived()
     callbacks.on_training_end()

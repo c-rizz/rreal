@@ -21,6 +21,7 @@ import adarl.utils.session as session
 from adarl.utils.utils import pyTorch_makeDeterministic
 from rreal.algorithms.rl_policy import RLPolicy
 from abc import ABC, abstractmethod
+import atexit
 
 class ExperienceCollector(ABC):
     def __init__(self, vec_env : gym.vector.VectorEnv,
@@ -29,6 +30,9 @@ class ExperienceCollector(ABC):
         self._current_obs = None
         self._collector_model : th.nn.Module
         self._buffer = buffer
+
+    def set_base_collector_model(self, model_builder : Callable[[gym.spaces.Space, gym.spaces.Space],th.nn.Module]):
+        self._collector_model = copy.deepcopy(model_builder(self.observation_space(), self.action_space()))
 
     def num_envs(self):
         return self._vec_env.num_envs
@@ -125,6 +129,9 @@ class ExperienceCollector(ABC):
         if self._buffer is None:
             raise RuntimeError(f"Called collect_experience_async but buffer was not provided")
         return self._buffer
+    
+    def close(self):
+        pass
 
 class AsyncThreadExperienceCollector(ExperienceCollector):
     def __init__(self, vec_env : gym.vector.VectorEnv,
@@ -147,9 +154,6 @@ class AsyncThreadExperienceCollector(ExperienceCollector):
                                     allow_rollover=False)
         self._collector_thread = threading.Thread(target=self._worker, name="AsyncThreadExperienceCollector_worker")
         self._collector_thread.start()
-
-    def set_base_collector_model(self, model_builder : Callable[[gym.spaces.Space, gym.spaces.Space],th.nn.Module]):
-        self._collector_model = copy.deepcopy(model_builder(self.observation_space(), self.action_space()))
 
     def _worker(self):
         while self._running and not session.default_session.is_shutting_down():
@@ -220,13 +224,14 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         p2.close()
 
         self._build_env()
+        atexit.register(self.close)
 
     def _build_env(self):
         self._commander.set_command("build_env")
-        self._commander.wait_done(timeout=60)
         self._obs_space : gym.Space
         self._action_space : gym.Space
         self._buffer, self._obs_space, self._action_space, self._num_envs = self._pipe.recv()
+        self._commander.wait_done(timeout=60)
 
     def observation_space(self) -> gym.Space:
         return self._obs_space
@@ -255,8 +260,11 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
             cmd = self._commander.wait_command()
             # ggLog.info(f"got command {cmd}")
             if cmd == b"build_env":
+                ggLog.info(f"Building env")
                 self._vec_env : gym.vector.VectorEnv = self._vec_env_builder.var()
+                ggLog.info(f"Built env")
                 self.reset()
+                ggLog.info(f"Building storage")
                 self._buffer = BasicStorage(buffer_size = self._buffer_size,
                                             observation_space=self._vec_env.single_observation_space,
                                             action_space=self._vec_env.single_action_space,

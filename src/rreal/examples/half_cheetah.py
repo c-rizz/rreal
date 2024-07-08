@@ -13,6 +13,7 @@ import inspect
 import adarl.utils.session
 from adarl.envs.vector_env_logger import VectorEnvLogger
 from adarl.utils.buffers import ThDReplayBuffer
+from adarl.utils.ThDictEpReplayBuffer import ThDictEpReplayBuffer
 import adarl.utils.sigint_handler
 from rreal.algorithms.sac import SAC, train_off_policy
 from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector
@@ -73,7 +74,8 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams):
                 gamma=0.99,
                 target_tau = 0.005,
                 policy_update_freq=2,
-                target_update_freq=1)
+                target_update_freq=1,
+                batch_size=2048)
 
 
 
@@ -95,7 +97,7 @@ def main(seed, folderName, run_id, args, env_builder_args, hyperparams):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     hyperparams["device"] = device
     # env setup
-    num_envs = 16
+    num_envs = 32
     use_processes = True
     if use_processes:
         collector = AsyncProcessExperienceCollector(
@@ -123,14 +125,31 @@ def main(seed, folderName, run_id, args, env_builder_args, hyperparams):
 
     # compiled_model = th.compile(model)
 
-    rb = ThDReplayBuffer(
-        buffer_size=10_000_000,
-        observation_space=observation_space,
-        action_space=action_space,
-        device=device,
-        storage_torch_device=device,
-        handle_timeout_termination=True,
-        n_envs=num_envs)
+    # rb = ThDReplayBuffer(
+    #     buffer_size=10_000_000,
+    #     observation_space=observation_space,
+    #     action_space=action_space,
+    #     device=device,
+    #     storage_torch_device=device,
+    #     handle_timeout_termination=True,
+    #     n_envs=num_envs)
+    
+    rb = ThDictEpReplayBuffer(buffer_size = 10_000_000,
+                                observation_space = observation_space,
+                                action_space = action_space,
+                                device = device,
+                                n_envs = num_envs,
+                                optimize_memory_usage = False,
+                                storage_torch_device = device,
+                                max_episode_duration = env_builder_args["max_episode_steps"],
+                                validation_buffer_size = 0,
+                                validation_holdout_ratio = 0,
+                                min_episode_duration = 0,
+                                disable_validation_set = True,
+                                fill_val_buffer_to_min_at_ep = float("+inf"),
+                                val_buffer_min_size = 0)
+    
+
     start_time = time.time()
 
     eval_env = half_cheetah_builder(log_folder=log_folder+"/eval",
@@ -166,7 +185,6 @@ def main(seed, folderName, run_id, args, env_builder_args, hyperparams):
             train_freq = hyperparams["train_freq"],
             learning_starts=500*num_envs*5,
             grad_steps=hyperparams["grad_steps"],
-            batch_size=16384,
             log_freq=500,
             callbacks=callbacks)
     finally:
