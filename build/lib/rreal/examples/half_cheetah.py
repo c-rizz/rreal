@@ -166,7 +166,7 @@ def main(seed, folderName, run_id, args, env_builder_args, hyperparams):
             learning_starts=500*num_envs*5,
             grad_steps=hyperparams["grad_steps"],
             batch_size=16384,
-            log_freq=500,
+            log_freq_vstep=500,
             callbacks=callbacks)
     finally:
         collector.close()

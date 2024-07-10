@@ -386,7 +386,7 @@ class SAC(RLPolicy):
             self._update_feature_extractor()
         return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
 
-    def train(self, global_step, iterations, buffer):
+    def train(self, global_step, iterations, buffer) -> tuple[float,float,float]:
         q_loss, actor_loss, alpha_loss = float("nan"), float("nan"), float("nan")
         q_act_alpha_losses = th.zeros(size=(iterations, 3), dtype=th.float32, device=self.device)
         for i in range(iterations):
@@ -402,7 +402,7 @@ class SAC(RLPolicy):
                     "sac/alpha_loss":alpha_loss,
                     "sac/alpha":self._alpha},
                     throttle_period=2)
-        print(f"SAC: gsteps={self._tot_grad_steps_count} q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}")
+        return q_loss, actor_loss, alpha_loss
 
 
 def train_off_policy(collector : ExperienceCollector,
@@ -412,9 +412,9 @@ def train_off_policy(collector : ExperienceCollector,
           train_freq : int,
           learning_starts : int,
           grad_steps : int,
-          log_freq : int = -1,
+          log_freq_vstep : int = -1,
           callbacks : Union[TrainingCallback, List[TrainingCallback]] | None = None):
-    if log_freq == -1: log_freq = train_freq
+    if log_freq_vstep == -1: log_freq_vstep = train_freq
     num_envs = collector.num_envs()
 
     collector.reset()
@@ -434,6 +434,7 @@ def train_off_policy(collector : ExperienceCollector,
     ep_counter = 0
     step_counter = 0
     steps_sl = 0
+    q_loss, actor_loss, alpha_loss = float("nan"),float("nan"),float("nan")
     while global_step < total_timesteps and not adarl.utils.session.default_session.is_shutting_down():
         s0b = buffer.collected_frames()
         t0 = time.monotonic()
@@ -450,7 +451,7 @@ def train_off_policy(collector : ExperienceCollector,
         # ------------------             Train             ------------------
         t_before_train = time.monotonic()
         if global_step > learning_starts:
-            model.train(global_step, grad_steps, buffer)
+            q_loss, actor_loss, alpha_loss = model.train(global_step, grad_steps, buffer)
         t_after_train = time.monotonic()
 
         # ------------------   Store collected experience  ------------------
@@ -478,7 +479,8 @@ def train_off_policy(collector : ExperienceCollector,
         tf = time.monotonic()
         t_train_sl += t_after_train - t_before_train
         t_tot_sl += tf-t0
-        if global_step/num_envs % log_freq == 0:
+        if global_step/num_envs % log_freq_vstep == 0:
+            ggLog.info(f"SAC: expsteps={global_step} q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}")
             ggLog.info(f"OFFTRAIN: expstps:{global_step}"
                        f" trainstps={model._tot_grad_steps_count}"
                     #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"

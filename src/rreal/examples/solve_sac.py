@@ -27,9 +27,7 @@ from adarl.envs.lr_wrappers.ObsToDict import ObsToDict
 from rreal.tmp.gym_transform_observation import DtypeObservation
 import copy
 
-def gym_builder(   log_folder,
-                            seed,
-                            env_builder_args):
+def gym_builder(seed, log_folder, env_builder_args):
     os.environ["MUJOCO_GL"]="egl"
     env_kwargs : dict = copy.deepcopy(env_builder_args)
     env_kwargs.pop("env_name")
@@ -50,8 +48,8 @@ def gym_builder(   log_folder,
 
     
 
-def build_vec_env(env_builder_args, log_folder, seed, num_envs) -> gym.vector.VectorEnv:
-    builders = [(lambda i: (lambda: gym_builder(log_folder=log_folder,
+def build_vec_env(env_builder, env_builder_args, log_folder, seed, num_envs) -> gym.vector.VectorEnv:
+    builders = [(lambda i: (lambda: env_builder(log_folder=log_folder,
                                                   seed=seed+100000*i,
                                                   env_builder_args = env_builder_args)
                                 ))(i) for i in range(num_envs)]
@@ -74,7 +72,8 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams):
                 gamma=hyperparams.gamma,
                 target_tau = hyperparams.target_tau,
                 policy_update_freq=2,
-                target_update_freq=1)
+                target_update_freq=1,
+                batch_size = hyperparams.batch_size)
 
 
 from dataclasses import dataclass
@@ -93,9 +92,12 @@ class SAC_hyperparams:
     learning_starts : int
     grad_steps : int
     batch_size : int
+    parallel_envs : int
+    log_freq_vstep : int
+    eval_freq_ep : int
 
 
-def solve_sac(seed, folderName, run_id, args, env_builder_args, hyperparams : SAC_hyperparams):
+def solve_sac(seed, folderName, run_id, args, env_builder, env_builder_args, hyperparams : SAC_hyperparams):
 
     log_folder, session = adarl.utils.session.adarl_startup(   __file__,
                                                         inspect.currentframe(),
@@ -113,30 +115,28 @@ def solve_sac(seed, folderName, run_id, args, env_builder_args, hyperparams : SA
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     hyperparams.device = device
     # env setup
-    num_envs = 16
+    num_envs = hyperparams.parallel_envs
     use_processes = True
     if use_processes:
-        vec_env_builder = lambda: build_vec_env(env_builder_args=env_builder_args, log_folder=log_folder, seed=seed, num_envs=num_envs)
-        collector = AsyncProcessExperienceCollector(vec_env_builder=vec_env_builder, 
-                                            base_model_builder=lambda o,a: build_sac(o,a,hyperparams),
-                                            storage_torch_device=device,
-                                            buffer_size=hyperparams.train_freq*num_envs,
-                                            session=session)
-        observation_space = collector.observation_space()
-        action_space = collector.action_space()
-        model = build_sac(observation_space, action_space, hyperparams)
+        collector = AsyncProcessExperienceCollector(
+                            vec_env_builder=lambda: build_vec_env(env_builder, env_builder_args=env_builder_args,
+                                                                log_folder=log_folder,
+                                                                seed=seed,
+                                                                num_envs=num_envs),
+                            storage_torch_device=device,
+                            buffer_size=hyperparams.train_freq*num_envs,
+                            session=session)
     else:
-        vec_env = build_vec_env(env_builder_args=env_builder_args,
-                            log_folder=log_folder,
-                            seed=seed,
-                            num_envs=num_envs)
-        observation_space = vec_env.single_observation_space
-        action_space = vec_env.single_action_space
-        model = build_sac(observation_space, action_space, hyperparams)
-        collector = AsyncThreadExperienceCollector(vec_env=vec_env,
-                                    base_model=model,
-                                    buffer_size=hyperparams.train_freq*num_envs,
-                                    storage_torch_device=device)
+        collector = AsyncThreadExperienceCollector( vec_env=build_vec_env(env_builder, env_builder_args=env_builder_args,
+                                                                log_folder=log_folder,
+                                                                seed=seed,
+                                                                num_envs=num_envs),
+                                                    buffer_size=hyperparams.train_freq*num_envs,
+                                                    storage_torch_device=device)
+    observation_space = collector.observation_space()
+    action_space = collector.action_space()
+    collector.set_base_collector_model(lambda o,a: build_sac(o,a,hyperparams))
+    model = build_sac(observation_space, action_space, hyperparams)
 
     # torchexplorer.watch(model, backend="wandb")
     wandb.watch((model, model._actor, model._q_net), log="all", log_freq=1000, log_graph=True)
@@ -151,6 +151,7 @@ def solve_sac(seed, folderName, run_id, args, env_builder_args, hyperparams : SA
         storage_torch_device=device,
         handle_timeout_termination=True,
         n_envs=num_envs)
+    
     start_time = time.time()
 
     eval_env = gym_builder(log_folder=log_folder+"/eval",
@@ -167,12 +168,12 @@ def solve_sac(seed, folderName, run_id, args, env_builder_args, hyperparams : SA
     callbacks.append(EvalCallback(eval_env=eval_env_rec,
                                   model=model,
                                   n_eval_episodes=1,
-                                  eval_freq_ep=10*num_envs,
+                                  eval_freq_ep=hyperparams.eval_freq_ep*num_envs,
                                   deterministic=False))
     callbacks.append(EvalCallback(eval_env=eval_env_rec_det,
                                   model=model,
                                   n_eval_episodes=1,
-                                  eval_freq_ep=10*num_envs,
+                                  eval_freq_ep=hyperparams.eval_freq_ep*num_envs,
                                   deterministic=True))
     callbacks.append(CheckpointCallbackRB(save_path=log_folder+"/checkpoints",
                                           model=model,
@@ -186,8 +187,7 @@ def solve_sac(seed, folderName, run_id, args, env_builder_args, hyperparams : SA
             train_freq = hyperparams.train_freq,
             learning_starts=hyperparams.learning_starts,
             grad_steps=hyperparams.grad_steps,
-            batch_size=hyperparams.batch_size,
-            log_freq=500,
+            log_freq_vstep=hyperparams.log_freq_vstep,
             callbacks=callbacks)
     finally:
         collector.close()
