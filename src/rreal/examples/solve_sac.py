@@ -99,10 +99,9 @@ class SAC_hyperparams:
 
 def solve_sac(seed, folderName, run_id, args, env_builder, env_builder_args, hyperparams : SAC_hyperparams):
 
-    log_folder, session = adarl.utils.session.adarl_startup(   __file__,
+    log_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
                                                         seed=seed,
-                                                        experiment_name=os.path.basename(__file__),
                                                         run_id=run_id,
                                                         run_comment=args["comment"],
                                                         folderName=folderName)

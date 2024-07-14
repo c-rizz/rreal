@@ -435,6 +435,7 @@ def train_off_policy(collector : ExperienceCollector,
     step_counter = 0
     steps_sl = 0
     q_loss, actor_loss, alpha_loss = float("nan"),float("nan"),float("nan")
+    start_time = time.monotonic()
     while global_step < total_timesteps and not adarl.utils.session.default_session.is_shutting_down():
         s0b = buffer.collected_frames()
         t0 = time.monotonic()
@@ -479,12 +480,15 @@ def train_off_policy(collector : ExperienceCollector,
         tf = time.monotonic()
         t_train_sl += t_after_train - t_before_train
         t_tot_sl += tf-t0
+        t = time.monotonic()
         if global_step/num_envs % log_freq_vstep == 0:
             ggLog.info(f"SAC: expsteps={global_step} q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}")
             ggLog.info(f"OFFTRAIN: expstps:{global_step}"
                        f" trainstps={model._tot_grad_steps_count}"
                     #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"
-                       f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f} tfps={steps_sl/t_tot_sl:.2f} cfps={steps_sl/t_coll_sl:.2f}")
+                       f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f}"
+                       f" tfps={steps_sl/t_tot_sl:.2f} cfps={steps_sl/t_coll_sl:.2f}"
+                       f" alltime_ips={global_step/(t-start_time)} alltime_fps={model._tot_grad_steps_count/(t-start_time)}")
             t_train_sl, t_coll_sl, t_tot_sl, steps_sl = 0,0,0,0
             adarl.utils.sigint_handler.haltOnSigintReceived()
     callbacks.on_training_end()
