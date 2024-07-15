@@ -391,6 +391,8 @@ class SAC(RLPolicy):
         q_act_alpha_losses = th.zeros(size=(iterations, 3), dtype=th.float32, device=self.device)
         for i in range(iterations):
             data = buffer.sample(self._hp.batch_size)
+            data = map_tensor_tree(data, lambda t : t.to(device=self.device, non_blocking=True))
+            th.cuda.current_stream().synchronize()
             nq_loss, nactor_loss, nalpha_loss = self.update(transitions = data)
             q_act_alpha_losses[i] = th.stack((nq_loss,nactor_loss,nalpha_loss))
             self._tot_grad_steps_count += 1
