@@ -26,17 +26,23 @@ from adarl.envs.GymToLr import GymToLr
 from adarl.envs.lr_wrappers.ObsToDict import ObsToDict
 from rreal.tmp.gym_transform_observation import DtypeObservation
 import copy
+import typing
 
-def gym_builder(seed, log_folder, env_builder_args):
+class EnvBuilderProtocol(typing.Protocol):
+    def __call__(self, seed : int, log_folder : str, is_eval : bool, env_builder_args : dict) -> tuple[gym.Env,float]:
+        ...
+
+def gym_builder(seed, log_folder, is_eval, env_builder_args):
     os.environ["MUJOCO_GL"]="egl"
     env_kwargs : dict = copy.deepcopy(env_builder_args)
+    stepLength_sec = 0.05
     env_kwargs.pop("env_name")
     gymenv = gym.make(env_builder_args["env_name"],
                     render_mode="rgb_array",
                     **env_kwargs)
     gymenv = DtypeObservation(gymenv, dtype=np.float32)
     lrenv = GymToLr(gymenv,
-                    stepSimDuration_sec=0.05,
+                    stepSimDuration_sec=stepLength_sec,
                     maxStepsPerEpisode=env_builder_args["max_episode_steps"],
                     copy_observations=True,
                     actions_to_numpy=True)
@@ -44,18 +50,32 @@ def gym_builder(seed, log_folder, env_builder_args):
     lrenv.seed(seed=seed)
     
     return GymEnvWrapper(env=lrenv,
-                        episodeInfoLogFile = log_folder+f"/GymEnvWrapper_log.{seed:010d}.csv")
+                        episodeInfoLogFile = log_folder+f"/GymEnvWrapper_log.{seed:010d}.csv"), 1/stepLength_sec
 
-    
 
-def build_vec_env(env_builder, env_builder_args, log_folder, seed, num_envs) -> gym.vector.VectorEnv:
-    builders = [(lambda i: (lambda: env_builder(log_folder=log_folder,
-                                                  seed=seed+100000*i,
-                                                  env_builder_args = env_builder_args)
+def build_vec_env(env_builder_args,
+                  log_folder,
+                  seed,
+                  num_envs,
+                  env_builder : EnvBuilderProtocol,
+                  purely_numpy : bool = False) -> gym.vector.VectorEnv:
+    builders = [(lambda i: (lambda: env_builder(seed=seed+100000*i,
+                                                log_folder=log_folder,
+                                                is_eval = False,
+                                                env_builder_args = env_builder_args)[0]
                                 ))(i) for i in range(num_envs)]
-    envs = AsyncVectorEnvShmem(builders, context="forkserver", purely_numpy=False, shared_mem_device = th.device("cpu"), copy_data=False)
+    envs = AsyncVectorEnvShmem(builders, context="forkserver", purely_numpy=purely_numpy, shared_mem_device = th.device("cpu"), copy_data=False)
     envs = VectorEnvLogger(env = envs)
     return envs
+
+# def build_vec_env(env_builder, env_builder_args, log_folder, seed, num_envs) -> gym.vector.VectorEnv:
+#     builders = [(lambda i: (lambda: env_builder(log_folder=log_folder,
+#                                                   seed=seed+100000*i,
+#                                                   env_builder_args = env_builder_args)
+#                                 ))(i) for i in range(num_envs)]
+#     envs = AsyncVectorEnvShmem(builders, context="forkserver", purely_numpy=False, shared_mem_device = th.device("cpu"), copy_data=False)
+#     envs = VectorEnvLogger(env = envs)
+#     return envs
 
 def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams):
     return SAC(observation_space=obs_space,
@@ -83,7 +103,7 @@ class SAC_hyperparams:
     policy_network_arch : list[int]
     q_lr : float
     policy_lr : float
-    device : th.device
+    device : str | th.device
     gamma : float
     target_tau : float
     buffer_size : int
@@ -97,7 +117,14 @@ class SAC_hyperparams:
     eval_freq_ep : int
 
 
-def solve_sac(seed, folderName, run_id, args, env_builder, env_builder_args, hyperparams : SAC_hyperparams):
+def sac_train(seed : int,
+              folderName : str,
+              run_id : str,
+              args,
+              env_builder : EnvBuilderProtocol,
+              env_builder_args : dict,
+              hyperparams : SAC_hyperparams,
+              video_recorder_kwargs : dict[str,typing.Any] = {}):
 
     log_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
@@ -111,25 +138,27 @@ def solve_sac(seed, folderName, run_id, args, env_builder, env_builder_args, hyp
     torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    hyperparams.device = device
+    if hyperparams.device == "cuda": hyperparams.device = "cuda:0"
+    device = th.device(hyperparams.device)
     # env setup
     num_envs = hyperparams.parallel_envs
     use_processes = True
     if use_processes:
         collector = AsyncProcessExperienceCollector(
-                            vec_env_builder=lambda: build_vec_env(env_builder, env_builder_args=env_builder_args,
-                                                                log_folder=log_folder,
-                                                                seed=seed,
-                                                                num_envs=num_envs),
+                            vec_env_builder=lambda: build_vec_env(  env_builder=env_builder,
+                                                                    env_builder_args=env_builder_args,
+                                                                    log_folder=log_folder,
+                                                                    seed=seed,
+                                                                    num_envs=num_envs),
                             storage_torch_device=device,
                             buffer_size=hyperparams.train_freq*num_envs,
                             session=session)
     else:
-        collector = AsyncThreadExperienceCollector( vec_env=build_vec_env(env_builder, env_builder_args=env_builder_args,
-                                                                log_folder=log_folder,
-                                                                seed=seed,
-                                                                num_envs=num_envs),
+        collector = AsyncThreadExperienceCollector( vec_env=build_vec_env(  env_builder=env_builder,
+                                                                            env_builder_args=env_builder_args,
+                                                                            log_folder=log_folder,
+                                                                            seed=seed,
+                                                                            num_envs=num_envs),
                                                     buffer_size=hyperparams.train_freq*num_envs,
                                                     storage_torch_device=device)
     observation_space = collector.observation_space()
@@ -153,26 +182,29 @@ def solve_sac(seed, folderName, run_id, args, env_builder, env_builder_args, hyp
     
     start_time = time.time()
 
-    eval_env = gym_builder(log_folder=log_folder+"/eval",
+    eval_env, fps = env_builder(log_folder=log_folder+"/eval",
                                     seed=seed+100000000,
-                                    env_builder_args = env_builder_args)
-    fps = 1/eval_env.getBaseEnv().env._stepSimDuration_sec #ugly, sorry
+                                    env_builder_args = env_builder_args,
+                                    is_eval=True)
+    # fps = 1/eval_env.getBaseEnv().env._stepSimDuration_sec #ugly, sorry
     eval_env_rec = RecorderGymWrapper(  env=eval_env,
                                 fps = fps,
-                                outFolder=log_folder+"/eval/videos/RecorderGymWrapper")
+                                outFolder=log_folder+"/eval/videos/RecorderGymWrapper",
+                                **video_recorder_kwargs)
     eval_env_rec_det = RecorderGymWrapper(  env=eval_env,
                                 fps = fps,
-                                outFolder=log_folder+"/eval_deterministic/videos/RecorderGymWrapper")
+                                outFolder=log_folder+"/eval_deterministic/videos/RecorderGymWrapper",
+                                **video_recorder_kwargs)
     callbacks = []
     callbacks.append(EvalCallback(eval_env=eval_env_rec,
                                   model=model,
                                   n_eval_episodes=1,
-                                  eval_freq_ep=hyperparams.eval_freq_ep*num_envs,
+                                  eval_freq_ep=hyperparams.eval_freq_ep,
                                   deterministic=False))
     callbacks.append(EvalCallback(eval_env=eval_env_rec_det,
                                   model=model,
                                   n_eval_episodes=1,
-                                  eval_freq_ep=hyperparams.eval_freq_ep*num_envs,
+                                  eval_freq_ep=hyperparams.eval_freq_ep,
                                   deterministic=True))
     callbacks.append(CheckpointCallbackRB(save_path=log_folder+"/checkpoints",
                                           model=model,

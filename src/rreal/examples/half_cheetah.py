@@ -1,9 +1,9 @@
 #!/usr/bin/env python3  
 
-from rreal.examples.solve_sac import solve_sac, SAC_hyperparams, gym_builder
+from rreal.examples.solve_sac import sac_train, SAC_hyperparams, gym_builder
 
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
-    solve_sac(seed, folderName, run_id, args,
+    sac_train(seed, folderName, run_id, args,
               env_builder=gym_builder,
               env_builder_args = {  "env_name" : "HalfCheetah-v4",
                                     "forward_reward_weight" : 1.0,
@@ -11,20 +11,20 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                     "reset_noise_scale" : 0.1,
                                     "exclude_current_positions_from_observation" : True,
                                     "max_episode_steps" : 1000},
-              hyperparams = SAC_hyperparams(train_freq=500,
-                                  grad_steps=200,
-                                  q_lr=0.005,
-                                  policy_lr=0.0005,
+              hyperparams = SAC_hyperparams(train_freq=1,
+                                  grad_steps=1,
+                                  q_lr=1e-3,
+                                  policy_lr=3e-4,
                                   device = "cuda",
                                   gamma = 0.99,
                                   target_tau=0.005,
                                   buffer_size=1_000_000,
                                   total_steps = 10_000_000,
-                                  batch_size=16384,
-                                  q_network_arch=[64,64],
-                                  policy_network_arch=[64,64],
-                                  learning_starts=5000,
-                                  parallel_envs = 16,
+                                  batch_size=256,
+                                  q_network_arch=[256,256],
+                                  policy_network_arch=[256,256],
+                                  learning_starts=1000,
+                                  parallel_envs = 1,
                                   log_freq_vstep = 1000,
                                   eval_freq_ep=100))
 

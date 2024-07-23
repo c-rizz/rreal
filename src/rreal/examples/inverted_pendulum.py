@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
-from rreal.examples.solve_sac import solve_sac, SAC_hyperparams, gym_builder
+from rreal.examples.solve_sac import sac_train, SAC_hyperparams, gym_builder
 
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
-    solve_sac(seed, folderName, run_id, args,
+    sac_train(seed, folderName, run_id, args,
               env_builder=gym_builder,
               env_builder_args = {  "env_name" : "InvertedPendulum-v4",
                                     "max_episode_steps" : 1000},

@@ -239,10 +239,12 @@ class SAC(RLPolicy):
         extra["feature_extractor_init_args"] = self._feature_extractor.get_init_args()
         with open(path+".extra.yaml", "w") as init_args_yamlfile:
             yaml.dump(extra,init_args_yamlfile, default_flow_style=None)
+        self._feature_extractor.save(path=path+".feature_extractor")
         # th.save( self._feature_extractor.state_dict(), path+".fe_state.pth")
         
 
     def load_(self, path : str):
+        # Before loading the state dict we try to check that the models are compatible
         with open(path+".extra.yaml", "r") as init_args_yamlfile:
             extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
         if "class_name" in extra and extra["class_name"] != self.__class__.__name__:
@@ -272,6 +274,8 @@ class SAC(RLPolicy):
         feature_extractor_class = get_feature_extractor(extra["feature_extractor_class_name"])
         extra["feature_extractor"] = feature_extractor_class.load(path+".feature_extractor")
         model = SAC(**extra["init_args"])
+        # At this point we should have a model that is initialized exactly like the one that was saved
+        # So we can load into it the state from the checkpoint
         model.load_(path)
         return model
 
@@ -438,6 +442,7 @@ def train_off_policy(collector : ExperienceCollector,
     steps_sl = 0
     q_loss, actor_loss, alpha_loss = float("nan"),float("nan"),float("nan")
     start_time = time.monotonic()
+    last_log_steps = float("-inf")
     while global_step < total_timesteps and not adarl.utils.session.default_session.is_shutting_down():
         s0b = buffer.collected_frames()
         t0 = time.monotonic()
@@ -483,14 +488,16 @@ def train_off_policy(collector : ExperienceCollector,
         t_train_sl += t_after_train - t_before_train
         t_tot_sl += tf-t0
         t = time.monotonic()
-        if global_step/num_envs % log_freq_vstep == 0:
+        # ggLog.info(f"global_steps = {global_step}")
+        if global_step - last_log_steps > log_freq_vstep*num_envs:
+            last_log_steps = global_step
             ggLog.info(f"SAC: expsteps={global_step} q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}")
             ggLog.info(f"OFFTRAIN: expstps:{global_step}"
                        f" trainstps={model._tot_grad_steps_count}"
                     #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"
                        f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f}"
                        f" tfps={steps_sl/t_tot_sl:.2f} cfps={steps_sl/t_coll_sl:.2f}"
-                       f" alltime_ips={global_step/(t-start_time)} alltime_fps={model._tot_grad_steps_count/(t-start_time)}")
+                       f" alltime_ips={global_step/(t-start_time):.2f} alltime_fps={model._tot_grad_steps_count/(t-start_time)}:.2f")
             t_train_sl, t_coll_sl, t_tot_sl, steps_sl = 0,0,0,0
             adarl.utils.sigint_handler.haltOnSigintReceived()
     callbacks.on_training_end()
