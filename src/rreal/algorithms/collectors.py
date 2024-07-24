@@ -30,6 +30,7 @@ class ExperienceCollector(ABC):
         self._current_obs = None
         self._collector_model : th.nn.Module
         self._buffer = buffer
+        self._vecenv_is_torch = True
 
     def set_base_collector_model(self, model_builder : Callable[[gym.spaces.Space, gym.spaces.Space],th.nn.Module]):
         self._collector_model = copy.deepcopy(model_builder(self.observation_space(), self.action_space()))
@@ -69,10 +70,11 @@ class ExperienceCollector(ABC):
                 else:
                     th_obs = map_tensor_tree(obs, lambda a: th.as_tensor(a, device = policy_device))
                     actions = policy.predict_action(th_obs)
-                    actions = actions.detach().cpu().numpy()
+                    if not self._vecenv_is_torch:
+                        actions = actions.detach().cpu().numpy()
                 t_post_act = time.monotonic()
 
-                next_obs, rewards, terminations, truncations, infos = self._vec_env.step(actions)
+                next_input_obss, rewards, terminations, truncations, infos = self._vec_env.step(actions)
                 t_post_step = time.monotonic()
 
                 # real_next_obs = copy.deepcopy(next_obs) #copy because we are going to modify it based on truncations
@@ -87,19 +89,19 @@ class ExperienceCollector(ABC):
                 # Just take the real_next_observstion from info
                 # if it wasn't available we could take it from final_observation/terminal_observation by masking with
                 # (truncated or terminated)
-                real_next_obs = stack_tensor_tree([info["real_next_observation"] for info in unstack_tensor_tree(infos)])
+                real_next_obss = infos["real_next_observation"] #stack_tensor_tree([info["real_next_observation"] for info in unstack_tensor_tree(infos)])
                 t_post_final_obs = time.monotonic()
                 buffer.add(obs=obs,
-                            next_obs=real_next_obs,
+                            next_obs=real_next_obss,
                             action=actions,
                             reward=rewards,
                             terminated=terminations,
                             truncated=truncations)
                 t_post_add = time.monotonic()
                 # ggLog.info(f"added step {step} to buffer")
-                self._current_obs = copy.deepcopy(next_obs) # copy it because it may get overwritten by the env during the next step
+                self._current_obs = copy.deepcopy(next_input_obss) # copy it because it may get overwritten by the env during the next step
                 # self._current_obs = next_obs
-                obs, next_obs, rewards, terminations, truncations, infos = None, None, None, None, None, None # to avoid inadvertly using them
+                obs, next_input_obss, rewards, terminations, truncations, infos = None, None, None, None, None, None # to avoid inadvertly using them
 
                 t_act += t_post_act-t_pre_act
                 t_step += t_post_step-t_post_act
