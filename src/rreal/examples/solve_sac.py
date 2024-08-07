@@ -27,6 +27,7 @@ from adarl.envs.lr_wrappers.ObsToDict import ObsToDict
 from rreal.tmp.gym_transform_observation import DtypeObservation
 import copy
 import typing
+import adarl.utils.session as session
 
 class EnvBuilderProtocol(typing.Protocol):
     def __call__(self, seed : int, log_folder : str, is_eval : bool, env_builder_args : dict) -> tuple[gym.Env,float]:
@@ -58,14 +59,22 @@ def build_vec_env(env_builder_args,
                   seed,
                   num_envs,
                   env_builder : EnvBuilderProtocol,
-                  purely_numpy : bool = False) -> gym.vector.VectorEnv:
+                  purely_numpy : bool = False,
+                  logs_id = None) -> gym.vector.VectorEnv:
     builders = [(lambda i: (lambda: env_builder(seed=seed+100000*i,
                                                 log_folder=log_folder,
                                                 is_eval = False,
                                                 env_builder_args = env_builder_args)[0]
                                 ))(i) for i in range(num_envs)]
-    envs = AsyncVectorEnvShmem(builders, context="forkserver", purely_numpy=purely_numpy, shared_mem_device = th.device("cpu"), copy_data=False)
-    envs = VectorEnvLogger(env = envs)
+    envs = AsyncVectorEnvShmem(builders,
+                               context="forkserver",
+                               purely_numpy=purely_numpy,
+                               shared_mem_device = th.device("cuda"),
+                               copy_data=False,
+                               worker_init_fn=session.set_current_session,
+                               worker_init_kwargs={"session":session.default_session})
+    envs = VectorEnvLogger(env = envs,
+                           logs_id = logs_id)
     return envs
 
 # def build_vec_env(env_builder, env_builder_args, log_folder, seed, num_envs) -> gym.vector.VectorEnv:
@@ -114,7 +123,6 @@ class SAC_hyperparams:
     batch_size : int
     parallel_envs : int
     log_freq_vstep : int
-    eval_freq_ep : int
 
 
 def sac_train(seed : int,
@@ -123,6 +131,7 @@ def sac_train(seed : int,
               args,
               env_builder : EnvBuilderProtocol,
               env_builder_args : dict,
+              eval_env_builder_args : list[dict],
               hyperparams : SAC_hyperparams,
               video_recorder_kwargs : dict[str,typing.Any] = {}):
 
@@ -149,17 +158,17 @@ def sac_train(seed : int,
                                                                     env_builder_args=env_builder_args,
                                                                     log_folder=log_folder,
                                                                     seed=seed,
-                                                                    num_envs=num_envs),
+                                                                    num_envs=env_builder_args["num_envs"]),
                             storage_torch_device=device,
-                            buffer_size=hyperparams.train_freq*num_envs,
+                            buffer_size=hyperparams.train_freq*env_builder_args["num_envs"],
                             session=session)
     else:
         collector = AsyncThreadExperienceCollector( vec_env=build_vec_env(  env_builder=env_builder,
                                                                             env_builder_args=env_builder_args,
                                                                             log_folder=log_folder,
                                                                             seed=seed,
-                                                                            num_envs=num_envs),
-                                                    buffer_size=hyperparams.train_freq*num_envs,
+                                                                            num_envs=env_builder_args["num_envs"]),
+                                                    buffer_size=hyperparams.train_freq*env_builder_args["num_envs"],
                                                     storage_torch_device=device)
     observation_space = collector.observation_space()
     action_space = collector.action_space()
@@ -182,30 +191,19 @@ def sac_train(seed : int,
     
     start_time = time.time()
 
-    eval_env, fps = env_builder(log_folder=log_folder+"/eval",
-                                    seed=seed+100000000,
-                                    env_builder_args = env_builder_args,
-                                    is_eval=True)
-    # fps = 1/eval_env.getBaseEnv().env._stepSimDuration_sec #ugly, sorry
-    eval_env_rec = RecorderGymWrapper(  env=eval_env,
-                                fps = fps,
-                                outFolder=log_folder+"/eval/videos/RecorderGymWrapper",
-                                **video_recorder_kwargs)
-    eval_env_rec_det = RecorderGymWrapper(  env=eval_env,
-                                fps = fps,
-                                outFolder=log_folder+"/eval_deterministic/videos/RecorderGymWrapper",
-                                **video_recorder_kwargs)
     callbacks = []
-    callbacks.append(EvalCallback(eval_env=eval_env_rec,
-                                  model=model,
-                                  n_eval_episodes=1,
-                                  eval_freq_ep=hyperparams.eval_freq_ep,
-                                  deterministic=False))
-    callbacks.append(EvalCallback(eval_env=eval_env_rec_det,
-                                  model=model,
-                                  n_eval_episodes=1,
-                                  eval_freq_ep=hyperparams.eval_freq_ep,
-                                  deterministic=True))
+    for eval_conf in eval_env_builder_args:
+        eval_env = build_vec_env(  env_builder=env_builder,
+                        env_builder_args=eval_conf["env_builder_args"],
+                        log_folder=log_folder+f"/eval_"+eval_conf["name"],
+                        seed=seed+100000000,
+                        num_envs=eval_conf["env_builder_args"]["num_envs"],
+                        logs_id=eval_conf["name"])
+        callbacks.append(EvalCallback(eval_env=eval_env,
+                                    model=model,
+                                    n_eval_episodes=eval_conf["eval_eps"],
+                                    eval_freq_ep=eval_conf["eval_freq_ep"],
+                                    deterministic=eval_conf["deterministic"]))
     callbacks.append(CheckpointCallbackRB(save_path=log_folder+"/checkpoints",
                                           model=model,
                                           save_best=False,

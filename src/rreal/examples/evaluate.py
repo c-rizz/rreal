@@ -19,11 +19,15 @@ import wandb
 from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
 from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
 import typing
-from rreal.algorithms.sac import SAC
+from rreal.algorithms.rl_policy import RLPolicy
 from rreal.examples.solve_sac import build_vec_env, EnvBuilderProtocol
 from dataclasses import dataclass
 from adarl.utils.utils import evaluatePolicyVec
+import gymnasium as gym
 
+class ModelBuilderProtocol(typing.Protocol):
+    def __call__(self, obs_space : gym.Space, act_space : gym.Space, hyperparams) -> RLPolicy:
+        ...
 
 def evaluate(seed : int,
               folderName : str,
@@ -31,7 +35,8 @@ def evaluate(seed : int,
               args,
               env_builder : EnvBuilderProtocol,
               env_builder_args : dict,
-              model : SAC,
+              model_builder : ModelBuilderProtocol,
+              model_kwargs : dict[str,typing.Any],
               video_recorder_kwargs : dict[str,typing.Any] = {},
               num_envs = 1,
               episodes = 10,
@@ -57,6 +62,7 @@ def evaluate(seed : int,
                         log_folder=log_folder,
                         seed=seed,
                         num_envs=num_envs)
+    model = model_builder(env.single_observation_space, env.single_action_space, hyperparams = model_kwargs)
     
     results = evaluatePolicyVec(vec_env=env,
                       model=model,

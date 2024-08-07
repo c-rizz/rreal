@@ -86,10 +86,10 @@ class ExperienceCollector(ABC):
                 # # truncated_envs = truncations.nonzero(as_tuple=True)
                 # # map_tensor_tree(real_next_obs, lambda t : th.Tensor: t.index_copy_(dim=0,truncated_envs,))                
 
-                # Just take the real_next_observstion from info
-                # if it wasn't available we could take it from final_observation/terminal_observation by masking with
+                # AsyncVectorEnvShmem always puts the consequent observation in final_observation.
+                # If it wasn't available we could take it from final_observation/terminal_observation by masking with
                 # (truncated or terminated)
-                real_next_obss = infos["real_next_observation"] #stack_tensor_tree([info["real_next_observation"] for info in unstack_tensor_tree(infos)])
+                real_next_obss = infos["final_observation"] #stack_tensor_tree([info["real_next_observation"] for info in unstack_tensor_tree(infos)])
                 t_post_final_obs = time.monotonic()
                 buffer.add(obs=obs,
                             next_obs=real_next_obss,
