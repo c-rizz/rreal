@@ -203,7 +203,8 @@ def sac_train(seed : int,
                                     model=model,
                                     n_eval_episodes=eval_conf["eval_eps"],
                                     eval_freq_ep=eval_conf["eval_freq_ep"],
-                                    deterministic=eval_conf["deterministic"]))
+                                    deterministic=eval_conf["deterministic"],
+                                    eval_name=eval_conf["name"]))
     callbacks.append(CheckpointCallbackRB(save_path=log_folder+"/checkpoints",
                                           model=model,
                                           save_best=False,
