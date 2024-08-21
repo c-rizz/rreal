@@ -468,8 +468,8 @@ def train_off_policy(collector : ExperienceCollector,
         ep_counter = tmp_buff.added_completed_episodes()
         step_counter = tmp_buff.added_frames()
         t_coll_sl += collector.collection_duration()
-        adarl.utils.session.default_session.run_info["collected_episodes"] = ep_counter
-        adarl.utils.session.default_session.run_info["collected_steps"] = step_counter
+        adarl.utils.session.default_session.run_info["collected_episodes"].value = ep_counter
+        adarl.utils.session.default_session.run_info["collected_steps"].value = step_counter
         # callbacks._callbacks[0].set_model(model)
         callbacks.on_collection_end(collected_steps=vsteps_to_collect*num_envs,
                                    collected_episodes=new_episodes,
