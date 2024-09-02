@@ -31,6 +31,11 @@ class ExperienceCollector(ABC):
         self._collector_model : th.nn.Module
         self._buffer = buffer
         self._vecenv_is_torch = True
+        self._stats = { "t_act" : 0.,
+                        "t_step" : 0.,
+                        "t_copy" : 0.,
+                        "t_final_obs" : 0.,
+                        "t_add" : 0.}
 
     def set_base_collector_model(self, model_builder : Callable[[gym.spaces.Space, gym.spaces.Space],th.nn.Module]):
         self._collector_model = copy.deepcopy(model_builder(self.observation_space(), self.action_space()))
@@ -108,6 +113,11 @@ class ExperienceCollector(ABC):
                 t_copy +=t_post_copy-t_post_step
                 t_final_obs += t_post_final_obs-t_post_copy
                 t_add += t_post_add-t_post_final_obs
+            self._stats["t_act"] = t_act/vsteps_to_collect
+            self._stats["t_step"] = t_step/vsteps_to_collect
+            self._stats["t_copy"] = t_copy/vsteps_to_collect
+            self._stats["t_final_obs"] = t_final_obs/vsteps_to_collect
+            self._stats["t_add"] = t_add/vsteps_to_collect
             # ggLog.info(f"collection times = {t_act} {t_step} {t_copy} {t_final_obs} {t_add}")
         self._last_collection_wallduration = time.monotonic() - t0
 

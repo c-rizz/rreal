@@ -133,6 +133,7 @@ def sac_train(seed : int,
               env_builder_args : dict,
               eval_env_builder_args : list[dict],
               hyperparams : SAC_hyperparams,
+              checkpoint_freq : int = 100,
               video_recorder_kwargs : dict[str,typing.Any] = {}):
 
     log_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
@@ -208,7 +209,7 @@ def sac_train(seed : int,
     callbacks.append(CheckpointCallbackRB(save_path=log_folder+"/checkpoints",
                                           model=model,
                                           save_best=False,
-                                          save_freq_ep=100*num_envs))
+                                          save_freq_ep=checkpoint_freq*num_envs))
     try:
         train_off_policy(collector=collector,
             model = model,

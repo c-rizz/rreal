@@ -7,7 +7,7 @@ import torch as th
 from rreal.feature_extractors import register_feature_extractor_class
 import inspect
 import yaml
-
+import adarl.utils.dbg.ggLog as ggLog
 class StackVectorsFeatureExtractor(FeatureExtractor):
     def __init__(self, observation_space : gym.spaces.Space):
         super().__init__()
@@ -39,6 +39,7 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         extra = {}
         extra["init_args"] = self._init_args
         extra["class_name"] = self.__class__.__name__
+        # ggLog.info(f"saving extra={extra}")
         with open(path+".extra.yaml", "w") as init_args_yamlfile:
             yaml.dump(extra,init_args_yamlfile, default_flow_style=None)
 
