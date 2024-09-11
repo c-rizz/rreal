@@ -6,7 +6,7 @@ import gymnasium as gym
 import numpy as np
 import torch as th
 from typing import List, Union, NamedTuple, Dict, Optional, Callable, Literal, Any
-from adarl.utils.tensor_trees import map_tensor_tree, unstack_tensor_tree, stack_tensor_tree
+from adarl.utils.tensor_trees import map_tensor_tree, unstack_tensor_tree, stack_tensor_tree, is_all_finite
 import adarl.utils.dbg.ggLog as ggLog
 import copy
 import threading
@@ -22,6 +22,7 @@ from adarl.utils.utils import pyTorch_makeDeterministic
 from rreal.algorithms.rl_policy import RLPolicy
 from abc import ABC, abstractmethod
 import atexit
+import setproctitle
 
 class ExperienceCollector(ABC):
     def __init__(self, vec_env : gym.vector.VectorEnv,
@@ -74,6 +75,8 @@ class ExperienceCollector(ABC):
                     actions = th.as_tensor(np.stack([self._vec_env.single_action_space.sample() for _ in range(num_envs)]))
                 else:
                     th_obs = map_tensor_tree(obs, lambda a: th.as_tensor(a, device = policy_device))
+                    # if not is_all_finite(th_obs):
+                    #     raise RuntimeError(f"nonfinite values in th obs")
                     actions = policy.predict_action(th_obs)
                     if not self._vecenv_is_torch:
                         actions = actions.detach().cpu().numpy()
@@ -209,7 +212,7 @@ class AsyncThreadExperienceCollector(ExperienceCollector):
         return self._last_collection_duration
     
 
-
+counter = 0
 class AsyncProcessExperienceCollector(ExperienceCollector):
     def __init__(self, vec_env_builder : Callable[[],gym.vector.VectorEnv],
                  buffer_size, storage_torch_device, start_method : Literal['fork', 'spawn', 'forkserver']= "forkserver",
@@ -229,11 +232,13 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         self._last_collect_wall_duration = ctx.Value(ctypes.c_float)
         self._last_collect_wall_duration.value = 0.0
         p1, p2 = ctx.Pipe()
-        self._collector_process : mp.Process = ctx.Process(target = self._worker, args=(p2,session))
+        global counter
+        self._collector_process : mp.Process = ctx.Process(target = self._worker, args=(p2,session), name=f"async_experience_collector_{counter}")
         self._collector_process.start()
         self._pipe = p1
         self._seed = seed
         p2.close()
+        counter += 1
 
         self._build_env()
         atexit.register(self.close)
@@ -263,6 +268,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
 
     def _worker(self, pipe, parent_session):
         ggLog.info(f"AsyncProcessExperienceCollector worker started with pid {os.getpid()}")
+        setproctitle.setproctitle(mp.current_process().name)
         session.default_session = parent_session
         session.default_session.reapply_globals()
         self._pipe = pipe
@@ -272,11 +278,8 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
             cmd = self._commander.wait_command()
             # ggLog.info(f"got command {cmd}")
             if cmd == b"build_env":
-                ggLog.info(f"Building env")
                 self._vec_env : gym.vector.VectorEnv = self._vec_env_builder.var()
-                ggLog.info(f"Built env")
                 self.reset()
-                ggLog.info(f"Building storage")
                 self._buffer = BasicStorage(buffer_size = self._buffer_size,
                                             observation_space=self._vec_env.single_observation_space,
                                             action_space=self._vec_env.single_action_space,

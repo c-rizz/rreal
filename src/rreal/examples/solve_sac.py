@@ -25,6 +25,7 @@ from adarl.envs.GymEnvWrapper import GymEnvWrapper
 from adarl.envs.GymToLr import GymToLr
 from adarl.envs.lr_wrappers.ObsToDict import ObsToDict
 from rreal.tmp.gym_transform_observation import DtypeObservation
+import adarl.utils.dbg.ggLog as ggLog
 import copy
 import typing
 import adarl.utils.session as session
@@ -60,7 +61,8 @@ def build_vec_env(env_builder_args,
                   num_envs,
                   env_builder : EnvBuilderProtocol,
                   purely_numpy : bool = False,
-                  logs_id = None) -> gym.vector.VectorEnv:
+                  logs_id = None,
+                  collector_device : th.device = th.device("cuda")) -> gym.vector.VectorEnv:
     builders = [(lambda i: (lambda: env_builder(seed=seed+100000*i,
                                                 log_folder=log_folder,
                                                 is_eval = False,
@@ -69,7 +71,7 @@ def build_vec_env(env_builder_args,
     envs = AsyncVectorEnvShmem(builders,
                                context="forkserver",
                                purely_numpy=purely_numpy,
-                               shared_mem_device = th.device("cuda"),
+                               shared_mem_device = collector_device,
                                copy_data=False,
                                worker_init_fn=session.set_current_session,
                                worker_init_kwargs={"session":session.default_session})
@@ -134,7 +136,8 @@ def sac_train(seed : int,
               eval_env_builder_args : list[dict],
               hyperparams : SAC_hyperparams,
               checkpoint_freq : int = 100,
-              video_recorder_kwargs : dict[str,typing.Any] = {}):
+              video_recorder_kwargs : dict[str,typing.Any] = {},
+              collector_device : th.device | None = None):
 
     log_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
@@ -150,6 +153,8 @@ def sac_train(seed : int,
 
     if hyperparams.device == "cuda": hyperparams.device = "cuda:0"
     device = th.device(hyperparams.device)
+    if collector_device is None:
+        collector_device = device
     # env setup
     num_envs = hyperparams.parallel_envs
     use_processes = True
@@ -159,8 +164,9 @@ def sac_train(seed : int,
                                                                     env_builder_args=env_builder_args,
                                                                     log_folder=log_folder,
                                                                     seed=seed,
-                                                                    num_envs=env_builder_args["num_envs"]),
-                            storage_torch_device=device,
+                                                                    num_envs=env_builder_args["num_envs"],
+                                                                    collector_device=collector_device),
+                            storage_torch_device=collector_device,
                             buffer_size=hyperparams.train_freq*env_builder_args["num_envs"],
                             session=session)
     else:
@@ -168,9 +174,10 @@ def sac_train(seed : int,
                                                                             env_builder_args=env_builder_args,
                                                                             log_folder=log_folder,
                                                                             seed=seed,
-                                                                            num_envs=env_builder_args["num_envs"]),
+                                                                            num_envs=env_builder_args["num_envs"],
+                                                                            collector_device=collector_device),
                                                     buffer_size=hyperparams.train_freq*env_builder_args["num_envs"],
-                                                    storage_torch_device=device)
+                                                    storage_torch_device=collector_device)
     observation_space = collector.observation_space()
     action_space = collector.action_space()
     collector.set_base_collector_model(lambda o,a: build_sac(o,a,hyperparams))
@@ -190,6 +197,8 @@ def sac_train(seed : int,
         handle_timeout_termination=True,
         n_envs=num_envs)
     
+    ggLog.info(f"Replay buffer occupies {rb.memory_size()/1024/1024:.2f}MB")
+    
     start_time = time.time()
 
     callbacks = []
@@ -199,7 +208,8 @@ def sac_train(seed : int,
                         log_folder=log_folder+f"/eval_"+eval_conf["name"],
                         seed=seed+100000000,
                         num_envs=eval_conf["env_builder_args"]["num_envs"],
-                        logs_id=eval_conf["name"])
+                        logs_id=eval_conf["name"],
+                        collector_device=collector_device)
         callbacks.append(EvalCallback(eval_env=eval_env,
                                     model=model,
                                     n_eval_episodes=eval_conf["eval_eps"],
