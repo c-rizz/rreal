@@ -1,3 +1,4 @@
+from __future__ import annotations
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 
 feature_extractor_classes = {}
