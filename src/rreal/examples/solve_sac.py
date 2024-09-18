@@ -164,19 +164,19 @@ def sac_train(seed : int,
                                                                     env_builder_args=env_builder_args,
                                                                     log_folder=log_folder,
                                                                     seed=seed,
-                                                                    num_envs=env_builder_args["num_envs"],
+                                                                    num_envs=hyperparams.parallel_envs,
                                                                     collector_device=collector_device),
                             storage_torch_device=collector_device,
-                            buffer_size=hyperparams.train_freq*env_builder_args["num_envs"],
+                            buffer_size=hyperparams.train_freq*hyperparams.parallel_envs,
                             session=session)
     else:
         collector = AsyncThreadExperienceCollector( vec_env=build_vec_env(  env_builder=env_builder,
                                                                             env_builder_args=env_builder_args,
                                                                             log_folder=log_folder,
                                                                             seed=seed,
-                                                                            num_envs=env_builder_args["num_envs"],
+                                                                            num_envs=hyperparams.parallel_envs,
                                                                             collector_device=collector_device),
-                                                    buffer_size=hyperparams.train_freq*env_builder_args["num_envs"],
+                                                    buffer_size=hyperparams.train_freq*hyperparams.parallel_envs,
                                                     storage_torch_device=collector_device)
     observation_space = collector.observation_space()
     action_space = collector.action_space()
@@ -207,7 +207,7 @@ def sac_train(seed : int,
                         env_builder_args=eval_conf["env_builder_args"],
                         log_folder=log_folder+f"/eval_"+eval_conf["name"],
                         seed=seed+100000000,
-                        num_envs=eval_conf["env_builder_args"]["num_envs"],
+                        num_envs=eval_conf["num_envs"],
                         logs_id=eval_conf["name"],
                         collector_device=collector_device)
         callbacks.append(EvalCallback(eval_env=eval_env,
