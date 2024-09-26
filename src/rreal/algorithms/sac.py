@@ -1,31 +1,32 @@
 
 from __future__ import annotations
-import time
-from dataclasses import dataclass, asdict
 
-import gymnasium as gym
+from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch, BaseBuffer
+from adarl.utils.callbacks import TrainingCallback, CallbackList
+from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree
+from adarl.utils.wandb_wrapper import wandb_log
+from adarl.utils.utils import dbg_check_finite
+from dataclasses import dataclass, asdict
+from rreal.algorithms.collectors import ExperienceCollector
+from rreal.algorithms.rl_policy import RLPolicy
+from rreal.feature_extractors import get_feature_extractor
+from rreal.feature_extractors.feature_extractor import FeatureExtractor
+from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
+from rreal.utils import build_mlp_net
+from typing import List, Union
 import adarl.utils.callbacks
+import adarl.utils.dbg.ggLog as ggLog
+import adarl.utils.session
+import adarl.utils.sigint_handler
+import gymnasium as gym
+import inspect
+import time
 import torch
+import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import torch as th
-import adarl.utils.session
-from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch, BaseBuffer
-from typing import List, Union
-from rreal.utils import build_mlp_net
-import adarl.utils.dbg.ggLog as ggLog
-import adarl.utils.sigint_handler
-from adarl.utils.wandb_wrapper import wandb_log
-from adarl.utils.callbacks import TrainingCallback, CallbackList
-from rreal.algorithms.collectors import ExperienceCollector
-from rreal.algorithms.rl_policy import RLPolicy
-import inspect
 import yaml
-from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree
-from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
-from rreal.feature_extractors.feature_extractor import FeatureExtractor
-from rreal.feature_extractors import get_feature_extractor
 
 class QNetwork(nn.Module):
     def __init__(self,
@@ -88,9 +89,10 @@ class Actor(nn.Module):
         self.register_buffer("action_bias",  torch.as_tensor((action_max + action_min) / 2.0, dtype=torch.float32, device=torch_device))
 
     def forward(self, observation_batch):
-        observation_batch = self.act_fc(observation_batch)
-        mean = self.act_fc_mean(observation_batch)
-        log_std = self.act_fc_logstd(observation_batch)
+        hidden_batch = self.act_fc(observation_batch)
+        dbg_check_finite(hidden_batch)
+        mean = self.act_fc_mean(hidden_batch)
+        log_std = self.act_fc_logstd(hidden_batch)
         log_std = (torch.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min
         return mean, log_std
 
@@ -396,7 +398,7 @@ class SAC(RLPolicy):
         for i in range(iterations):
             data = buffer.sample(self._hp.batch_size)
             data = map_tensor_tree(data, lambda t : t.to(device=self.device, non_blocking=True))
-            th.cuda.current_stream().synchronize()
+            th.cuda.synchronize(self.device)
             nq_loss, nactor_loss, nalpha_loss = self.update(transitions = data)
             q_act_alpha_losses[i] = th.stack((nq_loss,nactor_loss,nalpha_loss))
             self._tot_grad_steps_count += 1

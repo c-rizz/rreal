@@ -137,14 +137,16 @@ def sac_train(seed : int,
               eval_env_builder_args : list[dict] = [],
               checkpoint_freq : int = 100,
               video_recorder_kwargs : dict[str,typing.Any] = {},
-              collector_device : th.device | None = None):
+              collector_device : th.device | None = None,
+              debug_level : int = 2):
 
     log_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
                                                         seed=seed,
                                                         run_id=run_id,
                                                         run_comment=args["comment"],
-                                                        folderName=folderName)
+                                                        folderName=folderName,
+                                                        debug=debug_level)
 
     random.seed(seed)
     np.random.seed(seed)

@@ -1,28 +1,28 @@
 
-import os
-import time
 
-import gymnasium as gym
-import numpy as np
-import torch as th
-from typing import List, Union, NamedTuple, Dict, Optional, Callable, Literal, Any
-from adarl.utils.tensor_trees import map_tensor_tree, unstack_tensor_tree, stack_tensor_tree, is_all_finite
-import adarl.utils.dbg.ggLog as ggLog
-import copy
-import threading
+from abc import ABC, abstractmethod
 from adarl.utils.buffers import BasicStorage
-import torch.multiprocessing as mp
 from adarl.utils.shared_env_data import SimpleCommander
-import ctypes
+from adarl.utils.tensor_trees import map_tensor_tree, unstack_tensor_tree, stack_tensor_tree, is_all_finite
+from adarl.utils.utils import pyTorch_makeDeterministic, dbg_check_finite
+from rreal.algorithms.rl_policy import RLPolicy
 from stable_baselines3.common.vec_env.base_vec_env import CloudpickleWrapper
-import gymnasium as gym
+from typing import List, Union, NamedTuple, Dict, Optional, Callable, Literal, Any
+import adarl.utils.dbg.ggLog as ggLog
 import adarl.utils.mp_helper as mp_helper
 import adarl.utils.session as session
-from adarl.utils.utils import pyTorch_makeDeterministic
-from rreal.algorithms.rl_policy import RLPolicy
-from abc import ABC, abstractmethod
 import atexit
+import copy
+import ctypes
+import gymnasium as gym
+import gymnasium as gym
+import numpy as np
+import os
 import setproctitle
+import threading
+import time
+import torch as th
+import torch.multiprocessing as mp
 
 class ExperienceCollector(ABC):
     def __init__(self, vec_env : gym.vector.VectorEnv,
@@ -71,12 +71,12 @@ class ExperienceCollector(ABC):
             for step in range(vsteps_to_collect):
                 t_pre_act = time.monotonic()
                 obs = self._current_obs
+                dbg_check_finite(self._current_obs)
                 if global_vstep_count < random_vsteps:
                     actions = th.as_tensor(np.stack([self._vec_env.single_action_space.sample() for _ in range(num_envs)]))
                 else:
                     th_obs = map_tensor_tree(obs, lambda a: th.as_tensor(a, device = policy_device))
-                    # if not is_all_finite(th_obs):
-                    #     raise RuntimeError(f"nonfinite values in th obs")
+                    dbg_check_finite(th_obs)                    
                     actions = policy.predict_action(th_obs)
                     if not self._vecenv_is_torch:
                         actions = actions.detach().cpu().numpy()
@@ -99,6 +99,7 @@ class ExperienceCollector(ABC):
                 # (truncated or terminated)
                 real_next_obss = infos["final_observation"] #stack_tensor_tree([info["real_next_observation"] for info in unstack_tensor_tree(infos)])
                 t_post_final_obs = time.monotonic()
+                dbg_check_finite([obs, next_input_obss, rewards, terminations, truncations, actions])
                 buffer.add(obs=obs,
                             next_obs=real_next_obss,
                             action=actions,
@@ -108,6 +109,7 @@ class ExperienceCollector(ABC):
                 t_post_add = time.monotonic()
                 # ggLog.info(f"added step {step} to buffer")
                 self._current_obs = copy.deepcopy(next_input_obss) # copy it because it may get overwritten by the env during the next step
+                dbg_check_finite(self._current_obs)
                 # self._current_obs = next_obs
                 obs, next_input_obss, rewards, terminations, truncations, infos = None, None, None, None, None, None # to avoid inadvertly using them
 
