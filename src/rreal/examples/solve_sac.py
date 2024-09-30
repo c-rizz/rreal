@@ -119,7 +119,7 @@ class SAC_hyperparams:
     target_tau : float
     buffer_size : int
     total_steps : int
-    train_freq : int
+    train_freq_vstep : int
     learning_starts : int
     grad_steps : int
     batch_size : int
@@ -169,7 +169,7 @@ def sac_train(seed : int,
                                                                     num_envs=hyperparams.parallel_envs,
                                                                     collector_device=collector_device),
                             storage_torch_device=collector_device,
-                            buffer_size=hyperparams.train_freq*hyperparams.parallel_envs,
+                            buffer_size=hyperparams.train_freq_vstep*hyperparams.parallel_envs,
                             session=session)
     else:
         collector = AsyncThreadExperienceCollector( vec_env=build_vec_env(  env_builder=env_builder,
@@ -178,7 +178,7 @@ def sac_train(seed : int,
                                                                             seed=seed,
                                                                             num_envs=hyperparams.parallel_envs,
                                                                             collector_device=collector_device),
-                                                    buffer_size=hyperparams.train_freq*hyperparams.parallel_envs,
+                                                    buffer_size=hyperparams.train_freq_vstep*hyperparams.parallel_envs,
                                                     storage_torch_device=collector_device)
     observation_space = collector.observation_space()
     action_space = collector.action_space()
@@ -227,7 +227,7 @@ def sac_train(seed : int,
             model = model,
             buffer = rb,
             total_timesteps=hyperparams.total_steps,
-            train_freq = hyperparams.train_freq,
+            train_freq = hyperparams.train_freq_vstep,
             learning_starts=hyperparams.learning_starts,
             grad_steps=hyperparams.grad_steps,
             log_freq_vstep=hyperparams.log_freq_vstep,

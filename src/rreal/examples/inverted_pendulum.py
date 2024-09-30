@@ -7,7 +7,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
               env_builder=gym_builder,
               env_builder_args = {  "env_name" : "InvertedPendulum-v4",
                                     "max_episode_steps" : 1000},
-              hyperparams=SAC_hyperparams(train_freq=1,
+              hyperparams=SAC_hyperparams(train_freq_vstep=1,
                                   grad_steps=1,
                                   q_lr=0.005,
                                   policy_lr=0.0005,

@@ -13,7 +13,7 @@ from rreal.feature_extractors import get_feature_extractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
 from rreal.utils import build_mlp_net
-from typing import List, Union
+from typing import List, Union, Literal
 import adarl.utils.callbacks
 import adarl.utils.dbg.ggLog as ggLog
 import adarl.utils.session
@@ -419,7 +419,7 @@ def train_off_policy(collector : ExperienceCollector,
           total_timesteps : int,
           train_freq : int,
           learning_starts : int,
-          grad_steps : int,
+          grad_steps : int | Literal["auto"],
           log_freq_vstep : int = -1,
           callbacks : Union[TrainingCallback, List[TrainingCallback]] | None = None):
     if log_freq_vstep == -1: log_freq_vstep = train_freq
@@ -460,8 +460,11 @@ def train_off_policy(collector : ExperienceCollector,
 
         # ------------------             Train             ------------------
         t_before_train = time.monotonic()
+        trained = False
         if global_step > learning_starts:
-            q_loss, actor_loss, alpha_loss = model.train(global_step, grad_steps, buffer)
+            while (grad_steps != "auto" and not trained) or (grad_steps == "auto" and collector.is_collecting()):
+                trained = True
+                q_loss, actor_loss, alpha_loss = model.train(global_step, grad_steps if grad_steps!="auto" else 10, buffer)
         t_after_train = time.monotonic()
 
         # ------------------   Store collected experience  ------------------

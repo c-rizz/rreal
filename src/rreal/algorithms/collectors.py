@@ -108,7 +108,8 @@ class ExperienceCollector(ABC):
                             truncated=truncations)
                 t_post_add = time.monotonic()
                 # ggLog.info(f"added step {step} to buffer")
-                self._current_obs = copy.deepcopy(next_input_obss) # copy it because it may get overwritten by the env during the next step
+                self._current_obs = next_input_obss
+                # self._current_obs = copy.deepcopy(next_input_obss) # copy it because it may get overwritten by the env during the next step
                 dbg_check_finite(self._current_obs)
                 # self._current_obs = next_obs
                 obs, next_input_obss, rewards, terminations, truncations, infos = None, None, None, None, None, None # to avoid inadvertly using them
@@ -131,6 +132,8 @@ class ExperienceCollector(ABC):
 
 
     def collect_experience_async(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):
+        """Placeholder function, not actually asynchronous
+        """
         if self._collector_model is None or self._buffer is None:
             raise RuntimeError(f"Called collect_experience_async but base_model and buffer were not provided")
         self._collector_model.load_state_dict(model_state_dict, assign=False)
@@ -147,6 +150,9 @@ class ExperienceCollector(ABC):
             raise RuntimeError(f"Called collect_experience_async but buffer was not provided")
         return self._buffer
     
+    def is_collecting(self):
+        return False
+    
     def close(self):
         pass
 
@@ -158,6 +164,7 @@ class AsyncThreadExperienceCollector(ExperienceCollector):
 
         self._start_collect = threading.Event()
         self._collect_done = threading.Event()
+        self._collect_done.set() # As if we already collected something and it finished
         self._collector_model : th.nn.Module
         self._running = True
         self._buffer_size = buffer_size
@@ -191,14 +198,17 @@ class AsyncThreadExperienceCollector(ExperienceCollector):
         self._collector_model.load_state_dict(model_state_dict, assign=False)
         self._vsteps_to_collect, self._global_vstep_count, self._random_vsteps = vsteps_to_collect, global_vstep_count, random_vsteps
         self._buffer.clear()
+        self._collect_done.clear()
         self._start_collect.set()
 
     def wait_collection(self, timeout = 10.0):
         got_set = self._collect_done.wait(timeout=timeout)
         if not got_set:
             raise TimeoutError(f"Collector timed out waiting for collect (timeout = {timeout})")
-        self._collect_done.clear()
         return self._buffer
+
+    def is_collecting(self):
+        return not self._collect_done.is_set()
 
     def close(self):
         self._running = False
@@ -338,6 +348,9 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         self._commander.wait_done(timeout=timeout)
         return self._buffer
     
+    def is_collecting(self):
+        return self._commander.current_command() == "collect"
+
     def collection_duration(self):
         return float(self._last_collect_wall_duration.value)
     
