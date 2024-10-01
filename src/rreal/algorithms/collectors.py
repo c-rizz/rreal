@@ -3,9 +3,8 @@
 from abc import ABC, abstractmethod
 from adarl.utils.buffers import BasicStorage
 from adarl.utils.shared_env_data import SimpleCommander
-from adarl.utils.tensor_trees import map_tensor_tree, unstack_tensor_tree, stack_tensor_tree, is_all_finite
+from adarl.utils.tensor_trees import map_tensor_tree, map2_tensor_tree
 from adarl.utils.utils import pyTorch_makeDeterministic, dbg_check_finite
-from rreal.algorithms.rl_policy import RLPolicy
 from stable_baselines3.common.vec_env.base_vec_env import CloudpickleWrapper
 from typing import List, Union, NamedTuple, Dict, Optional, Callable, Literal, Any
 import adarl.utils.dbg.ggLog as ggLog
@@ -47,6 +46,7 @@ class ExperienceCollector(ABC):
     def reset(self):
         if self._vec_env is not None:
             self._current_obs, info = self._vec_env.reset()
+        self._current_obs = copy.deepcopy(self._current_obs) # make a copy of it to avoid inplace issues, this will be then in-place written during the steps
             
     @abstractmethod
     def observation_space(self) -> gym.Space:
@@ -108,12 +108,11 @@ class ExperienceCollector(ABC):
                             truncated=truncations)
                 t_post_add = time.monotonic()
                 # ggLog.info(f"added step {step} to buffer")
-                self._current_obs = next_input_obss
-                # self._current_obs = copy.deepcopy(next_input_obss) # copy it because it may get overwritten by the env during the next step
+                # self._current_obs = next_input_obss
+                self._current_obs = map2_tensor_tree(self._current_obs,next_input_obss, lambda l1, l2: l1.copy_(l2))
+                
                 dbg_check_finite(self._current_obs)
-                # self._current_obs = next_obs
                 obs, next_input_obss, rewards, terminations, truncations, infos = None, None, None, None, None, None # to avoid inadvertly using them
-
                 t_act += t_post_act-t_pre_act
                 t_step += t_post_step-t_post_act
                 t_copy +=t_post_copy-t_post_step
@@ -281,8 +280,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
     def _worker(self, pipe, parent_session):
         ggLog.info(f"AsyncProcessExperienceCollector worker started with pid {os.getpid()}")
         setproctitle.setproctitle(mp.current_process().name)
-        session.default_session = parent_session
-        session.default_session.reapply_globals()
+        session.set_current_session(parent_session)
         self._pipe = pipe
         pyTorch_makeDeterministic(seed = session.default_session.run_info["seed"])
         while self._running.value:
