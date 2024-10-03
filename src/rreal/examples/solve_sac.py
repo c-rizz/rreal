@@ -36,6 +36,7 @@ class EnvBuilderProtocol(typing.Protocol):
 def gym_builder(seed, log_folder, is_eval, env_builder_args : dict[str,typing.Any]):
     os.environ["MUJOCO_GL"]="egl"
     quiet = env_builder_args.pop("quiet",False)
+    use_wandb = env_builder_args.pop("use_wandb",True)
     env_kwargs : dict = copy.deepcopy(env_builder_args)
     stepLength_sec = 0.05
     env_kwargs.pop("env_name")
@@ -53,7 +54,8 @@ def gym_builder(seed, log_folder, is_eval, env_builder_args : dict[str,typing.An
     
     return GymEnvWrapper(env=lrenv,
                         episodeInfoLogFile = log_folder+f"/GymEnvWrapper_log.{seed:010d}.csv",
-                        quiet=quiet), 1/stepLength_sec
+                        quiet=quiet,
+                        use_wandb = use_wandb), 1/stepLength_sec
 
 
 def build_vec_env(env_builder_args,
@@ -64,6 +66,8 @@ def build_vec_env(env_builder_args,
                   purely_numpy : bool = False,
                   logs_id = None,
                   collector_device : th.device = th.device("cuda")) -> gym.vector.VectorEnv:
+    if "use_wandb" not in env_builder_args:
+        env_builder_args["use_wandb"] = False
     builders = [(lambda i: (lambda: env_builder(seed=seed+100000*i,
                                                 log_folder=log_folder,
                                                 is_eval = False,
@@ -187,7 +191,7 @@ def sac_train(seed : int,
     model = build_sac(observation_space, action_space, hyperparams)
 
     # torchexplorer.watch(model, backend="wandb")
-    wandb.watch((model, model._actor, model._q_net), log="all", log_freq=1000, log_graph=True)
+    wandb.watch((model, model._actor, model._q_net), log="all", log_freq=1000, log_graph=False)
 
     # compiled_model = th.compile(model)
 

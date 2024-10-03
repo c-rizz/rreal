@@ -27,7 +27,7 @@ class ExperienceCollector(ABC):
     def __init__(self, vec_env : gym.vector.VectorEnv,
                         buffer : Optional[BasicStorage] = None):
         self._vec_env = vec_env
-        self._current_obs = None
+        self._current_obs : dict[str, th.Tensor] = None # type: ignore
         self._collector_model : th.nn.Module
         self._buffer = buffer
         self._vecenv_is_torch = True
@@ -71,12 +71,11 @@ class ExperienceCollector(ABC):
             t_add = 0.
             for step in range(vsteps_to_collect):
                 t_pre_act = time.monotonic()
-                obs = self._current_obs
                 dbg_check_finite(self._current_obs)
                 if global_vstep_count < random_vsteps:
                     actions = th.as_tensor(np.stack([self._vec_env.single_action_space.sample() for _ in range(num_envs)]))
                 else:
-                    th_obs = map_tensor_tree(obs, lambda a: th.as_tensor(a, device = policy_device))
+                    th_obs = map_tensor_tree(self._current_obs, lambda a: th.as_tensor(a, device = policy_device))
                     dbg_check_finite(th_obs)                    
                     actions = policy.predict_action(th_obs)
                     if not self._vecenv_is_torch:
@@ -85,23 +84,12 @@ class ExperienceCollector(ABC):
 
                 next_input_obss, rewards, terminations, truncations, infos = self._vec_env.step(actions)
                 t_post_step = time.monotonic()
-                self._current_obs = map2_tensor_tree(self._current_obs,next_input_obss, lambda l1, l2: l1.copy_(l2))
-                # real_next_obs = copy.deepcopy(next_obs) #copy because we are going to modify it based on truncations
-                t_post_copy = time.monotonic()
-                # for idx, trunc in enumerate(truncations):
-                #     if trunc:
-                #         ggLog.info(f"Truncation happened")
-                #         real_next_obs[idx] = infos["final_observation"][idx]
-                # # truncated_envs = truncations.nonzero(as_tuple=True)
-                # # map_tensor_tree(real_next_obs, lambda t : th.Tensor: t.index_copy_(dim=0,truncated_envs,))                
 
-                # AsyncVectorEnvShmem always puts the consequent observation in final_observation.
-                # If it wasn't available we could take it from final_observation/terminal_observation by masking with
-                # (truncated or terminated)
                 real_next_obss = infos["final_observation"] #stack_tensor_tree([info["real_next_observation"] for info in unstack_tensor_tree(infos)])
                 t_post_final_obs = time.monotonic()
-                dbg_check_finite([obs, next_input_obss, rewards, terminations, truncations, actions])
-                buffer.add(obs=obs,
+
+                dbg_check_finite([self._current_obs, next_input_obss, rewards, terminations, truncations, actions])
+                buffer.add(obs=self._current_obs,
                             next_obs=real_next_obss,
                             action=actions,
                             reward=rewards,
@@ -109,11 +97,13 @@ class ExperienceCollector(ABC):
                             truncated=truncations)
                 t_post_add = time.monotonic()
 
-                dbg_check_finite(self._current_obs)
-                obs, next_input_obss, rewards, terminations, truncations, infos = None, None, None, None, None, None # to avoid inadvertly using them
+                map2_tensor_tree(self._current_obs,next_input_obss, lambda l1, l2: l1.copy_(l2))
+                t_post_copy = time.monotonic()
+
+                next_input_obss, rewards, terminations, truncations, infos = None, None, None, None, None # to avoid inadvertly using them
                 t_act += t_post_act-t_pre_act
                 t_step += t_post_step-t_post_act
-                t_copy +=t_post_copy-t_post_step
+                t_copy +=t_post_copy-t_post_add
                 t_final_obs += t_post_final_obs-t_post_copy
                 t_add += t_post_add-t_post_final_obs
             t_tot = time.monotonic()-t0
