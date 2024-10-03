@@ -20,7 +20,6 @@ from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncTh
 import wandb 
 from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
 import gymnasium as gym
-from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
 from adarl.envs.GymEnvWrapper import GymEnvWrapper
 from adarl.envs.GymToLr import GymToLr
 from adarl.envs.lr_wrappers.ObsToDict import ObsToDict
@@ -34,8 +33,9 @@ class EnvBuilderProtocol(typing.Protocol):
     def __call__(self, seed : int, log_folder : str, is_eval : bool, env_builder_args : dict) -> tuple[gym.Env,float]:
         ...
 
-def gym_builder(seed, log_folder, is_eval, env_builder_args):
+def gym_builder(seed, log_folder, is_eval, env_builder_args : dict[str,typing.Any]):
     os.environ["MUJOCO_GL"]="egl"
+    quiet = env_builder_args.pop("quiet",False)
     env_kwargs : dict = copy.deepcopy(env_builder_args)
     stepLength_sec = 0.05
     env_kwargs.pop("env_name")
@@ -52,7 +52,8 @@ def gym_builder(seed, log_folder, is_eval, env_builder_args):
     lrenv.seed(seed=seed)
     
     return GymEnvWrapper(env=lrenv,
-                        episodeInfoLogFile = log_folder+f"/GymEnvWrapper_log.{seed:010d}.csv"), 1/stepLength_sec
+                        episodeInfoLogFile = log_folder+f"/GymEnvWrapper_log.{seed:010d}.csv",
+                        quiet=quiet), 1/stepLength_sec
 
 
 def build_vec_env(env_builder_args,

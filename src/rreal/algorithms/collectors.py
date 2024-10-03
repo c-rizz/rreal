@@ -35,7 +35,8 @@ class ExperienceCollector(ABC):
                         "t_step" : 0.,
                         "t_copy" : 0.,
                         "t_final_obs" : 0.,
-                        "t_add" : 0.}
+                        "t_add" : 0.,
+                        "t_tot" : 0.}
 
     def set_base_collector_model(self, model_builder : Callable[[gym.spaces.Space, gym.spaces.Space],th.nn.Module]):
         self._collector_model = copy.deepcopy(model_builder(self.observation_space(), self.action_space()))
@@ -84,7 +85,7 @@ class ExperienceCollector(ABC):
 
                 next_input_obss, rewards, terminations, truncations, infos = self._vec_env.step(actions)
                 t_post_step = time.monotonic()
-
+                self._current_obs = map2_tensor_tree(self._current_obs,next_input_obss, lambda l1, l2: l1.copy_(l2))
                 # real_next_obs = copy.deepcopy(next_obs) #copy because we are going to modify it based on truncations
                 t_post_copy = time.monotonic()
                 # for idx, trunc in enumerate(truncations):
@@ -107,10 +108,7 @@ class ExperienceCollector(ABC):
                             terminated=terminations,
                             truncated=truncations)
                 t_post_add = time.monotonic()
-                # ggLog.info(f"added step {step} to buffer")
-                # self._current_obs = next_input_obss
-                self._current_obs = map2_tensor_tree(self._current_obs,next_input_obss, lambda l1, l2: l1.copy_(l2))
-                
+
                 dbg_check_finite(self._current_obs)
                 obs, next_input_obss, rewards, terminations, truncations, infos = None, None, None, None, None, None # to avoid inadvertly using them
                 t_act += t_post_act-t_pre_act
@@ -118,12 +116,14 @@ class ExperienceCollector(ABC):
                 t_copy +=t_post_copy-t_post_step
                 t_final_obs += t_post_final_obs-t_post_copy
                 t_add += t_post_add-t_post_final_obs
-            self._stats["t_act"] = t_act/vsteps_to_collect
-            self._stats["t_step"] = t_step/vsteps_to_collect
-            self._stats["t_copy"] = t_copy/vsteps_to_collect
-            self._stats["t_final_obs"] = t_final_obs/vsteps_to_collect
-            self._stats["t_add"] = t_add/vsteps_to_collect
-            # ggLog.info(f"collection times = {t_act} {t_step} {t_copy} {t_final_obs} {t_add}")
+            t_tot = time.monotonic()-t0
+            self._stats["t_act"] = t_act
+            self._stats["t_step"] = t_step
+            self._stats["t_copy"] = t_copy
+            self._stats["t_final_obs"] = t_final_obs
+            self._stats["t_add"] = t_add
+            self._stats["t_tot"] = t_tot
+            # ggLog.info(f"collection times = act={t_act:.6f} step={t_step:.6f} copy={t_copy:.6f} fobs={t_final_obs:.6f} add={t_add:.6f} tot={t_tot:.6f} over={t_tot-(t_act+t_step+t_copy+t_final_obs+t_add):.6f}")
         self._last_collection_wallduration = time.monotonic() - t0
 
     def collection_duration(self):

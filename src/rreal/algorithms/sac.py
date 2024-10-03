@@ -393,17 +393,16 @@ class SAC(RLPolicy):
         return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
 
     def train(self, global_step, iterations, buffer) -> tuple[float,float,float]:
-        q_loss, actor_loss, alpha_loss = float("nan"), float("nan"), float("nan")
-        q_act_alpha_losses = th.zeros(size=(iterations, 3), dtype=th.float32, device=self.device)
+        q_act_alpha_losses = [None]*iterations
         for i in range(iterations):
             data = buffer.sample(self._hp.batch_size)
             data = map_tensor_tree(data, lambda t : t.to(device=self.device, non_blocking=True))
             th.cuda.synchronize(self.device)
-            nq_loss, nactor_loss, nalpha_loss = self.update(transitions = data)
-            q_act_alpha_losses[i] = th.stack((nq_loss,nactor_loss,nalpha_loss))
+            q_act_alpha_losses[i] = self.update(transitions = data)
             self._tot_grad_steps_count += 1
-        # q_loss, actor_loss, alpha_loss = q_act_alpha_losses.mean(dim = 0).cpu().numpy()
-        q_loss, actor_loss, alpha_loss = q_act_alpha_losses[-1].cpu().numpy()
+        # q_loss, actor_loss, alpha_loss = th.as_tensor(q_act_alpha_losses).mean(dim = 0).cpu().numpy()
+        q_loss, actor_loss, alpha_loss = q_act_alpha_losses[-1]
+        adarl.utils.session.default_session.run_info["train_iterations"].value = self._tot_grad_steps_count
         wandb_log({"sac/tot_grad_steps_count":self._tot_grad_steps_count,
                     "sac/q_loss":q_loss,
                     "sac/actor_loss":actor_loss,
@@ -502,7 +501,7 @@ def train_off_policy(collector : ExperienceCollector,
                     #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"
                        f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f}"
                        f" tfps={steps_sl/t_tot_sl:.2f} cfps={steps_sl/t_coll_sl:.2f}"
-                       f" alltime_ips={global_step/(t-start_time):.2f} alltime_fps={model._tot_grad_steps_count/(t-start_time)}:.2f")
+                       f" alltime_ips={global_step/(t-start_time):.2f} alltime_fps={model._tot_grad_steps_count/(t-start_time):.2f}")
             t_train_sl, t_coll_sl, t_tot_sl, steps_sl = 0,0,0,0
             adarl.utils.sigint_handler.haltOnSigintReceived()
     callbacks.on_training_end()
