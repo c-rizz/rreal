@@ -32,6 +32,8 @@ from rreal.examples.solve_sac import sac_train, SAC_hyperparams, gym_builder
 
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
     import torch as th
+    max_steps_per_episode = 1000
+    num_envs = 128
     sac_train(seed, folderName, run_id, args,
                 env_builder=gym_builder,
                 env_builder_args = {"env_name" : "HalfCheetah-v4",
@@ -39,11 +41,11 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                     "ctrl_cost_weight" : 0.1,
                                     "reset_noise_scale" : 0.1,
                                     "exclude_current_positions_from_observation" : True,
-                                    "max_episode_steps" : 1000,
+                                    "max_episode_steps" : max_steps_per_episode,
                                     "quiet" : True},
                 hyperparams = SAC_hyperparams(  train_freq_vstep=16,
-                                                grad_steps=16,
-                                                parallel_envs = 128,
+                                                grad_steps=32,
+                                                parallel_envs = num_envs,
                                                 batch_size = 4096,
                                                 q_lr=1e-3,
                                                 policy_lr=3e-4,
@@ -54,9 +56,13 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                 total_steps = 10_000_000,
                                                 q_network_arch=[256,256],
                                                 policy_network_arch=[256,256],
-                                                learning_starts=1000,
+                                                learning_starts=num_envs*max_steps_per_episode,
                                                 log_freq_vstep = 1000),
-                collector_device=th.device("cpu"))
+                collector_device=th.device("cpu"),
+                max_episode_duration=max_steps_per_episode,
+                validation_buffer_size = 100_000,
+                validation_holdout_ratio = 0.01,
+                validation_batch_size = 256)
 
 
 

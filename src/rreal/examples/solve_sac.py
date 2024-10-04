@@ -14,6 +14,7 @@ import inspect
 import adarl.utils.session
 from adarl.envs.vector_env_logger import VectorEnvLogger
 from adarl.utils.buffers import ThDReplayBuffer
+from adarl.utils.ThDictEpReplayBuffer import ThDictEpReplayBuffer
 import adarl.utils.sigint_handler
 from rreal.algorithms.sac import SAC, train_off_policy
 from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector
@@ -132,18 +133,21 @@ class SAC_hyperparams:
     log_freq_vstep : int
 
 
-def sac_train(seed : int,
-              folderName : str,
-              run_id : str,
-              args,
-              env_builder : EnvBuilderProtocol,
-              env_builder_args : dict,
-              hyperparams : SAC_hyperparams,
-              eval_env_builder_args : list[dict] = [],
-              checkpoint_freq : int = 100,
-              video_recorder_kwargs : dict[str,typing.Any] = {},
-              collector_device : th.device | None = None,
-              debug_level : int = 2):
+def sac_train(  seed : int,
+                folderName : str,
+                run_id : str,
+                args,
+                env_builder : EnvBuilderProtocol,
+                env_builder_args : dict,
+                hyperparams : SAC_hyperparams,
+                max_episode_duration : int,
+                validation_buffer_size : int,
+                validation_holdout_ratio : float,
+                validation_batch_size : int,
+                eval_env_builder_args : list[dict] = [],
+                checkpoint_freq : int = 100,
+                collector_device : th.device | None = None,
+                debug_level : int = 2):
 
     log_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
@@ -152,6 +156,7 @@ def sac_train(seed : int,
                                                         run_comment=args["comment"],
                                                         folderName=folderName,
                                                         debug=debug_level)
+    validation_enabled = validation_buffer_size > 0 or validation_holdout_ratio > 0 or validation_batch_size > 0
 
     random.seed(seed)
     np.random.seed(seed)
@@ -195,14 +200,27 @@ def sac_train(seed : int,
 
     # compiled_model = th.compile(model)
 
-    rb = ThDReplayBuffer(
-        buffer_size=hyperparams.buffer_size,
-        observation_space=observation_space,
-        action_space=action_space,
-        device=device,
-        storage_torch_device=device,
-        handle_timeout_termination=True,
-        n_envs=num_envs)
+    # rb = ThDReplayBuffer(
+    #     buffer_size=hyperparams.buffer_size,
+    #     observation_space=observation_space,
+    #     action_space=action_space,
+    #     device=device,
+    #     storage_torch_device=device,
+    #     handle_timeout_termination=True,
+    #     n_envs=num_envs)
+    rb = ThDictEpReplayBuffer(  buffer_size=hyperparams.buffer_size,
+                                observation_space=observation_space,
+                                action_space=action_space,
+                                device=device,
+                                storage_torch_device=device,
+                                n_envs=num_envs,
+                                max_episode_duration=max_episode_duration,
+                                validation_buffer_size = validation_buffer_size,
+                                validation_holdout_ratio = validation_holdout_ratio,
+                                min_episode_duration = 0,
+                                disable_validation_set = False,
+                                fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
+                                val_buffer_min_size = validation_batch_size)
     
     ggLog.info(f"Replay buffer occupies {rb.memory_size()/1024/1024:.2f}MB")
     
@@ -233,9 +251,11 @@ def sac_train(seed : int,
             buffer = rb,
             total_timesteps=hyperparams.total_steps,
             train_freq = hyperparams.train_freq_vstep,
-            learning_starts=hyperparams.learning_starts,
+            learning_start_step=hyperparams.learning_starts,
             grad_steps=hyperparams.grad_steps,
             log_freq_vstep=hyperparams.log_freq_vstep,
-            callbacks=callbacks)
+            callbacks=callbacks,
+            validation_freq= 1 if validation_enabled else 0,
+            validation_batch_size=validation_batch_size)
     finally:
         collector.close()

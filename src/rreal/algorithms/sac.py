@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch, BaseBuffer
+from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch, BaseBuffer, BaseValidatingBuffer
 from adarl.utils.callbacks import TrainingCallback, CallbackList
 from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree
 from adarl.utils.wandb_wrapper import wandb_log
@@ -21,7 +21,6 @@ import adarl.utils.sigint_handler
 import gymnasium as gym
 import inspect
 import time
-import torch
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
@@ -53,7 +52,7 @@ class QNetwork(nn.Module):
         return min_q
     
     def forward(self, observations, actions):
-        qvals = self._q_nets(torch.cat([observations, actions], 1))
+        qvals = self._q_nets(th.cat([observations, actions], 1))
         return qvals
 
 
@@ -85,30 +84,30 @@ class Actor(nn.Module):
         if isinstance(action_max,float): action_max = th.as_tensor([action_max]*action_size, dtype=th.float32)
         if isinstance(action_min,float): action_min = th.as_tensor([action_min]*action_size, dtype=th.float32)
         # save action scaling factors as non-trained parameters
-        self.register_buffer("action_scale", torch.as_tensor((action_max - action_min) / 2.0, dtype=torch.float32, device=torch_device))
-        self.register_buffer("action_bias",  torch.as_tensor((action_max + action_min) / 2.0, dtype=torch.float32, device=torch_device))
+        self.register_buffer("action_scale", th.as_tensor((action_max - action_min) / 2.0, dtype=th.float32, device=torch_device))
+        self.register_buffer("action_bias",  th.as_tensor((action_max + action_min) / 2.0, dtype=th.float32, device=torch_device))
 
     def forward(self, observation_batch):
         hidden_batch = self.act_fc(observation_batch)
         dbg_check_finite(hidden_batch)
         mean = self.act_fc_mean(hidden_batch)
         log_std = self.act_fc_logstd(hidden_batch)
-        log_std = (torch.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min
+        log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min
         return mean, log_std
 
     def sample_action(self, observation_batch):
         mean, log_std = self(observation_batch)
         std = log_std.exp()
-        normal = torch.distributions.Normal(mean, std)
+        normal = th.distributions.Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
-        y_t = torch.tanh(x_t) # squash the action in [-1,1]
+        y_t = th.tanh(x_t) # squash the action in [-1,1]
         log_prob = normal.log_prob(x_t) # get the probability of the actions that we sampled
 
         # scale mean and action to the proper bounds
-        mean = torch.tanh(mean) * self.action_scale + self.action_bias
+        mean = th.tanh(mean) * self.action_scale + self.action_bias
         action = y_t * self.action_scale + self.action_bias
 
-        log_prob = log_prob - torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6) # correct the probability for the squashing
+        log_prob = log_prob - th.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6) # correct the probability for the squashing
         log_prob = log_prob.sum(1, keepdim=True) # get probability per each multidimensional action, not for each action component
 
         return action, log_prob, mean
@@ -182,7 +181,8 @@ class SAC(RLPolicy):
                                    batch_size = batch_size)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = torch_device
-        self._value_func_updates = 0
+        self._critic_updates = 0
+        self._alpha_updates = 0
         self._policy_updates = 0
         if feature_extractor is None:
             self._feature_extractor = StackVectorsFeatureExtractor(observation_space=observation_space)
@@ -212,7 +212,7 @@ class SAC(RLPolicy):
                 self._target_entropy = -self._hp.action_size
             else:
                 self._target_entropy = self._hp.target_entropy
-            self._log_alpha = torch.zeros(1, requires_grad=True, device=torch_device)
+            self._log_alpha = th.zeros(1, requires_grad=True, device=torch_device)
             self._alpha = self._log_alpha.exp().item()
             self._alpha_optimizer = optim.Adam([self._log_alpha], lr=self._hp.q_lr)
         else:
@@ -227,6 +227,14 @@ class SAC(RLPolicy):
         self._last_actor_loss = th.as_tensor(float("nan"), device=self.device)
         self._last_alpha_loss = th.as_tensor(float("nan"), device=self.device)
         self._tot_grad_steps_count = 0
+        self._stats = { "tot_grad_steps_count":0,
+                        "q_loss":0.0,
+                        "actor_loss":0.0,
+                        "alpha_loss":0.0,
+                        "val_q_loss":0.0,
+                        "val_actor_loss":0.0,
+                        "val_alpha_loss":0.0,
+                        "alpha":0.0}
 
     def get_feature_extractor(self):
         return self._feature_extractor
@@ -308,65 +316,73 @@ class SAC(RLPolicy):
     def get_hidden_state(self):
         return None
 
-    def _update_value_func(self, transitions : TransitionBatch):
+    def _compute_critic_loss(self, transitions : TransitionBatch):
         observations = self._feature_extractor.extract_features(transitions.observations)
         next_observations = self._feature_extractor.extract_features(transitions.next_observations)        
-        with torch.no_grad():
+        with th.no_grad():
             # Compute next-values for TD
             next_state_actions, next_state_log_pi, _ = self._actor.sample_action(next_observations)
             q_next = self._q_net_target.get_min_qval(next_observations, next_state_actions)
-            # ggLog.info(f"next_state_log_pi.size() = {next_state_log_pi.size()}")
             soft_q_next = q_next - self._alpha * next_state_log_pi
-            # ggLog.info(f"soft_q_next.size() = {soft_q_next.size()}")
             td_q_values = transitions.rewards.flatten() + (1 - transitions.terminated.flatten()) * self._hp.gamma * (soft_q_next).view(-1)
 
         # ggLog.info(f"td_q_values.size() = {td_q_values.size()}")
         q_values = self._q_net(observations, transitions.actions)
         # ggLog.info(f"q_values.size() = {q_values.size()}")
         td_q_values = td_q_values.unsqueeze(1).unsqueeze(2)
-        # assert td_q_values.size() == (q_values.size()[0], 1, 1)
-        # ggLog.info(f"td_q_values.size() = {td_q_values.size()}")
         td_q_values = td_q_values.expand(-1,2,1)
         # ggLog.info(f"td_q_values.size() = {td_q_values.size()}")
-        q_loss = F.mse_loss(q_values, td_q_values)
+        return F.mse_loss(q_values, td_q_values)
 
+    def _update_critic(self, transitions : TransitionBatch):
+        q_loss = self._compute_critic_loss(transitions)
         self._q_optimizer.zero_grad(set_to_none=True)
         q_loss.backward()
         self._q_optimizer.step()
-        self._value_func_updates += 1
+        self._critic_updates += 1
         self._last_q_loss = q_loss.detach()
 
-    def _update_policy(self, transitions : TransitionBatch):
+
+    def _compute_actor_loss(self, transitions : TransitionBatch):
         observations = self._feature_extractor.extract_features(transitions.observations)
         act, act_log_prob, _ = self._actor.sample_action(observations)
         min_q_pi = self._q_net.get_min_qval(observations, act) # cannot reuse those from _update_value_func, the value function has changed
         # ggLog.info(f"min_q_pi.size() = {min_q_pi.size()}")
         # ggLog.info(f"act_log_prob.size() = {act_log_prob.size()}")
-        actor_loss = ((self._alpha * act_log_prob) - min_q_pi).mean()
+        return ((self._alpha * act_log_prob) - min_q_pi).mean()
 
+    def _update_actor(self, transitions : TransitionBatch):
+        actor_loss = self._compute_actor_loss(transitions)
         self._actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
         self._actor_optimizer.step()
+        self._last_actor_loss = actor_loss.detach()
+        self._policy_updates += 1
 
+    def _compute_alpha_loss(self, transitions : TransitionBatch):
+        observations = self._feature_extractor.extract_features(transitions.observations)
+        with th.no_grad():
+            _, act_log_prob, _ = self._actor.sample_action(observations)
+        return (-self._log_alpha.exp() * (act_log_prob + self._target_entropy)).mean()
+    
+    def _update_alpha(self, transitions : TransitionBatch):
         if self._hp.auto_entropy_temperature:
-            with torch.no_grad():
-                _, act_log_prob, _ = self._actor.sample_action(observations)
-            alpha_loss = (-self._log_alpha.exp() * (act_log_prob + self._target_entropy)).mean()
-
+            alpha_loss = self._compute_alpha_loss(transitions)
             self._alpha_optimizer.zero_grad(set_to_none=True)
             alpha_loss.backward()
             self._alpha_optimizer.step()
             self._alpha = self._log_alpha.exp().item()
-        self._policy_updates += 1
-        self._last_actor_loss = actor_loss.detach()
+        else:
+            alpha_loss = th.tensor(0.0, device=self.device)
         self._last_alpha_loss = alpha_loss.detach()
+        self._alpha_updates += 1
 
     @staticmethod
     def _target_update(param, target_param, tau):
-            if tau == 1:
-                target_param.data.copy_(param.data)
-            else:
-                target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
+        if tau == 1:
+            target_param.data.copy_(param.data)
+        else:
+            target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
         
     def _update_target_nets(self):
         for param, target_param in zip(self._q_net.parameters(), self._q_net_target.parameters()):
@@ -379,48 +395,65 @@ class SAC(RLPolicy):
     def update(self, transitions : TransitionBatch):
         if self._feature_extractor_optimizer is not None:
             self._feature_extractor_optimizer.zero_grad(set_to_none=True) # gradients will be accumulated by both actor and critic
-        self._update_value_func(transitions = transitions)
+        self._update_critic(transitions = transitions)
         did_train_something = False
-        if self._value_func_updates % self._hp.policy_update_freq == 0:
+        if self._critic_updates % self._hp.policy_update_freq == 0:
             for _ in range(self._hp.policy_update_freq):
-                self._update_policy(transitions=transitions)
+                self._update_actor(transitions=transitions)
+                self._update_alpha(transitions=transitions)
                 did_train_something = True
-        if self._value_func_updates % self._hp.targets_update_freq == 0:
+        if self._critic_updates % self._hp.targets_update_freq == 0:
             self._update_target_nets()
             did_train_something = True
         if did_train_something:
             self._update_feature_extractor()
         return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
+    
+    def validate(self, buffer : BaseValidatingBuffer, batch_size : int):
+        with th.no_grad():
+            transitions = buffer.sample_validation(batch_size=batch_size)
+            critic_loss = self._compute_critic_loss(transitions)
+            actor_loss = self._compute_actor_loss(transitions)
+            alpha_loss = self._compute_alpha_loss(transitions)
+        self._stats.update({"val_q_loss":critic_loss,
+                            "val_actor_loss":actor_loss,
+                            "val_alpha_loss":alpha_loss})
+        return critic_loss, actor_loss, alpha_loss
 
-    def train(self, global_step, iterations, buffer) -> tuple[float,float,float]:
+    def train(self, global_step, iterations, buffer : BaseBuffer) -> tuple[float,float,float]:
         q_act_alpha_losses = [None]*iterations
         for i in range(iterations):
-            data = buffer.sample(self._hp.batch_size)
-            data = map_tensor_tree(data, lambda t : t.to(device=self.device, non_blocking=True))
-            th.cuda.synchronize(self.device)
-            q_act_alpha_losses[i] = self.update(transitions = data)
+            transitions = buffer.sample(self._hp.batch_size)
+            transitions = map_tensor_tree(transitions, lambda t : t.to(device=self.device, non_blocking=True))
+            # th.cuda.synchronize(self.device)
+            q_act_alpha_losses[i] = self.update(transitions = transitions)
             self._tot_grad_steps_count += 1
         # q_loss, actor_loss, alpha_loss = th.as_tensor(q_act_alpha_losses).mean(dim = 0).cpu().numpy()
         q_loss, actor_loss, alpha_loss = q_act_alpha_losses[-1]
         adarl.utils.session.default_session.run_info["train_iterations"].value = self._tot_grad_steps_count
-        wandb_log({"sac/tot_grad_steps_count":self._tot_grad_steps_count,
-                    "sac/q_loss":q_loss,
-                    "sac/actor_loss":actor_loss,
-                    "sac/alpha_loss":alpha_loss,
-                    "sac/alpha":self._alpha},
-                    throttle_period=2)
+        self._stats.update({"tot_grad_steps_count":self._tot_grad_steps_count,
+                            "q_loss":q_loss,
+                            "actor_loss":actor_loss,
+                            "alpha_loss":alpha_loss,
+                            "alpha":self._alpha})
         return q_loss, actor_loss, alpha_loss
 
+    def get_stats(self):
+        return self._stats
 
 def train_off_policy(collector : ExperienceCollector,
-          model : SAC,
-          buffer : BaseBuffer,
-          total_timesteps : int,
-          train_freq : int,
-          learning_starts : int,
-          grad_steps : int | Literal["auto"],
-          log_freq_vstep : int = -1,
-          callbacks : Union[TrainingCallback, List[TrainingCallback]] | None = None):
+                    model : SAC,
+                    buffer : BaseBuffer,
+                    total_timesteps : int,
+                    train_freq : int,
+                    learning_start_step : int,
+                    grad_steps : int | Literal["auto"],
+                    log_freq_vstep : int = -1,
+                    callbacks : Union[TrainingCallback, List[TrainingCallback]] | None = None,
+                    validation_freq : int = 1,
+                    validation_batch_size : int = 256):
+    if validation_freq>0 and not isinstance(buffer, BaseValidatingBuffer):
+        raise RuntimeError(f"validation_freq>0 but buffer does is not a BaseValidatingBuffer")
     if log_freq_vstep == -1: log_freq_vstep = train_freq
     num_envs = collector.num_envs()
 
@@ -428,6 +461,7 @@ def train_off_policy(collector : ExperienceCollector,
     global_step = 0
     t_coll_sl = 0
     t_train_sl = 0
+    t_val_sl = 0
     t_tot_sl = 0
     
     if callbacks is None:
@@ -441,6 +475,7 @@ def train_off_policy(collector : ExperienceCollector,
     ep_counter = 0
     step_counter = 0
     steps_sl = 0
+    train_count = 0
     q_loss, actor_loss, alpha_loss = float("nan"),float("nan"),float("nan")
     start_time = time.monotonic()
     last_log_steps = float("-inf")
@@ -455,16 +490,22 @@ def train_off_policy(collector : ExperienceCollector,
         collector.collect_experience_async(model_state_dict=model.state_dict(),
                                             vsteps_to_collect=vsteps_to_collect,
                                             global_vstep_count=global_step//num_envs,
-                                            random_vsteps=learning_starts//num_envs)
+                                            random_vsteps=learning_start_step//num_envs)
 
         # ------------------             Train             ------------------
         t_before_train = time.monotonic()
         trained = False
-        if global_step > learning_starts:
+        if global_step > learning_start_step:
             while (grad_steps != "auto" and not trained) or (grad_steps == "auto" and collector.is_collecting()):
                 trained = True
                 q_loss, actor_loss, alpha_loss = model.train(global_step, grad_steps if grad_steps!="auto" else 10, buffer)
+            train_count += 1
         t_after_train = time.monotonic()
+        if trained and validation_freq>0 and train_count%validation_freq==0:
+            model.validate(buffer, batch_size=validation_batch_size)
+        t_after_val = time.monotonic()
+        if trained:
+            wandb_log({"sac/"+k:v for k,v in model.get_stats().items()},throttle_period=2)
 
         # ------------------   Store collected experience  ------------------
         tmp_buff = collector.wait_collection(timeout = 120.0)
@@ -490,6 +531,7 @@ def train_off_policy(collector : ExperienceCollector,
         steps_sl += steps_to_collect
         tf = time.monotonic()
         t_train_sl += t_after_train - t_before_train
+        t_val_sl += t_after_val - t_after_train
         t_tot_sl += tf-t0
         t = time.monotonic()
         # ggLog.info(f"global_steps = {global_step}")
@@ -499,9 +541,9 @@ def train_off_policy(collector : ExperienceCollector,
             ggLog.info(f"OFFTRAIN: expstps:{global_step}"
                        f" trainstps={model._tot_grad_steps_count}"
                     #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"
-                       f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f}"
-                       f" tfps={steps_sl/t_tot_sl:.2f} cfps={steps_sl/t_coll_sl:.2f}"
-                       f" alltime_ips={global_step/(t-start_time):.2f} alltime_fps={model._tot_grad_steps_count/(t-start_time):.2f}")
-            t_train_sl, t_coll_sl, t_tot_sl, steps_sl = 0,0,0,0
+                       f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s val={t_val_sl:.2f}s tot={t_tot_sl:.2f}"
+                       f" fps={steps_sl/t_tot_sl:.2f} collfps={steps_sl/t_coll_sl:.2f}"
+                       f" alltime_fps={global_step/(t-start_time):.2f} alltime_ips={model._tot_grad_steps_count/(t-start_time):.2f}")
+            t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl= 0,0,0,0,0
             adarl.utils.sigint_handler.haltOnSigintReceived()
     callbacks.on_training_end()
