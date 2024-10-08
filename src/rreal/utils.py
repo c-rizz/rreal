@@ -1,7 +1,7 @@
 from typing import Callable
 import torch as th
 from rreal.nets.Parallel import Parallel
-from rreal.weight_norm import weight_norm
+from torch.nn.utils.parametrizations import weight_norm
 from adarl.utils.tensor_trees import TensorTree
 import gymnasium as gym
 

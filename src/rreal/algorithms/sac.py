@@ -41,7 +41,9 @@ class QNetwork(nn.Module):
                                      input_size=action_size + observation_size,
                                      output_size=1,
                                      ensemble_size=self._nets_num,
-                                     return_ensemble_mean=False).to(device=torch_device)
+                                     return_ensemble_mean=False,
+                                     use_weightnorm=True,
+                                     use_torchscript=True).to(device=torch_device)
     
     def get_min_qval(self, observations, actions):
         qvals = self(observations, actions)
@@ -505,7 +507,10 @@ def train_off_policy(collector : ExperienceCollector,
             model.validate(buffer, batch_size=validation_batch_size)
         t_after_val = time.monotonic()
         if trained:
-            wandb_log({"sac/"+k:v for k,v in model.get_stats().items()},throttle_period=2)
+            wlogs = {"sac/"+k:v for k,v in model.get_stats().items()}
+            wlogs["sac/buffer_frames"] = buffer.stored_frames()
+            wlogs["sac/val_buffer_frames"] = buffer.stored_validation_frames() if isinstance(buffer,BaseValidatingBuffer) else 0
+            wandb_log(wlogs,throttle_period=2)
 
         # ------------------   Store collected experience  ------------------
         tmp_buff = collector.wait_collection(timeout = 120.0)
