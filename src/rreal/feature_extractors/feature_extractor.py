@@ -20,7 +20,7 @@ class FeatureExtractor(ABC, th.nn.Module):
         raise NotImplementedError()
     
     @abstractmethod
-    def train(self, global_step, grad_steps, buffer):
+    def train_extractor(self, global_step, grad_steps, buffer):
         raise NotImplementedError()
     
     def get_init_args(self):

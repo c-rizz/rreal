@@ -19,14 +19,14 @@ import wandb
 from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
 from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
 import typing
-from rreal.algorithms.rl_policy import RLPolicy
-from rreal.examples.solve_sac import build_vec_env, EnvBuilderProtocol
+from rreal.algorithms.rl_agent import RLAgent
+from rreal.algorithms.sac_helpers import build_vec_env, EnvBuilderProtocol
 from dataclasses import dataclass
 from adarl.utils.utils import evaluatePolicyVec
 import gymnasium as gym
 
 class ModelBuilderProtocol(typing.Protocol):
-    def __call__(self, obs_space : gym.Space, act_space : gym.Space, hyperparams) -> RLPolicy:
+    def __call__(self, obs_space : gym.Space, act_space : gym.Space, hyperparams) -> RLAgent:
         ...
 
 def evaluate(seed : int,

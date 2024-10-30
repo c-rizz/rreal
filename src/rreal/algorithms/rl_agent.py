@@ -2,7 +2,7 @@ import torch.nn as nn
 from adarl.utils.buffers import TransitionBatch
 from abc import abstractmethod
 
-class RLPolicy(nn.Module):
+class RLAgent(nn.Module):
     @abstractmethod
     def predict_action(self, observation_batch, deterministic = False):
         raise NotImplementedError()

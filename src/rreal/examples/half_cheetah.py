@@ -1,6 +1,6 @@
 #!/usr/bin/env python3  
 
-from rreal.examples.solve_sac import sac_train, SAC_hyperparams, gym_builder
+from rreal.algorithms.sac_helpers import sac_train, SAC_hyperparams, gym_builder
 
 # def runFunction(seed, folderName, resumeModelFile, run_id, args):
 #     import torch as th

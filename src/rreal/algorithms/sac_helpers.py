@@ -29,6 +29,9 @@ import adarl.utils.dbg.ggLog as ggLog
 import copy
 import typing
 import adarl.utils.session as session
+from rreal.algorithms.rl_agent import RLAgent
+from adarl.envs.vector_env_checker import VectorEnvChecker
+
 
 class EnvBuilderProtocol(typing.Protocol):
     def __call__(self, seed : int, log_folder : str, is_eval : bool, env_builder_args : dict) -> tuple[gym.Env,float]:
@@ -74,16 +77,40 @@ def build_vec_env(env_builder_args,
                                                 is_eval = False,
                                                 env_builder_args = env_builder_args)[0]
                                 ))(i) for i in range(num_envs)]
-    envs = AsyncVectorEnvShmem(builders,
+    env = AsyncVectorEnvShmem(builders,
                                context="forkserver",
                                purely_numpy=purely_numpy,
                                shared_mem_device = collector_device,
                                copy_data=False,
                                worker_init_fn=session.set_current_session,
                                worker_init_kwargs={"session":session.default_session})
-    envs = VectorEnvLogger(env = envs,
+    env = VectorEnvLogger(env = env,
                            logs_id = logs_id)
-    return envs
+    env = VectorEnvChecker(env = env)
+    return env
+
+def build_eval_callbacks(eval_configurations : list[dict],
+                         env_builder : typing.Callable, 
+                         log_folder : str,
+                         base_seed : int,
+                         collector_device : th.device,
+                         model : RLAgent):
+    callbacks = []
+    for eval_conf in eval_configurations:
+        eval_env = build_vec_env(  env_builder=env_builder,
+                        env_builder_args=eval_conf["env_builder_args"],
+                        log_folder=log_folder+f"/eval_"+eval_conf["name"],
+                        seed=base_seed+100000000,
+                        num_envs=eval_conf["num_envs"],
+                        logs_id=eval_conf["name"],
+                        collector_device=collector_device)
+        callbacks.append(EvalCallback(eval_env=eval_env,
+                                    model=model,
+                                    n_eval_episodes=eval_conf["eval_eps"],
+                                    eval_freq_ep=eval_conf["eval_freq_ep"],
+                                    deterministic=eval_conf["deterministic"],
+                                    eval_name=eval_conf["name"]))
+    return callbacks
 
 # def build_vec_env(env_builder, env_builder_args, log_folder, seed, num_envs) -> gym.vector.VectorEnv:
 #     builders = [(lambda i: (lambda: env_builder(log_folder=log_folder,
@@ -112,6 +139,36 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams):
                 target_update_freq=1,
                 batch_size = hyperparams.batch_size)
 
+def build_collector(use_processes : bool,
+                    env_builder : EnvBuilderProtocol,
+                    env_builder_args : dict[str,typing.Any],
+                    log_folder : str,
+                    seed : int,
+                    num_envs : int,
+                    collector_device : th.device,
+                    collector_buffer_size : int,
+                    session : adarl.utils.session.Session):
+    if use_processes:
+        collector = AsyncProcessExperienceCollector(
+                            vec_env_builder=lambda: build_vec_env(  env_builder=env_builder,
+                                                                    env_builder_args=env_builder_args,
+                                                                    log_folder=log_folder,
+                                                                    seed=seed,
+                                                                    num_envs=num_envs,
+                                                                    collector_device=collector_device),
+                            storage_torch_device=collector_device,
+                            buffer_size=collector_buffer_size,
+                            session=session)
+    else:
+        collector = AsyncThreadExperienceCollector( vec_env=build_vec_env(  env_builder=env_builder,
+                                                                            env_builder_args=env_builder_args,
+                                                                            log_folder=log_folder,
+                                                                            seed=seed,
+                                                                            num_envs=num_envs,
+                                                                            collector_device=collector_device),
+                                                    buffer_size=collector_buffer_size,
+                                                    storage_torch_device=collector_device)
+    return collector
 
 from dataclasses import dataclass
 @dataclass
@@ -144,7 +201,7 @@ def sac_train(  seed : int,
                 validation_buffer_size : int,
                 validation_holdout_ratio : float,
                 validation_batch_size : int,
-                eval_env_builder_args : list[dict] = [],
+                eval_configurations : list[dict] = [],
                 checkpoint_freq : int = 100,
                 collector_device : th.device | None = None,
                 debug_level : int = 2):
@@ -168,31 +225,18 @@ def sac_train(  seed : int,
     if collector_device is None:
         collector_device = device
     # env setup
-    num_envs = hyperparams.parallel_envs
-    use_processes = True
-    if use_processes:
-        collector = AsyncProcessExperienceCollector(
-                            vec_env_builder=lambda: build_vec_env(  env_builder=env_builder,
-                                                                    env_builder_args=env_builder_args,
-                                                                    log_folder=log_folder,
-                                                                    seed=seed,
-                                                                    num_envs=hyperparams.parallel_envs,
-                                                                    collector_device=collector_device),
-                            storage_torch_device=collector_device,
-                            buffer_size=hyperparams.train_freq_vstep*hyperparams.parallel_envs,
-                            session=session)
-    else:
-        collector = AsyncThreadExperienceCollector( vec_env=build_vec_env(  env_builder=env_builder,
-                                                                            env_builder_args=env_builder_args,
-                                                                            log_folder=log_folder,
-                                                                            seed=seed,
-                                                                            num_envs=hyperparams.parallel_envs,
-                                                                            collector_device=collector_device),
-                                                    buffer_size=hyperparams.train_freq_vstep*hyperparams.parallel_envs,
-                                                    storage_torch_device=collector_device)
+    collector = build_collector(use_processes = True,
+                                env_builder = env_builder,
+                                env_builder_args = env_builder_args,
+                                log_folder = log_folder,
+                                seed = seed,
+                                num_envs = hyperparams.parallel_envs,
+                                collector_device = collector_device,
+                                collector_buffer_size = hyperparams.train_freq_vstep*hyperparams.parallel_envs,
+                                session = session)
+    collector.set_base_collector_model(lambda o,a: build_sac(o,a,hyperparams))    
     observation_space = collector.observation_space()
     action_space = collector.action_space()
-    collector.set_base_collector_model(lambda o,a: build_sac(o,a,hyperparams))
     model = build_sac(observation_space, action_space, hyperparams)
 
     # torchexplorer.watch(model, backend="wandb")
@@ -213,7 +257,7 @@ def sac_train(  seed : int,
                                 action_space=action_space,
                                 device=device,
                                 storage_torch_device=device,
-                                n_envs=num_envs,
+                                n_envs=hyperparams.parallel_envs,
                                 max_episode_duration=max_episode_duration,
                                 validation_buffer_size = validation_buffer_size,
                                 validation_holdout_ratio = validation_holdout_ratio,
@@ -225,26 +269,16 @@ def sac_train(  seed : int,
     ggLog.info(f"Replay buffer occupies {rb.memory_size()/1024/1024:.2f}MB")
     
     start_time = time.time()
-
-    callbacks = []
-    for eval_conf in eval_env_builder_args:
-        eval_env = build_vec_env(  env_builder=env_builder,
-                        env_builder_args=eval_conf["env_builder_args"],
-                        log_folder=log_folder+f"/eval_"+eval_conf["name"],
-                        seed=seed+100000000,
-                        num_envs=eval_conf["num_envs"],
-                        logs_id=eval_conf["name"],
-                        collector_device=collector_device)
-        callbacks.append(EvalCallback(eval_env=eval_env,
-                                    model=model,
-                                    n_eval_episodes=eval_conf["eval_eps"],
-                                    eval_freq_ep=eval_conf["eval_freq_ep"],
-                                    deterministic=eval_conf["deterministic"],
-                                    eval_name=eval_conf["name"]))
+    callbacks = build_eval_callbacks(eval_configurations=eval_configurations,
+                                     env_builder=env_builder,
+                                     log_folder=log_folder,
+                                     base_seed=seed,
+                                     collector_device=collector_device,
+                                     model = model)
     callbacks.append(CheckpointCallbackRB(save_path=log_folder+"/checkpoints",
                                           model=model,
                                           save_best=False,
-                                          save_freq_ep=checkpoint_freq*num_envs))
+                                          save_freq_ep=checkpoint_freq*hyperparams.parallel_envs))
     try:
         train_off_policy(collector=collector,
             model = model,

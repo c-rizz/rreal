@@ -1,6 +1,6 @@
 #!/usr/bin/env python3  
 
-from rreal.examples.solve_sac import sac_train, SAC_hyperparams, gym_builder
+from rreal.algorithms.sac_helpers import sac_train, SAC_hyperparams, gym_builder
 from adarl.envs.examples.HopperEnv import HopperEnv
 from adarl.envs.GymEnvWrapper import GymEnvWrapper
 from adarl.adapters.PyBulletAdapter import PyBulletAdapter
@@ -77,7 +77,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                 validation_buffer_size = 100_000,
                 validation_holdout_ratio = 0.01,
                 validation_batch_size = 256,
-                eval_env_builder_args= [{   "name" : "video_stoch",
+                eval_configurations= [{   "name" : "video_stoch",
                                             "deterministic" : False,
                                             "eval_freq_ep" : 10*num_envs,
                                             "eval_eps" : 1,

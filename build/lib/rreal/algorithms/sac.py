@@ -20,7 +20,7 @@ import adarl.utils.session as session
 from adarl.utils.wandb_wrapper import wandb_log
 from adarl.utils.callbacks import TrainingCallback, CallbackList
 from rreal.algorithms.collectors import ExperienceCollector
-from rreal.algorithms.rl_policy import RLPolicy
+from rreal.algorithms.rl_agent import RLAgent
 import inspect
 import yaml
 from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree
@@ -114,7 +114,7 @@ class Actor(nn.Module):
         return action, log_prob, mean
 
 
-class SAC(RLPolicy):
+class SAC(RLAgent):
     @dataclass
     class Hyperparams():
         q_lr : float
@@ -345,7 +345,7 @@ class SAC(RLPolicy):
 
 
 def train_off_policy(collector : ExperienceCollector,
-          model : SAC,
+          agent : SAC,
           buffer : ThDReplayBuffer,
           total_timesteps : int,
           train_freq : int,
@@ -381,14 +381,14 @@ def train_off_policy(collector : ExperienceCollector,
         steps_to_collect = train_freq*num_envs
         vsteps_to_collect = train_freq
         callbacks.on_collection_start()
-        collector.collect_experience_async(model_state_dict=model.state_dict(),
+        collector.collect_experience_async(model_state_dict=agent.state_dict(),
                                             vsteps_to_collect=vsteps_to_collect,
                                             global_vstep_count=global_step//num_envs,
                                             random_vsteps=learning_starts//num_envs)
 
         # ------------------             Train             ------------------
         t_before_train = time.monotonic()
-        model.train(global_step, learning_starts, grad_steps, batch_size, buffer)
+        agent.train_model(global_step, learning_starts, grad_steps, batch_size, buffer)
         t_after_train = time.monotonic()
 
         # ------------------   Store collected experience  ------------------
@@ -418,7 +418,7 @@ def train_off_policy(collector : ExperienceCollector,
         t_train_sl += t_after_train - t_before_train
         t_tot_sl += tf-t0
         if global_step/num_envs % log_freq == 0:
-            ggLog.info(f"OFFTRAIN: expstps:{global_step} trainstps={model._tot_grad_steps_count} coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f}")
+            ggLog.info(f"OFFTRAIN: expstps:{global_step} trainstps={agent._tot_grad_steps_count} coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f}")
             t_train_sl, t_coll_sl, t_tot_sl = 0,0,0
             adarl.utils.sigint_handler.haltOnSigintReceived()
     callbacks.on_training_end()

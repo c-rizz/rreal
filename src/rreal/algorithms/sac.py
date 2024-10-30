@@ -8,7 +8,7 @@ from adarl.utils.wandb_wrapper import wandb_log
 from adarl.utils.utils import dbg_check_finite
 from dataclasses import dataclass, asdict
 from rreal.algorithms.collectors import ExperienceCollector
-from rreal.algorithms.rl_policy import RLPolicy
+from rreal.algorithms.rl_agent import RLAgent
 from rreal.feature_extractors import get_feature_extractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
@@ -115,7 +115,7 @@ class Actor(nn.Module):
         return action, log_prob, mean
 
 
-class SAC(RLPolicy):
+class SAC(RLAgent):
     @dataclass
     class Hyperparams():
         q_lr : float
@@ -365,6 +365,7 @@ class SAC(RLPolicy):
         observations = self._feature_extractor.extract_features(transitions.observations)
         with th.no_grad():
             _, act_log_prob, _ = self._actor.sample_action(observations)
+            self._stats["avg_log_prob"] = act_log_prob.mean()
         return (-self._log_alpha.exp() * (act_log_prob + self._target_entropy)).mean()
     
     def _update_alpha(self, transitions : TransitionBatch):
@@ -422,7 +423,7 @@ class SAC(RLPolicy):
                             "val_alpha_loss":alpha_loss})
         return critic_loss, actor_loss, alpha_loss
 
-    def train(self, global_step, iterations, buffer : BaseBuffer) -> tuple[float,float,float]:
+    def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[float,float,float]:
         q_act_alpha_losses = [None]*iterations
         for i in range(iterations):
             transitions = buffer.sample(self._hp.batch_size)
@@ -500,7 +501,7 @@ def train_off_policy(collector : ExperienceCollector,
         if global_step > learning_start_step:
             while (grad_steps != "auto" and not trained) or (grad_steps == "auto" and collector.is_collecting()):
                 trained = True
-                q_loss, actor_loss, alpha_loss = model.train(global_step, grad_steps if grad_steps!="auto" else 10, buffer)
+                q_loss, actor_loss, alpha_loss = model.train_model(global_step, grad_steps if grad_steps!="auto" else 10, buffer)
             train_count += 1
         t_after_train = time.monotonic()
         if trained and validation_freq>0 and train_count%validation_freq==0:

@@ -19,12 +19,12 @@ import gymnasium as gym
 import adarl.utils.mp_helper as mp_helper
 import adarl.utils.session as session
 from adarl.utils.utils import pyTorch_makeDeterministic
-from rreal.algorithms.rl_policy import RLPolicy
+from rreal.algorithms.rl_agent import RLAgent
 
 
 class ExperienceCollector():
     def __init__(self, vec_env : gym.vector.VectorEnv,
-                        base_model : Optional[RLPolicy] = None,
+                        base_model : Optional[RLAgent] = None,
                         buffer : Optional[BasicStorage] = None):
         self._vec_env = vec_env
         self._current_obs = None

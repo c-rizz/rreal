@@ -1,9 +1,9 @@
 from __future__ import annotations
-from rreal.algorithms.rl_policy import RLPolicy
+from rreal.algorithms.rl_agent import RLAgent
 import torch as th
 from adarl.utils.buffers import TransitionBatch
 
-class RandomPolicy(RLPolicy):
+class RandomPolicy(RLAgent):
 
     def __init__(self,
                  action_size : int,
