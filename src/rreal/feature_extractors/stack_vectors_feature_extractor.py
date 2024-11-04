@@ -43,7 +43,7 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         with open(path+".extra.yaml", "w") as init_args_yamlfile:
             yaml.dump(extra,init_args_yamlfile, default_flow_style=None)
 
-    def train(self, global_step, grad_steps, buffer):
+    def train_extractor(self, global_step, grad_steps, buffer):
         pass
     
 
