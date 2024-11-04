@@ -2,3 +2,4 @@
 *.gch
 *.pyc
 src/rreal.egg-info/*
+build/*
