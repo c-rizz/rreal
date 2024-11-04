@@ -1,5 +1,6 @@
 from abc import abstractmethod, ABC
 import torch as th
+import zipfile
 
 class FeatureExtractor(ABC, th.nn.Module):
     @abstractmethod
@@ -12,11 +13,11 @@ class FeatureExtractor(ABC, th.nn.Module):
     
     @classmethod
     @abstractmethod
-    def load(cls, path : str):
+    def load(cls, archive : zipfile.ZipFile):
         raise NotImplementedError()
     
     @abstractmethod
-    def save(self, path : str):
+    def save_to_archive(self, archive : zipfile.ZipFile):
         raise NotImplementedError()
     
     @abstractmethod

@@ -8,6 +8,9 @@ from rreal.feature_extractors import register_feature_extractor_class
 import inspect
 import yaml
 import adarl.utils.dbg.ggLog as ggLog
+from typing_extensions import override
+import zipfile
+
 class StackVectorsFeatureExtractor(FeatureExtractor):
     def __init__(self, observation_space : gym.spaces.Space):
         super().__init__()
@@ -27,20 +30,30 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         return self._obs_converter.vector_part_size()
     
     
+    @override
     @classmethod
-    def load(cls, path : str):
-        with open(path+".extra.yaml", "r") as init_args_yamlfile:
-            extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+    def load(cls, file : zipfile.ZipFile | str):
+        if isinstance(file,str): # just for compatibility
+            fname = file+".feature_extractor.extra.yaml"
+            ggLog.info(f"opening {fname}")
+            with open(fname, "r") as init_args_yamlfile:
+                extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+        elif isinstance(file,zipfile.ZipFile):
+            with file.open("feature_extractor.extra.yaml", "r") as init_args_yamlfile:
+                extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+        else:
+            raise RuntimeError(f"Unexpected input type")
         if "class_name" in extra and extra["class_name"] != cls.__name__:
-            raise RuntimeError(f"File was not saved by this class")
+            raise RuntimeError(f"File was not saved by this class found '{extra['class_name']}' instead of '{cls.__name__}'")
         return StackVectorsFeatureExtractor(**extra["init_args"])
     
-    def save(self, path : str):
+    @override
+    def save_to_archive(self, archive : zipfile.ZipFile):
         extra = {}
         extra["init_args"] = self._init_args
         extra["class_name"] = self.__class__.__name__
         # ggLog.info(f"saving extra={extra}")
-        with open(path+".extra.yaml", "w") as init_args_yamlfile:
+        with archive.open("feature_extractor.extra.yaml", "w") as init_args_yamlfile:
             yaml.dump(extra,init_args_yamlfile, default_flow_style=None)
 
     def train_extractor(self, global_step, grad_steps, buffer):

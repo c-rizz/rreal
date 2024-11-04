@@ -26,6 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import yaml
+import zipfile
 
 class QNetwork(nn.Module):
     def __init__(self,
@@ -242,23 +243,32 @@ class SAC(RLAgent):
         return self._feature_extractor
 
     def save(self, path : str):
-        th.save(self.state_dict(), path)
-        extra = {}
-        extra["init_args"] = self._init_args
-        extra["hyperparams"] = asdict(self._hp)
-        extra["class_name"] = self.__class__.__name__
-        extra["feature_extractor_class_name"] = self._feature_extractor.__class__.__name__
-        extra["feature_extractor_init_args"] = self._feature_extractor.get_init_args()
-        with open(path+".extra.yaml", "w") as init_args_yamlfile:
-            yaml.dump(extra,init_args_yamlfile, default_flow_style=None)
-        self._feature_extractor.save(path=path+".feature_extractor")
-        # th.save( self._feature_extractor.state_dict(), path+".fe_state.pth")
+        with zipfile.ZipFile(path) as archive:
+            with archive.open("sac.pth", "w") as sac_file:
+                th.save(self.state_dict(), sac_file)
+            with archive.open("init_args.yaml", "w") as extra_file:
+                extra = {}
+                extra["init_args"] = self._init_args
+                extra["hyperparams"] = asdict(self._hp)
+                extra["class_name"] = self.__class__.__name__
+                extra["feature_extractor_class_name"] = self._feature_extractor.__class__.__name__
+                extra["feature_extractor_init_args"] = self._feature_extractor.get_init_args()
+                yaml.dump(extra,extra_file, default_flow_style=None)
+            self._feature_extractor.save_to_archive(archive)
+            # th.save( self._feature_extractor.state_dict(), path+".fe_state.pth")
         
 
     def load_(self, path : str):
         # Before loading the state dict we try to check that the models are compatible
-        with open(path+".extra.yaml", "r") as init_args_yamlfile:
-            extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+        try:
+            with zipfile.ZipFile(path) as archive:
+                with archive.open("init_args.yaml", "r") as init_args_yamlfile:
+                    extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+            is_zipfile = True
+        except:
+            with open(path+".extra.yaml", "r") as init_args_yamlfile:
+                extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+            is_zipfile = False
         if "class_name" in extra and extra["class_name"] != self.__class__.__name__:
             raise RuntimeError(f"File was not saved by this class")
         if self._init_args != extra["init_args"]:
@@ -275,16 +285,32 @@ class SAC(RLAgent):
                        f"self._init_args = \n{yaml.dump(self._init_args)}\n"
                        f"load init_args  = \n{yaml.dump(extra['feature_extractor_init_args'])}")
             raise RuntimeError("Unmatched init_args")
-        self.load_state_dict(th.load(path))
+        if is_zipfile:
+            with zipfile.ZipFile(path) as archive:
+                with archive.open("sac.pth", "r") as sac_file:
+                    self.load_state_dict(th.load(sac_file))
+        else:
+            self.load_state_dict(th.load(path))
 
     @classmethod
     def load(cls, path : str):
-        with open(path+".extra.yaml", "r") as init_args_yamlfile:
-            extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+        try:
+            with zipfile.ZipFile(path) as archive:
+                with archive.open("init_args.yaml", "r") as init_args_yamlfile:
+                    extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+            is_zipfile = True
+        except:
+            with open(path+".extra.yaml", "r") as init_args_yamlfile:
+                extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+            is_zipfile = False
         if "class_name" in extra and extra["class_name"] != cls.__name__:
             raise RuntimeError(f"File was not saved by this class")
         feature_extractor_class = get_feature_extractor(extra["feature_extractor_class_name"])
-        extra["feature_extractor"] = feature_extractor_class.load(path+".feature_extractor")
+        if is_zipfile:
+            with zipfile.ZipFile(path) as archive:
+                extra["feature_extractor"] = feature_extractor_class.load(archive)
+        else:
+            extra["feature_extractor"] = feature_extractor_class.load(path)
         model = SAC(**extra["init_args"])
         # At this point we should have a model that is initialized exactly like the one that was saved
         # So we can load into it the state from the checkpoint
