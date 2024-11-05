@@ -54,7 +54,7 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         extra["class_name"] = self.__class__.__name__
         # ggLog.info(f"saving extra={extra}")
         with archive.open("feature_extractor.extra.yaml", "w") as init_args_yamlfile:
-            yaml.dump(extra,init_args_yamlfile, default_flow_style=None)
+            init_args_yamlfile.write(yaml.dump(extra,default_flow_style=None).encode("utf-8"))
 
     def train_extractor(self, global_step, grad_steps, buffer):
         pass

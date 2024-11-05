@@ -137,7 +137,8 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams):
                 target_tau = hyperparams.target_tau,
                 policy_update_freq=2,
                 target_update_freq=1,
-                batch_size = hyperparams.batch_size)
+                batch_size = hyperparams.batch_size,
+                reference_init_args = hyperparams.reference_init_args)
 
 def build_collector(use_processes : bool,
                     env_builder : EnvBuilderProtocol,
@@ -188,6 +189,7 @@ class SAC_hyperparams:
     batch_size : int
     parallel_envs : int
     log_freq_vstep : int
+    reference_init_args : dict
 
 
 def sac_train(  seed : int,
@@ -279,6 +281,7 @@ def sac_train(  seed : int,
                                           model=model,
                                           save_best=False,
                                           save_freq_ep=checkpoint_freq*hyperparams.parallel_envs))
+    model.save(folderName+"/model_untrained.zip")
     try:
         train_off_policy(collector=collector,
             model = model,

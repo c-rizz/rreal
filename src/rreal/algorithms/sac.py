@@ -27,6 +27,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 import yaml
 import zipfile
+from difflib import ndiff
+import copy
 
 class QNetwork(nn.Module):
     def __init__(self,
@@ -157,13 +159,15 @@ class SAC(RLAgent):
                  target_update_freq = 1,
                  feature_extractor : FeatureExtractor | None = None,
                  feature_extractor_lr = 0.0,
-                 batch_size = 512):
+                 batch_size = 512,
+                 reference_init_args : dict = {}):
         super().__init__()
         _, _, _, values = inspect.getargvalues(inspect.currentframe())
         self._init_args = values
         self._init_args.pop("self")
         self._init_args.pop("__class__")
         self._init_args.pop("feature_extractor") # Will be saved separately
+        self._init_args = copy.deepcopy(self._init_args)
         self._hp = SAC.Hyperparams(q_lr=q_lr,
                                    policy_lr = policy_lr,
                                    gamma=gamma,
@@ -243,7 +247,7 @@ class SAC(RLAgent):
         return self._feature_extractor
 
     def save(self, path : str):
-        with zipfile.ZipFile(path) as archive:
+        with zipfile.ZipFile(path, mode="w") as archive:
             with archive.open("sac.pth", "w") as sac_file:
                 th.save(self.state_dict(), sac_file)
             with archive.open("init_args.yaml", "w") as extra_file:
@@ -253,7 +257,7 @@ class SAC(RLAgent):
                 extra["class_name"] = self.__class__.__name__
                 extra["feature_extractor_class_name"] = self._feature_extractor.__class__.__name__
                 extra["feature_extractor_init_args"] = self._feature_extractor.get_init_args()
-                yaml.dump(extra,extra_file, default_flow_style=None)
+                extra_file.write(yaml.dump(extra,default_flow_style=None).encode("utf-8"))
             self._feature_extractor.save_to_archive(archive)
             # th.save( self._feature_extractor.state_dict(), path+".fe_state.pth")
         
@@ -273,9 +277,15 @@ class SAC(RLAgent):
             raise RuntimeError(f"File was not saved by this class")
         if self._init_args != extra["init_args"]:
             ggLog.warn("init args of loaded model differ from those of self.")
-            ggLog.warn(f"self._init_args = \n{yaml.dump(self._init_args)}")
-            ggLog.warn(f"load init_args  = \n{yaml.dump(extra['init_args'])}")
-            raise RuntimeError("Unmatched init_args")
+            load_yaml_args = yaml.dump(extra['init_args'])
+            original_yaml_args = yaml.dump(self._init_args)
+            ggLog.warn(f"self._init_args = \n{original_yaml_args}")
+            ggLog.warn(f"load init_args  = \n{load_yaml_args}")
+            diffs = ndiff(   original_yaml_args.splitlines(keepends=True),
+                            load_yaml_args.splitlines(keepends=True))
+            diffs = [l for l in diffs if len(l)>0 and l[0] != ' ']
+            ggLog.warn(f"Args comparison with loaded model:\n{''.join(diffs)}")
+            # raise RuntimeError("Unmatched init_args")
         if self._feature_extractor.__class__.__name__ != extra["feature_extractor_class_name"]:
             ggLog.warn(f"feature_extractor_class_name of loaded model differs from that of self.\n"
                        f"loaded = {extra['feature_extractor_class_name']}, self's = {self._feature_extractor.__class__.__name__}")
