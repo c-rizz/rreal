@@ -168,6 +168,18 @@ def build_collector(use_processes : bool,
                                                     storage_torch_device=collector_device)
     return collector
 
+def wrap_with_logger(vec_env_builder : VecEnvBuilderProtocol):
+    def wrapped_builder(seed : int, run_folder : str, num_envs : int, env_builder_args : dict):
+        logs_id = session.default_session.run_info["run_id"]
+        venv = vec_env_builder(seed = seed, run_folder = run_folder, num_envs = num_envs, env_builder_args = env_builder_args)
+        venv = VectorEnvLogger(env = venv, logs_id = logs_id)
+        venv = VectorEnvChecker(env = venv)
+        return venv
+    return wrapped_builder
+
+
+
+
 from dataclasses import dataclass
 @dataclass
 class SAC_hyperparams:
@@ -187,14 +199,6 @@ class SAC_hyperparams:
     parallel_envs : int
     log_freq_vstep : int
     reference_init_args : dict
-
-def vec_env_builder_from_env_builder(env_builder : EnvBuilderProtocol, collector_device : th.device):
-    return lambda seed, run_folder, num_envs, env_builder_args: build_vec_env(  env_builder=env_builder,
-                                                                                env_builder_args=env_builder_args,
-                                                                                log_folder=run_folder,
-                                                                                seed=seed,
-                                                                                num_envs=num_envs,
-                                                                                collector_device=collector_device)
 
 def sac_train(  seed : int,
                 folderName : str,
@@ -242,6 +246,7 @@ def sac_train(  seed : int,
                                                                                                 collector_device=collector_device)
     if vec_env_builder is None:
         raise RuntimeError(f"You must specify either vec_env_builder or env_builder")
+    vec_env_builder = wrap_with_logger(vec_env_builder)
     # env setup
     collector = build_collector(use_processes = True,
                                 vec_env_builder = vec_env_builder,

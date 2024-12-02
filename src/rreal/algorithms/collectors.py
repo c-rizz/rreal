@@ -42,7 +42,7 @@ class ExperienceCollector(ABC):
         self._collector_model = copy.deepcopy(model_builder(self.observation_space(), self.action_space()))
 
     def num_envs(self):
-        return self._vec_env.num_envs
+        return self._vec_env.unwrapped.num_envs
 
     def reset(self):
         if self._vec_env is not None:
@@ -73,7 +73,7 @@ class ExperienceCollector(ABC):
                 t_pre_act = time.monotonic()
                 dbg_check_finite(self._current_obs)
                 if global_vstep_count < random_vsteps:
-                    actions = th.as_tensor(np.stack([self._vec_env.single_action_space.sample() for _ in range(num_envs)]))
+                    actions = th.as_tensor(np.stack([self._vec_env.unwrapped.single_action_space.sample() for _ in range(num_envs)]))
                 else:
                     th_obs = map_tensor_tree(self._current_obs, lambda a: th.as_tensor(a, device = policy_device))
                     dbg_check_finite(th_obs)                    
