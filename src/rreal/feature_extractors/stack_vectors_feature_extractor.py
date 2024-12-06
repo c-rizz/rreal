@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch.nn as nn
 from abc import abstractmethod
 from rreal.feature_extractors.feature_extractor import FeatureExtractor

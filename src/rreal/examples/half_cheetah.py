@@ -33,7 +33,7 @@ from rreal.algorithms.sac_helpers import sac_train, SAC_hyperparams, gym_builder
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
     import torch as th
     max_steps_per_episode = 1000
-    num_envs = 128
+    num_envs = 8
     sac_train(seed, folderName, run_id, args,
                 env_builder=gym_builder,
                 env_builder_args = {"env_name" : "HalfCheetah-v4",
@@ -56,8 +56,9 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                 total_steps = 10_000_000,
                                                 q_network_arch=[256,256],
                                                 policy_network_arch=[256,256],
-                                                learning_starts=num_envs*max_steps_per_episode,
-                                                log_freq_vstep = 1000),
+                                                learning_starts=100*num_envs*max_steps_per_episode,
+                                                log_freq_vstep = 1000,
+                                                reference_init_args={}),
                 collector_device=th.device("cpu"),
                 max_episode_duration=max_steps_per_episode,
                 validation_buffer_size = 100_000,
