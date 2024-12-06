@@ -37,6 +37,10 @@ class EnvBuilderProtocol(typing.Protocol):
     def __call__(self, seed : int, log_folder : str, is_eval : bool, env_builder_args : dict) -> tuple[gym.Env,float]:
         ...
 
+class VecEnvBuilderProtocol(typing.Protocol):
+    def __call__(self, seed : int, run_folder : str, num_envs : int, env_builder_args : dict) -> gym.vector.VectorEnv:
+        ...
+
 def gym_builder(seed, log_folder, is_eval, env_builder_args : dict[str,typing.Any]):
     os.environ["MUJOCO_GL"]="egl"
     quiet = env_builder_args.pop("quiet",False)
@@ -72,6 +76,8 @@ def build_vec_env(env_builder_args,
                   collector_device : th.device = th.device("cuda")) -> gym.vector.VectorEnv:
     if "use_wandb" not in env_builder_args:
         env_builder_args["use_wandb"] = False
+    if logs_id is None:
+        logs_id = session.default_session.run_info["run_id"]
     builders = [(lambda i: (lambda: env_builder(seed=seed+100000*i,
                                                 log_folder=log_folder,
                                                 is_eval = False,
@@ -90,20 +96,17 @@ def build_vec_env(env_builder_args,
     return env
 
 def build_eval_callbacks(eval_configurations : list[dict],
-                         env_builder : typing.Callable, 
-                         log_folder : str,
+                         vec_env_builder : VecEnvBuilderProtocol,
+                         run_folder : str,
                          base_seed : int,
                          collector_device : th.device,
                          model : RLAgent):
     callbacks = []
     for eval_conf in eval_configurations:
-        eval_env = build_vec_env(  env_builder=env_builder,
-                        env_builder_args=eval_conf["env_builder_args"],
-                        log_folder=log_folder+f"/eval_"+eval_conf["name"],
-                        seed=base_seed+100000000,
-                        num_envs=eval_conf["num_envs"],
-                        logs_id=eval_conf["name"],
-                        collector_device=collector_device)
+        eval_env = vec_env_builder(env_builder_args=eval_conf["env_builder_args"],
+                                    run_folder=run_folder+f"/eval_"+eval_conf["name"],
+                                    seed=base_seed+100000000,
+                                    num_envs=eval_conf["num_envs"])
         callbacks.append(EvalCallback(eval_env=eval_env,
                                     model=model,
                                     n_eval_episodes=eval_conf["eval_eps"],
@@ -141,35 +144,41 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams):
                 reference_init_args = hyperparams.reference_init_args)
 
 def build_collector(use_processes : bool,
-                    env_builder : EnvBuilderProtocol,
+                    vec_env_builder : VecEnvBuilderProtocol,
                     env_builder_args : dict[str,typing.Any],
-                    log_folder : str,
+                    run_folder : str,
                     seed : int,
-                    num_envs : int,
                     collector_device : th.device,
                     collector_buffer_size : int,
-                    session : adarl.utils.session.Session):
+                    session : adarl.utils.session.Session,
+                    num_envs : int):
+    vec_env_builder_norags = lambda: vec_env_builder(env_builder_args=env_builder_args,
+                                                    run_folder=run_folder,
+                                                    seed=seed,
+                                                    num_envs=num_envs)
     if use_processes:
         collector = AsyncProcessExperienceCollector(
-                            vec_env_builder=lambda: build_vec_env(  env_builder=env_builder,
-                                                                    env_builder_args=env_builder_args,
-                                                                    log_folder=log_folder,
-                                                                    seed=seed,
-                                                                    num_envs=num_envs,
-                                                                    collector_device=collector_device),
+                            vec_env_builder=vec_env_builder_norags,
                             storage_torch_device=collector_device,
                             buffer_size=collector_buffer_size,
                             session=session)
     else:
-        collector = AsyncThreadExperienceCollector( vec_env=build_vec_env(  env_builder=env_builder,
-                                                                            env_builder_args=env_builder_args,
-                                                                            log_folder=log_folder,
-                                                                            seed=seed,
-                                                                            num_envs=num_envs,
-                                                                            collector_device=collector_device),
+        collector = AsyncThreadExperienceCollector( vec_env=vec_env_builder_norags(),
                                                     buffer_size=collector_buffer_size,
                                                     storage_torch_device=collector_device)
     return collector
+
+def wrap_with_logger(vec_env_builder : VecEnvBuilderProtocol):
+    def wrapped_builder(seed : int, run_folder : str, num_envs : int, env_builder_args : dict):
+        logs_id = session.default_session.run_info["run_id"]
+        venv = vec_env_builder(seed = seed, run_folder = run_folder, num_envs = num_envs, env_builder_args = env_builder_args)
+        venv = VectorEnvLogger(env = venv, logs_id = logs_id)
+        venv = VectorEnvChecker(env = venv)
+        return venv
+    return wrapped_builder
+
+
+
 
 from dataclasses import dataclass
 @dataclass
@@ -191,12 +200,12 @@ class SAC_hyperparams:
     log_freq_vstep : int
     reference_init_args : dict
 
-
 def sac_train(  seed : int,
                 folderName : str,
                 run_id : str,
                 args,
-                env_builder : EnvBuilderProtocol,
+                env_builder : EnvBuilderProtocol | None,
+                vec_env_builder : VecEnvBuilderProtocol | None,
                 env_builder_args : dict,
                 hyperparams : SAC_hyperparams,
                 max_episode_duration : int,
@@ -206,15 +215,17 @@ def sac_train(  seed : int,
                 eval_configurations : list[dict] = [],
                 checkpoint_freq : int = 100,
                 collector_device : th.device | None = None,
-                debug_level : int = 2):
+                debug_level : int = 2,
+                no_wandb : bool = False):
 
-    log_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
+    run_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
                                                         seed=seed,
                                                         run_id=run_id,
                                                         run_comment=args["comment"],
                                                         folderName=folderName,
-                                                        debug=debug_level)
+                                                        debug=debug_level,
+                                                        use_wandb=not no_wandb)
     validation_enabled = validation_buffer_size > 0 or validation_holdout_ratio > 0 or validation_batch_size > 0
 
     random.seed(seed)
@@ -226,13 +237,23 @@ def sac_train(  seed : int,
     device = th.device(hyperparams.device)
     if collector_device is None:
         collector_device = device
+    if vec_env_builder is None and env_builder is not None:
+        vec_env_builder = lambda seed, run_folder, num_envs, env_builder_args: build_vec_env(   env_builder=env_builder,
+                                                                                                env_builder_args=env_builder_args,
+                                                                                                log_folder=run_folder,
+                                                                                                seed=seed,
+                                                                                                num_envs=num_envs,
+                                                                                                collector_device=collector_device)
+    if vec_env_builder is None:
+        raise RuntimeError(f"You must specify either vec_env_builder or env_builder")
+    vec_env_builder = wrap_with_logger(vec_env_builder)
     # env setup
     collector = build_collector(use_processes = True,
-                                env_builder = env_builder,
+                                vec_env_builder = vec_env_builder,
                                 env_builder_args = env_builder_args,
-                                log_folder = log_folder,
+                                run_folder = run_folder,
                                 seed = seed,
-                                num_envs = hyperparams.parallel_envs,
+                                num_envs=hyperparams.parallel_envs,
                                 collector_device = collector_device,
                                 collector_buffer_size = hyperparams.train_freq_vstep*hyperparams.parallel_envs,
                                 session = session)
@@ -272,12 +293,12 @@ def sac_train(  seed : int,
     
     start_time = time.time()
     callbacks = build_eval_callbacks(eval_configurations=eval_configurations,
-                                     env_builder=env_builder,
-                                     log_folder=log_folder,
+                                     vec_env_builder=vec_env_builder,
+                                     run_folder=run_folder,
                                      base_seed=seed,
                                      collector_device=collector_device,
                                      model = model)
-    callbacks.append(CheckpointCallbackRB(save_path=log_folder+"/checkpoints",
+    callbacks.append(CheckpointCallbackRB(save_path=run_folder+"/checkpoints",
                                           model=model,
                                           save_best=False,
                                           save_freq_ep=checkpoint_freq*hyperparams.parallel_envs))
