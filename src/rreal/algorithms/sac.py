@@ -526,7 +526,7 @@ def train_off_policy(collector : ExperienceCollector,
         steps_to_collect = train_freq*num_envs
         vsteps_to_collect = train_freq
         callbacks.on_collection_start()
-        collector.collect_experience_async(model_state_dict=model.state_dict(),
+        collector.start_collection(model_state_dict=model.state_dict(),
                                             vsteps_to_collect=vsteps_to_collect,
                                             global_vstep_count=global_step//num_envs,
                                             random_vsteps=learning_start_step//num_envs)

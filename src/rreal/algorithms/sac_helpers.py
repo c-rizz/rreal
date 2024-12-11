@@ -17,7 +17,7 @@ from adarl.utils.buffers import ThDReplayBuffer
 from adarl.utils.ThDictEpReplayBuffer import ThDictEpReplayBuffer
 import adarl.utils.sigint_handler
 from rreal.algorithms.sac import SAC, train_off_policy
-from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector
+from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector, SyncExperienceCollector
 import wandb 
 from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
 import gymnasium as gym
@@ -166,6 +166,9 @@ def build_collector(use_processes : bool,
         collector = AsyncThreadExperienceCollector( vec_env=vec_env_builder_norags(),
                                                     buffer_size=collector_buffer_size,
                                                     storage_torch_device=collector_device)
+    # collector = SyncExperienceCollector(vec_env=vec_env_builder_norags(),
+    #                                     buffer_size=collector_buffer_size,
+    #                                     storage_torch_device=collector_device)
     return collector
 
 def wrap_with_logger(vec_env_builder : VecEnvBuilderProtocol):

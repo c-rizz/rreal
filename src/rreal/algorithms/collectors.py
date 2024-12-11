@@ -120,7 +120,7 @@ class ExperienceCollector(ABC):
         return self._last_collection_wallduration
 
 
-    def collect_experience_async(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):
+    def start_collection(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):
         """Placeholder function, not actually asynchronous
         """
         if self._collector_model is None or self._buffer is None:
@@ -183,7 +183,7 @@ class AsyncThreadExperienceCollector(ExperienceCollector):
                 self._last_collection_duration = time.monotonic() - t0
                 self._collect_done.set()
 
-    def collect_experience_async(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):
+    def start_collection(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):
         self._collector_model.load_state_dict(model_state_dict, assign=False)
         self._vsteps_to_collect, self._global_vstep_count, self._random_vsteps = vsteps_to_collect, global_vstep_count, random_vsteps
         self._buffer.clear()
@@ -202,6 +202,58 @@ class AsyncThreadExperienceCollector(ExperienceCollector):
     def close(self):
         self._running = False
         self._collector_thread.join()
+
+    def observation_space(self):
+        return self._vec_env.single_observation_space
+    
+    def action_space(self):
+        return self._vec_env.single_action_space
+        
+    def collection_duration(self):
+        return self._last_collection_duration
+
+class SyncExperienceCollector(ExperienceCollector):
+    def __init__(self, vec_env : gym.vector.VectorEnv,
+                        buffer_size : int,
+                        storage_torch_device):
+        super().__init__(vec_env=vec_env)
+
+        self._collector_model : th.nn.Module
+        self._buffer_size = buffer_size
+        self._started_collect = False
+        self._storage_torch_device = storage_torch_device
+        self._buffer = BasicStorage(buffer_size = self._buffer_size,
+                                    observation_space=self._vec_env.single_observation_space,
+                                    action_space=self._vec_env.single_action_space,
+                                    n_envs=self._vec_env.num_envs,
+                                    storage_torch_device=self._storage_torch_device,
+                                    share_mem=True,
+                                    allow_rollover=False)
+
+    def start_collection(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):
+        self._collector_model.load_state_dict(model_state_dict, assign=False)
+        self._vsteps_to_collect, self._global_vstep_count, self._random_vsteps = vsteps_to_collect, global_vstep_count, random_vsteps
+        self._buffer.clear()
+        self._started_collect = True
+
+    def wait_collection(self, timeout = 10.0):
+        if not self._started_collect:
+            raise RuntimeError(f"You shold call collect_experience_async() before wait_collection()")
+        t0 = time.monotonic()
+        self.collect_experience(policy=self._collector_model,
+                                vsteps_to_collect=self._vsteps_to_collect,
+                                global_vstep_count=self._global_vstep_count,
+                                random_vsteps=self._random_vsteps,
+                                policy_device=self._collector_model.device,
+                                buffer=self._buffer)
+        self._last_collection_duration = time.monotonic() - t0        
+        return self._buffer
+
+    def is_collecting(self):
+        return self._started_collect
+
+    def close(self):
+        self._running = False
 
     def observation_space(self):
         return self._vec_env.single_observation_space
@@ -281,15 +333,15 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                 self._vec_env : gym.vector.VectorEnv = self._vec_env_builder.var()
                 self.reset()
                 self._buffer = BasicStorage(buffer_size = self._buffer_size,
-                                            observation_space=self._vec_env.single_observation_space,
-                                            action_space=self._vec_env.single_action_space,
-                                            n_envs=self._vec_env.num_envs,
+                                            observation_space=self._vec_env.unwrapped.single_observation_space,
+                                            action_space=self._vec_env.unwrapped.single_action_space,
+                                            n_envs=self._vec_env.unwrapped.num_envs,
                                             storage_torch_device=self._storage_torch_device,
                                             share_mem=True,
                                             allow_rollover=False)
-                self._obs_space = self._vec_env.single_observation_space
-                self._action_space = self._vec_env.single_action_space
-                self._num_envs = self._vec_env.num_envs
+                self._obs_space = self._vec_env.unwrapped.single_observation_space
+                self._action_space = self._vec_env.unwrapped.single_action_space
+                self._num_envs = self._vec_env.unwrapped.num_envs
                 self._pipe.send((self._buffer, 
                                  self._obs_space,
                                  self._action_space,
@@ -326,7 +378,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
             # ggLog.info(f" {cmd} done")
         ggLog.info(f"Collector worker terminating")
 
-    def collect_experience_async(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):
+    def start_collection(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):
         for n,t in model_state_dict.items():
             self._state_dict[n].copy_(t)
         self._collect_args[:] = vsteps_to_collect, global_vstep_count, random_vsteps
