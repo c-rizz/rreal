@@ -37,6 +37,7 @@ class ExperienceCollector(ABC):
                         "t_final_obs" : 0.,
                         "t_add" : 0.,
                         "t_tot" : 0.}
+        self._last_collection_end_wtime = time.monotonic()
 
     def set_base_collector_model(self, model_builder : Callable[[gym.spaces.Space, gym.spaces.Space],th.nn.Module]):
         self._collector_model = copy.deepcopy(model_builder(self.observation_space(), self.action_space()))
@@ -106,15 +107,18 @@ class ExperienceCollector(ABC):
                 t_copy +=t_post_copy-t_post_add
                 t_final_obs += t_post_final_obs-t_post_copy
                 t_add += t_post_add-t_post_final_obs
-            t_tot = time.monotonic()-t0
-            self._stats["t_act"] = t_act
-            self._stats["t_step"] = t_step
-            self._stats["t_copy"] = t_copy
-            self._stats["t_final_obs"] = t_final_obs
-            self._stats["t_add"] = t_add
-            self._stats["t_tot"] = t_tot
+        tf = time.monotonic()
+        t_tot = tf-t0
+        self._stats["t_act"] = t_act
+        self._stats["t_step"] = t_step
+        self._stats["t_copy"] = t_copy
+        self._stats["t_final_obs"] = t_final_obs
+        self._stats["t_add"] = t_add
+        self._stats["t_tot"] = t_tot
+        self._stats["ttot_wtime_ratio"] = t_tot/(tf-self._last_collection_end_wtime)
+        self._last_collection_end_wtime = tf
+        self._last_collection_wallduration = t_tot
             # ggLog.info(f"collection times = act={t_act:.6f} step={t_step:.6f} copy={t_copy:.6f} fobs={t_final_obs:.6f} add={t_add:.6f} tot={t_tot:.6f} over={t_tot-(t_act+t_step+t_copy+t_final_obs+t_add):.6f}")
-        self._last_collection_wallduration = time.monotonic() - t0
 
     def collection_duration(self):
         return self._last_collection_wallduration
@@ -144,6 +148,9 @@ class ExperienceCollector(ABC):
     
     def close(self):
         pass
+
+    def get_stats(self):
+        return self._stats
 
 class AsyncThreadExperienceCollector(ExperienceCollector):
     def __init__(self, vec_env : gym.vector.VectorEnv,
@@ -272,12 +279,16 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                  session : session.Session = None,
                  seed : int = 0):
         super().__init__(vec_env=None)
+
+        ctx = mp_helper.get_context(method=start_method)
+
+        self._stats = ctx.Manager().dict(self._stats)
+        
         self._buffer_size = buffer_size
         self._storage_torch_device = storage_torch_device
         self._vec_env_builder = CloudpickleWrapper(vec_env_builder)
         self._state_dict : dict[str,th.Tensor]
         
-        ctx = mp_helper.get_context(method=start_method)
         self._commander = SimpleCommander(mp_context=ctx, n_envs=1, timeout_s=60)
         self._collect_args = ctx.Array(ctypes.c_uint64, 3, lock = False)
         self._running = ctx.Value(ctypes.c_bool)

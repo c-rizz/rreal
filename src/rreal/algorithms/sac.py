@@ -586,6 +586,7 @@ def train_off_policy(collector : ExperienceCollector,
                        f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s val={t_val_sl:.2f}s tot={t_tot_sl:.2f}"
                        f" fps={steps_sl/t_tot_sl:.2f} collfps={steps_sl/t_coll_sl:.2f}"
                        f" alltime_fps={global_step/(t-start_time):.2f} alltime_ips={model._tot_grad_steps_count/(t-start_time):.2f}")
+            ggLog.info(f"Collection: {', '.join([str(k)+':'+str(v) for k,v in collector.get_stats().items()])}")
             t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl= 0,0,0,0,0
             adarl.utils.sigint_handler.haltOnSigintReceived()
     callbacks.on_training_end()
