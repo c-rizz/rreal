@@ -501,7 +501,9 @@ def train_off_policy(collector : ExperienceCollector,
     t_coll_sl = 0
     t_train_sl = 0
     t_val_sl = 0
+    t_buff_sl = 0
     t_tot_sl = 0
+    t_add_sl = 0
     
     if callbacks is None:
         callbacks = []
@@ -561,10 +563,14 @@ def train_off_policy(collector : ExperienceCollector,
         callbacks.on_collection_end(collected_steps=vsteps_to_collect*num_envs,
                                    collected_episodes=new_episodes,
                                    collected_data=tmp_buff)
-        
+        t_before_buff = time.monotonic()
+        t_add = 0
         for (obs, next_obs, action, reward, terminated, truncated) in tmp_buff.replay():
+            tpa = time.monotonic()
             buffer.add(obs=obs, next_obs=next_obs, action=action, reward=reward,
                         truncated=truncated, terminated=terminated)
+            t_add += time.monotonic() - tpa
+        t_after_buff = time.monotonic()
 
         # ------------------      Wrap up and restart      ------------------
         if buffer.collected_frames()-s0b != steps_to_collect:
@@ -574,6 +580,8 @@ def train_off_policy(collector : ExperienceCollector,
         tf = time.monotonic()
         t_train_sl += t_after_train - t_before_train
         t_val_sl += t_after_val - t_after_train
+        t_buff_sl += t_after_buff - t_before_buff
+        t_add_sl += t_add
         t_tot_sl += tf-t0
         t = time.monotonic()
         # ggLog.info(f"global_steps = {global_step}")
@@ -583,10 +591,11 @@ def train_off_policy(collector : ExperienceCollector,
             ggLog.info(f"OFFTRAIN: expstps:{global_step}"
                        f" trainstps={model._tot_grad_steps_count}"
                     #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"
-                       f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s val={t_val_sl:.2f}s tot={t_tot_sl:.2f}"
+                       f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s val={t_val_sl:.2f}s buff={t_buff_sl:.2f}s add={t_add_sl:.2f}s tot={t_tot_sl:.2f}"
                        f" fps={steps_sl/t_tot_sl:.2f} collfps={steps_sl/t_coll_sl:.2f}"
                        f" alltime_fps={global_step/(t-start_time):.2f} alltime_ips={model._tot_grad_steps_count/(t-start_time):.2f}")
-            ggLog.info(f"Collection: {', '.join([str(k)+':'+str(v) for k,v in collector.get_stats().items()])}")
-            t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl= 0,0,0,0,0
-            adarl.utils.sigint_handler.haltOnSigintReceived()
+            dictlist = [f"{k}:{v:.6g}" for k,v in collector.get_stats().items()]
+            ggLog.info(f"Collection: {', '.join(dictlist)}")
+            t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl, t_buff_sl, t_add_sl = 0,0,0,0,0,0,0
+        adarl.utils.sigint_handler.haltOnSigintReceived()
     callbacks.on_training_end()

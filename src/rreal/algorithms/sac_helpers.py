@@ -38,7 +38,7 @@ class EnvBuilderProtocol(typing.Protocol):
         ...
 
 class VecEnvBuilderProtocol(typing.Protocol):
-    def __call__(self, seed : int, run_folder : str, num_envs : int, env_builder_args : dict) -> gym.vector.VectorEnv:
+    def __call__(self, seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = "") -> gym.vector.VectorEnv:
         ...
 
 def gym_builder(seed, log_folder, is_eval, env_builder_args : dict[str,typing.Any]):
@@ -106,7 +106,8 @@ def build_eval_callbacks(eval_configurations : list[dict],
         eval_env = vec_env_builder(env_builder_args=eval_conf["env_builder_args"],
                                     run_folder=run_folder+f"/eval_"+eval_conf["name"],
                                     seed=base_seed+100000000,
-                                    num_envs=eval_conf["num_envs"])
+                                    num_envs=eval_conf["num_envs"],
+                                    env_name=eval_conf["name"])
         callbacks.append(EvalCallback(eval_env=eval_env,
                                     model=model,
                                     n_eval_episodes=eval_conf["eval_eps"],
@@ -171,11 +172,11 @@ def build_collector(use_processes : bool,
     #                                     storage_torch_device=collector_device)
     return collector
 
-def wrap_with_logger(vec_env_builder : VecEnvBuilderProtocol):
-    def wrapped_builder(seed : int, run_folder : str, num_envs : int, env_builder_args : dict):
-        logs_id = session.default_session.run_info["run_id"]
+def wrap_with_logger(vec_env_builder : VecEnvBuilderProtocol) -> VecEnvBuilderProtocol:
+    def wrapped_builder(seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = ""):
+        # logs_id = session.default_session.run_info["run_id"]
         venv = vec_env_builder(seed = seed, run_folder = run_folder, num_envs = num_envs, env_builder_args = env_builder_args)
-        venv = VectorEnvLogger(env = venv, logs_id = logs_id)
+        venv = VectorEnvLogger(env = venv, logs_id = env_name)
         venv = VectorEnvChecker(env = venv)
         return venv
     return wrapped_builder
@@ -241,7 +242,7 @@ def sac_train(  seed : int,
     if collector_device is None:
         collector_device = device
     if vec_env_builder is None and env_builder is not None:
-        vec_env_builder = lambda seed, run_folder, num_envs, env_builder_args: build_vec_env(   env_builder=env_builder,
+        vec_env_builder = lambda seed, run_folder, num_envs, env_builder_args, env_name="": build_vec_env(   env_builder=env_builder,
                                                                                                 env_builder_args=env_builder_args,
                                                                                                 log_folder=run_folder,
                                                                                                 seed=seed,
@@ -292,7 +293,7 @@ def sac_train(  seed : int,
                                 fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
                                 val_buffer_min_size = validation_batch_size)
     
-    ggLog.info(f"Replay buffer occupies {rb.memory_size()/1024/1024:.2f}MB")
+    ggLog.info(f"Replay buffer occupies {rb.memory_size()/1024/1024:.2f}MB on {rb.storage_torch_device()}")
     
     start_time = time.time()
     callbacks = build_eval_callbacks(eval_configurations=eval_configurations,

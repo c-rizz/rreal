@@ -281,8 +281,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         super().__init__(vec_env=None)
 
         ctx = mp_helper.get_context(method=start_method)
-
-        self._stats = ctx.Manager().dict(self._stats)
+        self._stats = mp_helper.get_manager(start_method).dict(self._stats)
         
         self._buffer_size = buffer_size
         self._storage_torch_device = storage_torch_device
