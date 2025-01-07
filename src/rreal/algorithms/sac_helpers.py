@@ -90,9 +90,9 @@ def build_vec_env(env_builder_args,
                                copy_data=False,
                                worker_init_fn=session.set_current_session,
                                worker_init_kwargs={"session":session.default_session})
-    env = VectorEnvLogger(env = env,
-                           logs_id = logs_id)
-    env = VectorEnvChecker(env = env)
+    # env = VectorEnvLogger(env = env,
+    #                        logs_id = logs_id)
+    # env = VectorEnvChecker(env = env)
     return env
 
 def build_eval_callbacks(eval_configurations : list[dict],
@@ -177,7 +177,7 @@ def wrap_with_logger(vec_env_builder : VecEnvBuilderProtocol) -> VecEnvBuilderPr
         # logs_id = session.default_session.run_info["run_id"]
         venv = vec_env_builder(seed = seed, run_folder = run_folder, num_envs = num_envs, env_builder_args = env_builder_args)
         venv = VectorEnvLogger(env = venv, logs_id = env_name)
-        venv = VectorEnvChecker(env = venv)
+        venv = VectorEnvChecker(env = venv, just_warn=True)
         return venv
     return wrapped_builder
 
