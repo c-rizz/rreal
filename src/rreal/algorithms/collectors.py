@@ -72,12 +72,12 @@ class ExperienceCollector(ABC):
             t_add = 0.
             for step in range(vsteps_to_collect):
                 t_pre_act = time.monotonic()
-                dbg_check_finite(self._current_obs)
+                # dbg_check_finite(self._current_obs)
                 if global_vstep_count < random_vsteps:
                     actions = th.as_tensor(np.stack([self._vec_env.unwrapped.single_action_space.sample() for _ in range(num_envs)]))
                 else:
                     th_obs = map_tensor_tree(self._current_obs, lambda a: th.as_tensor(a, device = policy_device))
-                    dbg_check_finite(th_obs)                    
+                    # dbg_check_finite(th_obs)                    
                     actions = policy.predict_action(th_obs)
                     if not self._vecenv_is_torch:
                         actions = actions.detach().cpu().numpy()
@@ -89,7 +89,7 @@ class ExperienceCollector(ABC):
                 real_next_obss = infos["final_observation"] #stack_tensor_tree([info["real_next_observation"] for info in unstack_tensor_tree(infos)])
                 t_post_final_obs = time.monotonic()
 
-                dbg_check_finite([self._current_obs, next_input_obss, rewards, terminations, truncations, actions])
+                # dbg_check_finite([self._current_obs, next_input_obss, rewards, terminations, truncations, actions])
                 buffer.add(obs=self._current_obs,
                             next_obs=real_next_obss,
                             action=actions,
@@ -115,10 +115,13 @@ class ExperienceCollector(ABC):
         self._stats["t_final_obs"] = t_final_obs
         self._stats["t_add"] = t_add
         self._stats["t_tot"] = t_tot
+        self._stats["vsteps"] = vsteps_to_collect
+        self._stats["vec_fps_ttot"] = vsteps_to_collect*self._vec_env.unwrapped.num_envs/t_tot
+        self._stats["vec_fps_tstep"] = vsteps_to_collect*self._vec_env.unwrapped.num_envs/t_tot
         self._stats["ttot_wtime_ratio"] = t_tot/(tf-self._last_collection_end_wtime)
         self._last_collection_end_wtime = tf
         self._last_collection_wallduration = t_tot
-            # ggLog.info(f"collection times = act={t_act:.6f} step={t_step:.6f} copy={t_copy:.6f} fobs={t_final_obs:.6f} add={t_add:.6f} tot={t_tot:.6f} over={t_tot-(t_act+t_step+t_copy+t_final_obs+t_add):.6f}")
+        ggLog.info(f"collected: "+', '.join([f"{k}:{v:.6g}" for k,v in self._stats.items()]))
 
     def collection_duration(self):
         return self._last_collection_wallduration

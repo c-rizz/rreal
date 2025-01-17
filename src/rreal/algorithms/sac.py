@@ -552,7 +552,7 @@ def train_off_policy(collector : ExperienceCollector,
             wandb_log(wlogs,throttle_period=2)
 
         # ------------------   Store collected experience  ------------------
-        tmp_buff = collector.wait_collection(timeout = 120.0)
+        tmp_buff = collector.wait_collection(timeout = 300.0)
         new_episodes = tmp_buff.added_completed_episodes() - ep_counter
         ep_counter = tmp_buff.added_completed_episodes()
         step_counter = tmp_buff.added_frames()

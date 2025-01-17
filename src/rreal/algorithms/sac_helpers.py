@@ -73,7 +73,8 @@ def build_vec_env(env_builder_args,
                   env_builder : EnvBuilderProtocol,
                   purely_numpy : bool = False,
                   logs_id = None,
-                  collector_device : th.device = th.device("cuda")) -> gym.vector.VectorEnv:
+                  collector_device : th.device = th.device("cuda"),
+                  env_action_device : th.device|typing.Literal["numpy"] = th.device("cuda")) -> gym.vector.VectorEnv:
     if "use_wandb" not in env_builder_args:
         env_builder_args["use_wandb"] = False
     if logs_id is None:
@@ -89,7 +90,8 @@ def build_vec_env(env_builder_args,
                                shared_mem_device = collector_device,
                                copy_data=False,
                                worker_init_fn=session.set_current_session,
-                               worker_init_kwargs={"session":session.default_session})
+                               worker_init_kwargs={"session":session.default_session},
+                                env_action_device = env_action_device)
     # env = VectorEnvLogger(env = env,
     #                        logs_id = logs_id)
     # env = VectorEnvChecker(env = env)
