@@ -249,7 +249,8 @@ def sac_train(  seed : int,
                                                                                                 log_folder=run_folder,
                                                                                                 seed=seed,
                                                                                                 num_envs=num_envs,
-                                                                                                collector_device=collector_device)
+                                                                                                collector_device=collector_device,
+                                                                                                env_action_device=collector_device)
     if vec_env_builder is None:
         raise RuntimeError(f"You must specify either vec_env_builder or env_builder")
     vec_env_builder = wrap_with_logger(vec_env_builder)
