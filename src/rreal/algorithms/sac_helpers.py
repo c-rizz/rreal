@@ -105,6 +105,7 @@ def build_eval_callbacks(eval_configurations : list[dict],
                          model : RLAgent):
     callbacks = []
     for eval_conf in eval_configurations:
+        ggLog.info(f"Building eval config '{eval_conf['name']}'")
         eval_env = vec_env_builder(env_builder_args=eval_conf["env_builder_args"],
                                     run_folder=run_folder+f"/eval_"+eval_conf["name"],
                                     seed=base_seed+100000000,
@@ -116,6 +117,7 @@ def build_eval_callbacks(eval_configurations : list[dict],
                                     eval_freq_ep=eval_conf["eval_freq_ep"],
                                     deterministic=eval_conf["deterministic"],
                                     eval_name=eval_conf["name"]))
+        ggLog.info(f"Built eval config '{eval_conf['name']}'")
     return callbacks
 
 # def build_vec_env(env_builder, env_builder_args, log_folder, seed, num_envs) -> gym.vector.VectorEnv:
@@ -310,6 +312,8 @@ def sac_train(  seed : int,
                                           save_best=False,
                                           save_freq_ep=checkpoint_freq*hyperparams.parallel_envs))
     model.save(folderName+"/model_untrained.zip")
+
+    ggLog.info(f"Starting training.")
     try:
         train_off_policy(collector=collector,
             model = model,
