@@ -257,6 +257,10 @@ class SAC(RLAgent):
                 extra["class_name"] = self.__class__.__name__
                 extra["feature_extractor_class_name"] = self._feature_extractor.__class__.__name__
                 extra["feature_extractor_init_args"] = self._feature_extractor.get_init_args()
+                # print(extra)
+                # for k in extra["init_args"]:
+                #     print("k=",k)
+                #     yaml.dump(extra["init_args"][k],default_flow_style=None)
                 extra_file.write(yaml.dump(extra,default_flow_style=None).encode("utf-8"))
             self._feature_extractor.save_to_archive(archive)
             # th.save( self._feature_extractor.state_dict(), path+".fe_state.pth")
