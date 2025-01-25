@@ -74,7 +74,7 @@ class ExperienceCollector(ABC):
                 t_pre_act = time.monotonic()
                 # dbg_check_finite(self._current_obs)
                 if global_vstep_count < random_vsteps:
-                    actions = th.as_tensor(np.stack([self._vec_env.unwrapped.single_action_space.sample() for _ in range(num_envs)]))
+                    actions = th.stack([th.as_tensor(self._vec_env.unwrapped.single_action_space.sample()) for _ in range(num_envs)])
                 else:
                     th_obs = map_tensor_tree(self._current_obs, lambda a: th.as_tensor(a, device = policy_device))
                     # dbg_check_finite(th_obs)                    
