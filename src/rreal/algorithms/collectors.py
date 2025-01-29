@@ -105,7 +105,7 @@ class ExperienceCollector(ABC):
                 t_act += t_post_act-t_pre_act
                 t_step += t_post_step-t_post_act
                 t_copy +=t_post_copy-t_post_add
-                t_final_obs += t_post_final_obs-t_post_copy
+                t_final_obs += t_post_final_obs-t_post_step
                 t_add += t_post_add-t_post_final_obs
         tf = time.monotonic()
         t_tot = tf-t0

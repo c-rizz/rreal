@@ -358,6 +358,9 @@ class SAC(RLAgent):
     def get_hidden_state(self):
         return None
 
+    def reset_hidden_state(self):
+        return
+
     def _compute_critic_loss(self, transitions : TransitionBatch):
         observations = self._feature_extractor.extract_features(transitions.observations)
         next_observations = self._feature_extractor.extract_features(transitions.next_observations)        
