@@ -499,7 +499,7 @@ def train_off_policy(collector : ExperienceCollector,
                     validation_freq : int = 1,
                     validation_batch_size : int = 256):
     if validation_freq>0 and not isinstance(buffer, BaseValidatingBuffer):
-        raise RuntimeError(f"validation_freq>0 but buffer does is not a BaseValidatingBuffer")
+        raise RuntimeError(f"validation_freq>0 but buffer is not a BaseValidatingBuffer")
     if log_freq_vstep == -1: log_freq_vstep = train_freq
     num_envs = collector.num_envs()
 

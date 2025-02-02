@@ -25,7 +25,8 @@ import torch.multiprocessing as mp
 
 class ExperienceCollector(ABC):
     def __init__(self, vec_env : gym.vector.VectorEnv,
-                        buffer : Optional[BasicStorage] = None):
+                        buffer : Optional[BasicStorage] = None,
+                        log_freq = 50):
         self._vec_env = vec_env
         self._current_obs : dict[str, th.Tensor] = None # type: ignore
         self._collector_model : th.nn.Module
@@ -38,6 +39,9 @@ class ExperienceCollector(ABC):
                         "t_add" : 0.,
                         "t_tot" : 0.}
         self._last_collection_end_wtime = time.monotonic()
+        self._collect_count = 0
+        self._log_freq = log_freq
+
 
     def set_base_collector_model(self, model_builder : Callable[[gym.spaces.Space, gym.spaces.Space],th.nn.Module]):
         self._collector_model = copy.deepcopy(model_builder(self.observation_space(), self.action_space()))
@@ -108,6 +112,7 @@ class ExperienceCollector(ABC):
                 t_final_obs += t_post_final_obs-t_post_step
                 t_add += t_post_add-t_post_final_obs
         tf = time.monotonic()
+        self._collect_count += 1
         t_tot = tf-t0
         self._stats["t_act"] = t_act
         self._stats["t_step"] = t_step
@@ -121,7 +126,8 @@ class ExperienceCollector(ABC):
         self._stats["ttot_wtime_ratio"] = t_tot/(tf-self._last_collection_end_wtime)
         self._last_collection_end_wtime = tf
         self._last_collection_wallduration = t_tot
-        ggLog.info(f"collected: "+', '.join([f"{k}:{v:.6g}" for k,v in self._stats.items()]))
+        if self._collect_count % self._log_freq == 0:
+            ggLog.info(f"collected: "+', '.join([f"{k}:{v:.6g}" for k,v in self._stats.items()]))
 
     def collection_duration(self):
         return self._last_collection_wallduration

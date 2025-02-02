@@ -129,7 +129,7 @@ def build_eval_callbacks(eval_configurations : list[dict],
 #     envs = VectorEnvLogger(env = envs)
 #     return envs
 
-def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams):
+def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams : SAC_hyperparams):
     return SAC(observation_space=obs_space,
                 action_size=int(np.prod(act_space.shape)),
                 q_network_arch=hyperparams.q_network_arch,
@@ -146,7 +146,8 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams):
                 policy_update_freq=2,
                 target_update_freq=1,
                 batch_size = hyperparams.batch_size,
-                reference_init_args = hyperparams.reference_init_args)
+                reference_init_args = hyperparams.reference_init_args,
+                target_entropy=hyperparams.target_entropy)
 
 def build_collector(use_processes : bool,
                     vec_env_builder : VecEnvBuilderProtocol,
@@ -207,6 +208,7 @@ class SAC_hyperparams:
     parallel_envs : int
     log_freq_vstep : int
     reference_init_args : dict
+    target_entropy : float | None
 
 def sac_train(  seed : int,
                 folderName : str,
@@ -276,27 +278,27 @@ def sac_train(  seed : int,
 
     # compiled_model = th.compile(model)
 
-    # rb = ThDReplayBuffer(
-    #     buffer_size=hyperparams.buffer_size,
-    #     observation_space=observation_space,
-    #     action_space=action_space,
-    #     device=device,
-    #     storage_torch_device=device,
-    #     handle_timeout_termination=True,
-    #     n_envs=num_envs)
-    rb = ThDictEpReplayBuffer(  buffer_size=hyperparams.buffer_size,
-                                observation_space=observation_space,
-                                action_space=action_space,
-                                device=device,
-                                storage_torch_device=device,
-                                n_envs=hyperparams.parallel_envs,
-                                max_episode_duration=max_episode_duration,
-                                validation_buffer_size = validation_buffer_size,
-                                validation_holdout_ratio = validation_holdout_ratio,
-                                min_episode_duration = 0,
-                                disable_validation_set = False,
-                                fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
-                                val_buffer_min_size = validation_batch_size)
+    rb = ThDReplayBuffer(
+        buffer_size=hyperparams.buffer_size,
+        observation_space=observation_space,
+        action_space=action_space,
+        device=device,
+        storage_torch_device=device,
+        handle_timeout_termination=True,
+        n_envs=hyperparams.parallel_envs)
+    # rb = ThDictEpReplayBuffer(  buffer_size=hyperparams.buffer_size,
+    #                             observation_space=observation_space,
+    #                             action_space=action_space,
+    #                             device=device,
+    #                             storage_torch_device=device,
+    #                             n_envs=hyperparams.parallel_envs,
+    #                             max_episode_duration=max_episode_duration,
+    #                             validation_buffer_size = validation_buffer_size,
+    #                             validation_holdout_ratio = validation_holdout_ratio,
+    #                             min_episode_duration = 0,
+    #                             disable_validation_set = False,
+    #                             fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
+    #                             val_buffer_min_size = validation_batch_size)
     
     ggLog.info(f"Replay buffer occupies {rb.memory_size()/1024/1024:.2f}MB on {rb.storage_torch_device()}")
     
