@@ -105,6 +105,7 @@ def build_eval_callbacks(eval_configurations : list[dict],
                          model : RLAgent):
     callbacks = []
     for eval_conf in eval_configurations:
+        ggLog.info(f"Building eval config '{eval_conf['name']}'")
         eval_env = vec_env_builder(env_builder_args=eval_conf["env_builder_args"],
                                     run_folder=run_folder+f"/eval_"+eval_conf["name"],
                                     seed=base_seed+100000000,
@@ -116,6 +117,7 @@ def build_eval_callbacks(eval_configurations : list[dict],
                                     eval_freq_ep=eval_conf["eval_freq_ep"],
                                     deterministic=eval_conf["deterministic"],
                                     eval_name=eval_conf["name"]))
+        ggLog.info(f"Built eval config '{eval_conf['name']}'")
     return callbacks
 
 # def build_vec_env(env_builder, env_builder_args, log_folder, seed, num_envs) -> gym.vector.VectorEnv:
@@ -127,7 +129,7 @@ def build_eval_callbacks(eval_configurations : list[dict],
 #     envs = VectorEnvLogger(env = envs)
 #     return envs
 
-def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams):
+def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams : SAC_hyperparams):
     return SAC(observation_space=obs_space,
                 action_size=int(np.prod(act_space.shape)),
                 q_network_arch=hyperparams.q_network_arch,
@@ -144,7 +146,8 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams):
                 policy_update_freq=2,
                 target_update_freq=1,
                 batch_size = hyperparams.batch_size,
-                reference_init_args = hyperparams.reference_init_args)
+                reference_init_args = hyperparams.reference_init_args,
+                target_entropy=hyperparams.target_entropy)
 
 def build_collector(use_processes : bool,
                     vec_env_builder : VecEnvBuilderProtocol,
@@ -205,6 +208,7 @@ class SAC_hyperparams:
     parallel_envs : int
     log_freq_vstep : int
     reference_init_args : dict
+    target_entropy : float | None
 
 def sac_train(  seed : int,
                 folderName : str,
@@ -274,27 +278,27 @@ def sac_train(  seed : int,
 
     # compiled_model = th.compile(model)
 
-    # rb = ThDReplayBuffer(
-    #     buffer_size=hyperparams.buffer_size,
-    #     observation_space=observation_space,
-    #     action_space=action_space,
-    #     device=device,
-    #     storage_torch_device=device,
-    #     handle_timeout_termination=True,
-    #     n_envs=num_envs)
-    rb = ThDictEpReplayBuffer(  buffer_size=hyperparams.buffer_size,
-                                observation_space=observation_space,
-                                action_space=action_space,
-                                device=device,
-                                storage_torch_device=device,
-                                n_envs=hyperparams.parallel_envs,
-                                max_episode_duration=max_episode_duration,
-                                validation_buffer_size = validation_buffer_size,
-                                validation_holdout_ratio = validation_holdout_ratio,
-                                min_episode_duration = 0,
-                                disable_validation_set = False,
-                                fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
-                                val_buffer_min_size = validation_batch_size)
+    rb = ThDReplayBuffer(
+        buffer_size=hyperparams.buffer_size,
+        observation_space=observation_space,
+        action_space=action_space,
+        device=device,
+        storage_torch_device=device,
+        handle_timeout_termination=True,
+        n_envs=hyperparams.parallel_envs)
+    # rb = ThDictEpReplayBuffer(  buffer_size=hyperparams.buffer_size,
+    #                             observation_space=observation_space,
+    #                             action_space=action_space,
+    #                             device=device,
+    #                             storage_torch_device=device,
+    #                             n_envs=hyperparams.parallel_envs,
+    #                             max_episode_duration=max_episode_duration,
+    #                             validation_buffer_size = validation_buffer_size,
+    #                             validation_holdout_ratio = validation_holdout_ratio,
+    #                             min_episode_duration = 0,
+    #                             disable_validation_set = False,
+    #                             fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
+    #                             val_buffer_min_size = validation_batch_size)
     
     ggLog.info(f"Replay buffer occupies {rb.memory_size()/1024/1024:.2f}MB on {rb.storage_torch_device()}")
     
@@ -310,6 +314,8 @@ def sac_train(  seed : int,
                                           save_best=False,
                                           save_freq_ep=checkpoint_freq*hyperparams.parallel_envs))
     model.save(folderName+"/model_untrained.zip")
+
+    ggLog.info(f"Starting training.")
     try:
         train_off_policy(collector=collector,
             model = model,

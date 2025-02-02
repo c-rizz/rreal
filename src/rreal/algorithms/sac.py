@@ -257,6 +257,10 @@ class SAC(RLAgent):
                 extra["class_name"] = self.__class__.__name__
                 extra["feature_extractor_class_name"] = self._feature_extractor.__class__.__name__
                 extra["feature_extractor_init_args"] = self._feature_extractor.get_init_args()
+                # print(extra)
+                # for k in extra["init_args"]:
+                #     print("k=",k)
+                #     yaml.dump(extra["init_args"][k],default_flow_style=None)
                 extra_file.write(yaml.dump(extra,default_flow_style=None).encode("utf-8"))
             self._feature_extractor.save_to_archive(archive)
             # th.save( self._feature_extractor.state_dict(), path+".fe_state.pth")
@@ -353,6 +357,9 @@ class SAC(RLAgent):
         
     def get_hidden_state(self):
         return None
+
+    def reset_hidden_state(self):
+        return
 
     def _compute_critic_loss(self, transitions : TransitionBatch):
         observations = self._feature_extractor.extract_features(transitions.observations)
@@ -492,7 +499,7 @@ def train_off_policy(collector : ExperienceCollector,
                     validation_freq : int = 1,
                     validation_batch_size : int = 256):
     if validation_freq>0 and not isinstance(buffer, BaseValidatingBuffer):
-        raise RuntimeError(f"validation_freq>0 but buffer does is not a BaseValidatingBuffer")
+        raise RuntimeError(f"validation_freq>0 but buffer is not a BaseValidatingBuffer")
     if log_freq_vstep == -1: log_freq_vstep = train_freq
     num_envs = collector.num_envs()
 

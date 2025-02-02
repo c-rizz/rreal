@@ -19,3 +19,7 @@ class RLAgent(nn.Module):
     @abstractmethod
     def update(self, transitions : TransitionBatch):
         raise NotImplementedError()
+
+    @abstractmethod
+    def reset_hidden_state(self):
+        raise NotImplementedError
