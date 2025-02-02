@@ -116,8 +116,8 @@ class ExperienceCollector(ABC):
         self._stats["t_add"] = t_add
         self._stats["t_tot"] = t_tot
         self._stats["vsteps"] = vsteps_to_collect
-        self._stats["vec_fps_ttot"] = vsteps_to_collect*self._vec_env.unwrapped.num_envs/t_tot
-        self._stats["vec_fps_tstep"] = vsteps_to_collect*self._vec_env.unwrapped.num_envs/t_tot
+        self._stats["vec_fps_ttot"] =  vsteps_to_collect*self._vec_env.unwrapped.num_envs/t_tot
+        self._stats["vec_fps_tstep"] = vsteps_to_collect*self._vec_env.unwrapped.num_envs/t_step
         self._stats["ttot_wtime_ratio"] = t_tot/(tf-self._last_collection_end_wtime)
         self._last_collection_end_wtime = tf
         self._last_collection_wallduration = t_tot
