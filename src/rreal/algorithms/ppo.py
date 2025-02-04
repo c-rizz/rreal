@@ -191,12 +191,12 @@ class Actor(nn.Module):
     def forward(self, observation_batch):
         mean = self._act_mean(observation_batch)
         log_std = self.actor_logstd.expand_as(mean)
-        log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min
+        log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min # clamp the log_std network output
         return mean, log_std
     
 
     def get_act_logprob_mean_entropy(self, observation_batch, action : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        return self._get_action_noscale(observation_batch, action)
+        # return self._get_action_noscale(observation_batch, action)
         mean, log_std = self(observation_batch)
         std = log_std.exp()
         normal = th.distributions.Normal(mean, std)
@@ -284,11 +284,17 @@ class PPO(RLAgent):
                                 torch_device=self._hp.th_device)
         self._q_optimizer = optim.Adam(self._critic.parameters(), lr=self._hp.q_lr)
         self._actor_optimizer = optim.Adam(self._actor.parameters(), lr=self._hp.policy_lr)
+        self._grad_steps_count = 0
+        self._epochs_count = 0
 
     def train_model(self, buffer : PPORolloutBuffer):
         raw_obss, acts, rews, terms, truncs, vals, logprobs = buffer.get_rollout_data()
         enc_obss = self._feature_extractor.extract_features(raw_obss) 
         # obss and vals and are aligned, acts, logprobs, rews, terms and trunct are their consequence
+        # So each transition at time t (s,a,s',r,term,trunc) is contained in:
+        #   obss[t], act[t], obss[t+1], rew[t], term[t], trunc[t]
+        # it is actually the same as in cleanrl's original implementation, I just write things in the buffer at different times
+        #   obss[t], act[t], obss[t+1], rew[t], term[t], trunc[t]
         num_steps = acts.shape[1]
         # bootstrap value if not done
         advantages = th.zeros_like(rews, device=self._hp.th_device)
@@ -364,13 +370,17 @@ class PPO(RLAgent):
                 nn.utils.clip_grad_norm_(self._critic.parameters(), self._hp.max_grad_norm)
                 self._q_optimizer.step()
                 self._actor_optimizer.step()
+                self._grad_steps_count += 1
+            self._epochs_count += 1
 
             if self._hp.target_kl is not None and approx_kl > self._hp.target_kl:
                 break
-        wandb_log({"ppo/loss": loss,
-                   "ppo/entropy_loss" : entropy_loss,
-                   "ppo/pg_loss" : pg_loss,
-                   "ppo/v_loss" : v_loss})
+            wandb_log({ "ppo/loss": loss,
+                        "ppo/entropy_loss" : entropy_loss,
+                        "ppo/pg_loss" : pg_loss,
+                        "ppo/v_loss" : v_loss,
+                        "ppo/grad_steps" : self._grad_steps_count,
+                        "ppo/epochs" : self._epochs_count})
 
     
     @override

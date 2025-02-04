@@ -62,7 +62,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     total_steps = 10_000_000,
                                                     q_network_arch=[256,256],
                                                     policy_network_arch=[256,256],
-                                                    learning_starts=100*num_envs*max_steps_per_episode,
+                                                    learning_starts=20*num_envs*max_steps_per_episode,
                                                     log_freq_vstep = 1000,
                                                     reference_init_args={},
                                                     target_entropy=None),

@@ -98,7 +98,7 @@ class Actor(nn.Module):
         dbg_check_finite(hidden_batch)
         mean = self.act_fc_mean(hidden_batch)
         log_std = self.act_fc_logstd(hidden_batch)
-        log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min
+        log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min # clamp the log_std network output
         return mean, log_std
 
     def sample_action(self, observation_batch):
