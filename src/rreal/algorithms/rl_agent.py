@@ -1,5 +1,5 @@
 import torch.nn as nn
-from adarl.utils.buffers import TransitionBatch
+from adarl.utils.buffers import TransitionBatch, BaseBuffer
 from abc import abstractmethod
 
 class RLAgent(nn.Module):
@@ -17,9 +17,21 @@ class RLAgent(nn.Module):
         return self.predict_action(observation_batch=observation_batch, deterministic=deterministic), hidden_state
     
     @abstractmethod
-    def update(self, transitions : TransitionBatch):
+    def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[float,float,float]:
         raise NotImplementedError()
 
     @abstractmethod
     def reset_hidden_state(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def save(self, path : str):
+        raise NotImplementedError
+
+    @abstractmethod
+    def load_(self, path : str):
+        raise NotImplementedError
+    
+    @abstractmethod
+    def load(cls, path : str):
         raise NotImplementedError

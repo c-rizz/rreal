@@ -29,6 +29,7 @@ import yaml
 import zipfile
 from difflib import ndiff
 import copy
+from typing_extensions import override
 
 class QNetwork(nn.Module):
     def __init__(self,
@@ -331,6 +332,7 @@ class SAC(RLAgent):
         model.load_(path)
         return model
 
+    @override
     def predict_action(self, observation_batch, deterministic = False):
         # s = {k:v.size() for k,v in observation.items()}
         # ggLog.info(f"predict: observation = {s}")
@@ -354,10 +356,12 @@ class SAC(RLAgent):
             return mean
         else:
             return action
-        
+
+    @override
     def get_hidden_state(self):
         return None
 
+    @override
     def reset_hidden_state(self):
         return
 
@@ -438,7 +442,7 @@ class SAC(RLAgent):
         if self._feature_extractor_optimizer is not None:
             self._feature_extractor_optimizer.step()
 
-    def update(self, transitions : TransitionBatch):
+    def _update(self, transitions : TransitionBatch):
         if self._feature_extractor_optimizer is not None:
             self._feature_extractor_optimizer.zero_grad(set_to_none=True) # gradients will be accumulated by both actor and critic
         self._update_critic(transitions = transitions)
@@ -466,13 +470,14 @@ class SAC(RLAgent):
                             "val_alpha_loss":alpha_loss})
         return critic_loss, actor_loss, alpha_loss
 
+    @override
     def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[float,float,float]:
         q_act_alpha_losses = [None]*iterations
         for i in range(iterations):
             transitions = buffer.sample(self._hp.batch_size)
             transitions = map_tensor_tree(transitions, lambda t : t.to(device=self.device, non_blocking=True))
             # th.cuda.synchronize(self.device)
-            q_act_alpha_losses[i] = self.update(transitions = transitions)
+            q_act_alpha_losses[i] = self._update(transitions = transitions)
             self._tot_grad_steps_count += 1
         # q_loss, actor_loss, alpha_loss = th.as_tensor(q_act_alpha_losses).mean(dim = 0).cpu().numpy()
         q_loss, actor_loss, alpha_loss = q_act_alpha_losses[-1]
