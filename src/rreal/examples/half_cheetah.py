@@ -85,7 +85,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     q_network_arch=[64,64],
                                                     total_steps = 1000_000,
                                                     q_lr=0.0003,
-                                                    policy_lr=0.0003,
+                                                    policy_lr=0.0001,
                                                     num_envs=num_envs,
                                                     num_steps=2048,
                                                     gamma=0.99,

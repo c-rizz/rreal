@@ -290,11 +290,11 @@ class PPO(RLAgent):
     def train_model(self, buffer : PPORolloutBuffer):
         raw_obss, acts, rews, terms, truncs, vals, logprobs = buffer.get_rollout_data()
         enc_obss = self._feature_extractor.extract_features(raw_obss) 
-        # obss and vals and are aligned, acts, logprobs, rews, terms and trunct are their consequence
+        # obss and vals and are aligned, acts, logprobs, rews, terms and trunct are their consequence.
         # So each transition at time t (s,a,s',r,term,trunc) is contained in:
         #   obss[t], act[t], obss[t+1], rew[t], term[t], trunc[t]
-        # it is actually the same as in cleanrl's original implementation, I just write things in the buffer at different times
-        #   obss[t], act[t], obss[t+1], rew[t], term[t], trunc[t]
+        # In cleanRL's original implementation:
+        #   obss[t], act[t], obss[t+1], rew[t], done[t+1]
         num_steps = acts.shape[1]
         # bootstrap value if not done
         advantages = th.zeros_like(rews, device=self._hp.th_device)
@@ -441,9 +441,7 @@ class Collector():
                 actions, logprobs = self._agent.get_act_logprob(self._curr_obss)
                 values = agent.get_values(self._curr_obss)
 
-                # TRY NOT TO MODIFY: execute the game and log data.
                 next_obss, rewards, terminations, truncations, infos = self._vec_env.step(actions)
-                # next_done = np.logical_or(terminations, truncations)
                 rewards = th.as_tensor(rewards, device=self._device).view(-1)
                 self._curr_obss = map_tensor_tree(next_obss, lambda t: th.as_tensor(t, device = self._device))
                 buffer.add( consequent_obss=self._curr_obss,
