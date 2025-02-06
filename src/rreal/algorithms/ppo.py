@@ -47,6 +47,13 @@ from adarl.utils.wandb_wrapper import wandb_log
 
 #     return thunk
 
+def _check_match(actor, obs_batch, act_batch, logpprobbatch, start, end):
+    dbgact0, dbglogprobs0, _, _ = actor.get_act_logprob_mean_entropy(obs_batch[start:end])
+    print(f"actdiff[{start}:{end}] = {th.mean(dbgact0-act_batch[start:end])}")
+    print(f"probdiff[{start}:{end}] = {th.mean(dbglogprobs0-logpprobbatch[start:end])}")
+    print(f"dbgprob = {dbglogprobs0}")
+    print(f"logprob = {logpprobbatch[start:end]}")
+
 
 class PPORolloutBuffer():
     def __init__(self,  num_steps : int, num_envs : int, storage_torch_device : th.device,
@@ -96,6 +103,13 @@ class PPORolloutBuffer():
 
     def reset(self):
         self._pos = 0
+        self._start_observations = map_tensor_tree(self._start_observations, lambda t: t.fill_(float("nan")))
+        self._actions[:] = float("nan")
+        self._act_logprobs[:] = float("nan")
+        self._obs_values[:] = float("nan")
+        self._rewards[:] = float("nan")
+        self._terminated[:] = float("nan")
+        self._truncated[:] = float("nan")
 
     def get_rollout_data(self):
         return ({k:obs[:self._pos+1] for k,obs in self._start_observations.items()},
@@ -160,9 +174,24 @@ class Critic(nn.Module):
                                      use_torchscript=True).to(device=torch_device)
     def get_value(self, x) -> th.Tensor:
         return self._val_net(x)
+    
 
+class CriticCLR(nn.Module):
+    def __init__(self,
+                 q_network_arch : list[int],
+                 observation_size : int,
+                 torch_device : str | th.device = "cuda"):
+        super().__init__()
+        self._val_net = nn.Sequential(  orthogonal_layer_init(nn.Linear(observation_size, 64)),
+                                        nn.Tanh(),
+                                        orthogonal_layer_init(nn.Linear(64, 64)),
+                                        nn.Tanh(),
+                                        orthogonal_layer_init(nn.Linear(64, 1), std=1.0),
+                                    ).to(device=torch_device)
+    def get_value(self, x) -> th.Tensor:
+        return self._val_net(x)
 
-class Actor(nn.Module):
+class SquashedActor(nn.Module):
     def __init__(self,  action_size,
                         observation_size : int,
                         policy_arch = [256,256],
@@ -203,16 +232,22 @@ class Actor(nn.Module):
         if action is None:
             x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
         else:
-            x_t = (action - self.action_bias)/self.action_scale
+            x_t = th.arctanh((action - self.action_bias)/self.action_scale)
         y_t = th.tanh(x_t) # squash the action in [-1,1]
         log_prob = normal.log_prob(x_t) # get the probability of the actions that we sampled
 
         # scale mean and action to the proper bounds
         mean = th.tanh(mean) * self.action_scale + self.action_bias
-        action = y_t * self.action_scale + self.action_bias
+        newaction = y_t * self.action_scale + self.action_bias
+        if action is None:
+            action = newaction
+        else:
+            if th.mean(th.square(action - newaction)) > 0.1:
+                raise RuntimeError()
+        
 
         log_prob = log_prob - th.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6) # correct the probability for the squashing
-        log_prob = log_prob.sum(1, keepdim=True) # get probability per each multidimensional action, not for each action component
+        log_prob = log_prob.sum(1) # get probability per each multidimensional action, not for each action component
 
         return action, log_prob, mean, normal.entropy().sum(1)
     
@@ -220,6 +255,68 @@ class Actor(nn.Module):
     def _get_action_noscale(self, x, action=None):
         action_mean = self._act_mean(x)
         action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = th.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action).sum(1), action_mean, probs.entropy().sum(1)
+
+
+
+def orthogonal_layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    th.nn.init.orthogonal_(layer.weight, std)
+    th.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+class ActorCLR(nn.Module):
+    def __init__(self, action_size: int, observation_size : int, policy_arch, action_max, action_min, torch_device):
+        super().__init__()
+        self.actor_mean = nn.Sequential(
+            orthogonal_layer_init(nn.Linear(observation_size, 64)),
+            nn.Tanh(),
+            orthogonal_layer_init(nn.Linear(64, 64)),
+            nn.Tanh(),
+            orthogonal_layer_init(nn.Linear(64, action_size), std=0.01),
+        ).to(torch_device)
+        self.actor_logstd = nn.Parameter(th.zeros(1, action_size, device=torch_device))
+
+    def get_act_logprob_mean_entropy(self, x, action=None):
+        action_mean = self.actor_mean(x)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = th.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action).sum(1), action_mean, probs.entropy().sum(1)
+
+
+
+class Actor(nn.Module):
+    def __init__(self,  action_size,
+                        observation_size : int,
+                        policy_arch = [256,256],
+                        action_max : float | th.Tensor = 1,
+                        action_min : float | th.Tensor = -1,
+                        log_std_max = 2,
+                        log_std_min = -5,
+                        torch_device : str | th.device = "cuda"):
+        super().__init__()
+        self._act_mean = build_mlp_net(arch=policy_arch,
+                                     input_size=observation_size,
+                                     output_size=action_size,
+                                     use_weightnorm=True,
+                                     use_torchscript=True,
+                                     weight_init_multiplier=0.01).to(device=torch_device)
+        self.actor_logstd = nn.Parameter(th.zeros(1, action_size, device=torch_device))
+
+    def forward(self, observation_batch):
+        mean = self._act_mean(observation_batch)
+        log_std = self.actor_logstd.expand_as(mean)
+        return mean, log_std
+    
+
+    def get_act_logprob_mean_entropy(self, x, action=None):
+        action_mean, action_logstd = self(x)
         action_std = th.exp(action_logstd)
         probs = Normal(action_mean, action_std)
         if action is None:
@@ -265,7 +362,7 @@ class PPO(RLAgent):
 
 
     def __init__(self,  hyperparams : Hyperparams,
-                        feature_extractor : FeatureExtractor | None = None,):
+                        feature_extractor : FeatureExtractor | None = None):
         super().__init__()
         self._hp = copy.deepcopy(hyperparams)
         if feature_extractor is None:
@@ -273,20 +370,22 @@ class PPO(RLAgent):
         else:
             raise NotImplementedError()
             self._feature_extractor = feature_extractor
-        self._actor = Actor(action_size=self._hp.action_len,
+        self._actor = ActorCLR(action_size=self._hp.action_len,
                             observation_size=self._feature_extractor.encoding_size(),
                             policy_arch=self._hp.policy_arch,
                             action_min = self._hp.action_min,
                             action_max = self._hp.action_max,
                             torch_device=self._hp.th_device)
-        self._critic = Critic(  observation_size=self._feature_extractor.encoding_size(),
+        self._critic = CriticCLR(  observation_size=self._feature_extractor.encoding_size(),
                                 q_network_arch=self._hp.q_network_arch,
                                 torch_device=self._hp.th_device)
-        self._q_optimizer = optim.Adam(self._critic.parameters(), lr=self._hp.q_lr)
-        self._actor_optimizer = optim.Adam(self._actor.parameters(), lr=self._hp.policy_lr)
+        # self._q_optimizer = optim.Adam(self._critic.parameters(), lr=self._hp.q_lr)
+        # self._actor_optimizer = optim.Adam(self._actor.parameters(), lr=self._hp.policy_lr)
+        self._optim = optim.Adam(self.parameters(), lr=self._hp.policy_lr)
         self._grad_steps_count = 0
         self._epochs_count = 0
 
+    @override
     def train_model(self, buffer : PPORolloutBuffer):
         raw_obss, acts, rews, terms, truncs, vals, logprobs = buffer.get_rollout_data()
         enc_obss = self._feature_extractor.extract_features(raw_obss) 
@@ -308,33 +407,53 @@ class PPO(RLAgent):
             returns = advantages + vals[:-1]
 
         # flatten the batch
-        b_obs = map_tensor_tree(enc_obss, lambda t: t[:-1].reshape(shape=(-1,)+ t.size()[2:]))
-        b_logprobs = logprobs.reshape(-1)
-        b_actions = acts.reshape(-1,self._hp.action_len)
-        b_advantages = advantages.reshape(-1)
-        b_returns = returns.reshape(-1)
-        b_values = vals[:-1].reshape(-1)
-
         batch_size = self._hp.num_envs*self._hp.num_steps
+        b_obs = enc_obss[:-1].view(size=(batch_size,)+enc_obss.size()[2:])
+        b_logprobs = logprobs[:-1].view(batch_size,)
+        b_actions = acts.view(batch_size,self._hp.action_len)
+        b_advantages = advantages.view(batch_size,)
+        b_returns = returns.view(batch_size,)
+        b_values = vals[:-1].view(batch_size,)
+
+        # print(f"b_obs = {b_obs}")
+        # _check_match(self._actor, b_obs, b_actions, b_logprobs, 0, 8)
+        # _check_match(self._actor, b_obs, b_actions, b_logprobs, 8, 16)
+
+
         # Optimizing the policy and value network
         b_inds = np.arange(batch_size)
-        # clipfracs = []
+        clipfracs = []
         for epoch in range(self._hp.update_epochs):
             np.random.shuffle(b_inds)
             for start in range(0, batch_size, self._hp.minibatch_size):
                 end = start + self._hp.minibatch_size
                 mb_inds = b_inds[start:end]
-                mb_obs = map_tensor_tree(b_obs, lambda t: t[mb_inds])
-                _, newlogprob, _,  entropy = self._actor.get_act_logprob_mean_entropy(mb_obs, b_actions[mb_inds])
-                newvalue = self._critic.get_value(mb_obs)
-                logratio = newlogprob - b_logprobs[mb_inds]
+                mb_obss = map_tensor_tree(b_obs, lambda t: t[mb_inds])
+                mb_acts = b_actions[mb_inds]
+                mb_logprobs = b_logprobs[mb_inds]
+                mb_values = b_values[mb_inds]
+                mb_returns = b_returns[mb_inds]
+                # dbgact, dbglogprobs, _, _ = self._actor.get_act_logprob_mean_entropy(mb_obss)
+                # _check_match(self._actor, mb_obss, mb_acts, mb_logprobs, 0, 8)
+                # _check_match(self._actor, mb_obss, mb_acts, mb_logprobs, 8, 16)
+                # _check_match(self._actor, mb_obss, mb_acts, mb_logprobs, 16, 24)
+                # _check_match(self._actor, mb_obss, mb_acts, mb_logprobs, 24, 32)
+
+                # dbgact, dbgnewlogprob, _,  _ = self._actor.get_act_logprob_mean_entropy(mb_obss)
+                _, newlogprob, _,  entropy = self._actor.get_act_logprob_mean_entropy(mb_obss, mb_acts)
+                newvalue = self._critic.get_value(mb_obss)
+                logratio = newlogprob - mb_logprobs
+                # ggLog.info(f"[{epoch},{start}] actdiff  = {th.mean(dbgact-mb_acts)} logprobsdiff = {th.mean(dbgnewlogprob-newlogprob)}")
+                # ggLog.info(f"[{epoch},{start}] valdiff  = {th.mean(mb_values-newvalue)}")
+                # ggLog.info(f"[{epoch},{start}] logratio = {th.mean(logratio)}")
                 ratio = logratio.exp()
+                # input("ENTER")
 
                 with th.no_grad():
                     # calculate approx_kl http://joschu.net/blog/kl-approx.html
-                    # old_approx_kl = (-logratio).mean()
+                    old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
-                    # clipfracs += [((ratio - 1.0).abs() > self._hp.clip_coef).float().mean().item()]
+                    clipfracs += [((ratio - 1.0).abs() > self._hp.clip_coef).float().mean().item()]
 
                 mb_advantages = b_advantages[mb_inds]
                 if self._hp.norm_adv:
@@ -348,28 +467,31 @@ class PPO(RLAgent):
                 # Value loss
                 newvalue = newvalue.view(-1)
                 if self._hp.clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + th.clamp(
-                        newvalue - b_values[mb_inds],
+                    v_loss_unclipped = (newvalue - mb_returns) ** 2
+                    v_clipped = mb_values + th.clamp(
+                        newvalue - mb_values,
                         -self._hp.clip_coef,
                         self._hp.clip_coef,
                     )
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                    v_loss_clipped = (v_clipped - mb_returns) ** 2
                     v_loss_max = th.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
                 else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                    v_loss = 0.5 * ((newvalue - mb_returns) ** 2).mean()
 
                 entropy_loss = entropy.mean()
                 loss = pg_loss - self._hp.ent_coef * entropy_loss + v_loss * self._hp.vf_coef
 
-                self._q_optimizer.zero_grad(set_to_none=True)
-                self._actor_optimizer.zero_grad(set_to_none=True)
+                # self._q_optimizer.zero_grad(set_to_none=True)
+                # self._actor_optimizer.zero_grad(set_to_none=True)
+                self._optim.zero_grad(set_to_none=True)
                 loss.backward()
-                nn.utils.clip_grad_norm_(self._actor.parameters(), self._hp.max_grad_norm)
-                nn.utils.clip_grad_norm_(self._critic.parameters(), self._hp.max_grad_norm)
-                self._q_optimizer.step()
-                self._actor_optimizer.step()
+                # nn.utils.clip_grad_norm_(self._actor.parameters(), self._hp.max_grad_norm)
+                # nn.utils.clip_grad_norm_(self._critic.parameters(), self._hp.max_grad_norm)
+                nn.utils.clip_grad_norm_(self.parameters(), self._hp.max_grad_norm)
+                # self._q_optimizer.step()
+                # self._actor_optimizer.step()
+                self._optim.step()
                 self._grad_steps_count += 1
             self._epochs_count += 1
 
@@ -380,7 +502,11 @@ class PPO(RLAgent):
                         "ppo/pg_loss" : pg_loss,
                         "ppo/v_loss" : v_loss,
                         "ppo/grad_steps" : self._grad_steps_count,
-                        "ppo/epochs" : self._epochs_count})
+                        "ppo/epochs" : self._epochs_count,
+                        "ppo/logratio" : self._epochs_count,
+                        "losses/old_approx_kl": old_approx_kl,
+                        "losses/approx_kl": approx_kl.item(),
+                        "losses/clipfrac": np.mean(clipfracs)})
 
     
     @override
@@ -404,6 +530,21 @@ class PPO(RLAgent):
         act, logprob, _, _ = self._actor.get_act_logprob_mean_entropy(enc_obss)
         return act, logprob
 
+    def get_hidden_state(self):
+        return None
+
+    def reset_hidden_state(self):
+        pass
+
+    def predict_action(self, observation_batch, deterministic = False):
+        if deterministic:
+            enc_obss = self._feature_extractor.extract_features(observation_batch) 
+            act, logprob, mean, _ = self._actor.get_act_logprob_mean_entropy(enc_obss)
+            return mean
+        else:
+            enc_obss = self._feature_extractor.extract_features(observation_batch) 
+            act, logprob, mean, _ = self._actor.get_act_logprob_mean_entropy(enc_obss)
+            return act
         
 class Collector():
     def __init__(self, vec_env_builder : VecEnvBuilderProtocol,
@@ -416,11 +557,11 @@ class Collector():
                                         run_folder=run_folder,
                                         num_envs=num_envs,
                                         env_builder_args=env_builder_args)
-        if not isinstance(self._vec_env.unwrapped.single_action_space, gym.spaces.Box):
-            raise NotImplementedError()
+        if not isinstance(self._vec_env.unwrapped.single_action_space, (gym.spaces.Box, gym.spaces.box.Box)):
+            raise NotImplementedError(f"unsupported action space {self._vec_env.unwrapped.single_action_space} of type {type(self._vec_env.unwrapped.single_action_space)}")
         self._single_action_space = self._vec_env.unwrapped.single_action_space
         if not isinstance(self._vec_env.unwrapped.single_observation_space, gym.spaces.Dict):
-            raise NotImplementedError()
+            raise NotImplementedError(f"unsupported observation space {self._vec_env.unwrapped.single_observation_space}")
         self._single_observation_space = self._vec_env.unwrapped.single_observation_space
         self._device = th_device
         self._num_envs = self._vec_env.unwrapped.num_envs
@@ -586,7 +727,6 @@ def ppo_train(  seed : int,
                                             gamma=agent_hyperparams.gamma,
                                             update_epochs=agent_hyperparams.update_epochs))
     collector.set_agent(model)
-
     # torchexplorer.watch(model, backend="wandb")
     wandb.watch((model, model._actor, model._critic), log="all", log_freq=1000, log_graph=False)
 

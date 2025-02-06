@@ -23,7 +23,7 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         if self._obs_converter.has_image_part():
             raise NotImplementedError(f"Input observations contain images.")
 
-    def extract_features(self, observation_batch):
+    def extract_features(self, observation_batch) -> th.Tensor:
         with th.no_grad():
             return self._obs_converter.getVectorPart(observation_batch)
     

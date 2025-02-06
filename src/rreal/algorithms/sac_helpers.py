@@ -42,22 +42,51 @@ class VecEnvBuilderProtocol(typing.Protocol):
         ...
 
 def gym_builder(seed, log_folder, is_eval, env_builder_args : dict[str,typing.Any]):
+    # env = gym.make(env_builder_args["env_name"], render_mode="rgb_array")
+    # env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
+    # env = gym.wrappers.ClipAction(env)
+    # env = gym.wrappers.NormalizeObservation(env)
+    # env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+    # env = gym.wrappers.NormalizeReward(env, gamma=0.99)
+    # env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+    # env = gym.wrappers.RecordEpisodeStatistics(env)
+    # return env, 0.02
+
+
     os.environ["MUJOCO_GL"]="egl"
     quiet = env_builder_args.pop("quiet",False)
     use_wandb = env_builder_args.pop("use_wandb",True)
+    clip_action = env_builder_args.pop("clip_action",True)
+    normalize_obs = env_builder_args.pop("normalize_obs",True)
+    clip_obs = env_builder_args.pop("clip_obs",True)
+    normalize_reward = env_builder_args.pop("normalize_reward",True)
+    clip_reward = env_builder_args.pop("clip_reward",True)
+    dict_obs = env_builder_args.pop("dict_obs",True)
     env_kwargs : dict = copy.deepcopy(env_builder_args)
     stepLength_sec = 0.05
     env_kwargs.pop("env_name")
-    gymenv = gym.make(env_builder_args["env_name"],
+    env = gym.make(env_builder_args["env_name"],
                     render_mode="rgb_array",
                     **env_kwargs)
-    gymenv = DtypeObservation(gymenv, dtype=np.float32)
-    lrenv = GymToLr(gymenv,
+    # env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
+    if clip_action:
+        env = gym.wrappers.ClipAction(env)
+    if normalize_obs:
+        env = gym.wrappers.NormalizeObservation(env)
+    if clip_obs:
+        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+    if normalize_reward:
+        env = gym.wrappers.NormalizeReward(env, gamma=0.99)
+    if clip_reward:
+        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+    env = DtypeObservation(env, dtype=np.float32)
+    lrenv = GymToLr(env,
                     stepSimDuration_sec=stepLength_sec,
                     maxStepsPerEpisode=env_builder_args["max_episode_steps"],
                     copy_observations=True,
                     actions_to_numpy=True)
-    lrenv = ObsToDict(env=lrenv)
+    if dict_obs:
+        lrenv = ObsToDict(env=lrenv)
     lrenv.seed(seed=seed)
     
     return GymEnvWrapper(env=lrenv,
@@ -96,6 +125,20 @@ def build_vec_env(env_builder_args,
     #                        logs_id = logs_id)
     # env = VectorEnvChecker(env = env)
     return env
+
+
+def env_builder2vec(env_builder : EnvBuilderProtocol, 
+                    collector_device : th.device, 
+                    env_action_device : th.device | typing.Literal["numpy"], 
+                    purely_numpy : bool):
+    return lambda seed, run_folder, num_envs, env_builder_args, env_name="": build_vec_env( env_builder=env_builder,
+                                                                                            env_builder_args=env_builder_args,
+                                                                                            log_folder=run_folder,
+                                                                                            seed=seed,
+                                                                                            num_envs=num_envs,
+                                                                                            collector_device=collector_device,
+                                                                                            env_action_device=env_action_device,
+                                                                                            purely_numpy = purely_numpy)
 
 def build_eval_callbacks(eval_configurations : list[dict],
                          vec_env_builder : VecEnvBuilderProtocol,

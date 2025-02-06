@@ -1,8 +1,8 @@
 import torch.nn as nn
 from adarl.utils.buffers import TransitionBatch, BaseBuffer
-from abc import abstractmethod
+from abc import abstractmethod, ABC
 
-class RLAgent(nn.Module):
+class RLAgent(nn.Module, ABC):
     @abstractmethod
     def predict_action(self, observation_batch, deterministic = False):
         raise NotImplementedError()
