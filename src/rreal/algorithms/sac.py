@@ -5,7 +5,7 @@ from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch, BaseBuffer, Ba
 from adarl.utils.callbacks import TrainingCallback, CallbackList
 from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree
 from adarl.utils.wandb_wrapper import wandb_log
-from adarl.utils.utils import dbg_check_finite
+from adarl.utils.dbg.dbg_checks import dbg_check_finite
 from dataclasses import dataclass, asdict
 from rreal.algorithms.collectors import ExperienceCollector
 from rreal.algorithms.rl_agent import RLAgent
@@ -489,6 +489,10 @@ class SAC(RLAgent):
                             "alpha":self._alpha})
         return q_loss, actor_loss, alpha_loss
 
+    @override
+    def input_device(self):
+        return self._hp.torch_device
+    
     def get_stats(self):
         return self._stats
 

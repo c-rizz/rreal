@@ -31,7 +31,7 @@ import typing
 import adarl.utils.session as session
 from rreal.algorithms.rl_agent import RLAgent
 from adarl.envs.vector_env_checker import VectorEnvChecker
-
+from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
 
 class EnvBuilderProtocol(typing.Protocol):
     def __call__(self, seed : int, log_folder : str, is_eval : bool, env_builder_args : dict) -> tuple[gym.Env,float]:
@@ -62,6 +62,7 @@ def gym_builder(seed, log_folder, is_eval, env_builder_args : dict[str,typing.An
     normalize_reward = env_builder_args.pop("normalize_reward",True)
     clip_reward = env_builder_args.pop("clip_reward",True)
     dict_obs = env_builder_args.pop("dict_obs",True)
+    video_save_freq = env_builder_args.pop("video_save_freq",True)
     env_kwargs : dict = copy.deepcopy(env_builder_args)
     stepLength_sec = 0.05
     env_kwargs.pop("env_name")
@@ -88,11 +89,18 @@ def gym_builder(seed, log_folder, is_eval, env_builder_args : dict[str,typing.An
     if dict_obs:
         lrenv = ObsToDict(env=lrenv)
     lrenv.seed(seed=seed)
-    
-    return GymEnvWrapper(env=lrenv,
+    env = GymEnvWrapper(env=lrenv,
                         episodeInfoLogFile = log_folder+f"/GymEnvWrapper_log.{seed:010d}.csv",
                         quiet=quiet,
-                        use_wandb = use_wandb), 1/stepLength_sec
+                        use_wandb = use_wandb)
+    if video_save_freq > 0:
+        video_recorder_kwargs = {}
+        env = RecorderGymWrapper(  env=env,
+                                fps = 1/stepLength_sec,
+                                outFolder=log_folder+"/videos/RecorderGymWrapper",
+                                saveFrequency_ep=video_save_freq,
+                                **video_recorder_kwargs)
+    return env, 1/stepLength_sec
 
 
 def build_vec_env(env_builder_args,
@@ -224,7 +232,7 @@ def wrap_with_logger(vec_env_builder : VecEnvBuilderProtocol) -> VecEnvBuilderPr
     def wrapped_builder(seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = ""):
         # logs_id = session.default_session.run_info["run_id"]
         venv = vec_env_builder(seed = seed, run_folder = run_folder, num_envs = num_envs, env_builder_args = env_builder_args)
-        venv = VectorEnvLogger(env = venv, logs_id = env_name)
+        venv = VectorEnvLogger(env = venv, logs_id = env_name, env_th_device=env_builder_args["th_device"], log_infos=env_builder_args["log_info_stats"])
         venv = VectorEnvChecker(env = venv, just_warn=True)
         return venv
     return wrapped_builder

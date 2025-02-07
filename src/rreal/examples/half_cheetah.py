@@ -1,71 +1,7 @@
 #!/usr/bin/env python3  
 
 from rreal.algorithms.sac_helpers import sac_train, SAC_hyperparams, gym_builder
-import gymnasium as gym
-import numpy as np
-import time
-from adarl.envs.GymEnvWrapper import GymEnvWrapper
-from adarl.envs.GymToLr import GymToLr
-from adarl.envs.lr_wrappers.ObsToDict import ObsToDict
-from rreal.tmp.gym_transform_observation import DtypeObservation
-
-# def runFunction(seed, folderName, resumeModelFile, run_id, args):
-#     import torch as th
-#     sac_train(seed, folderName, run_id, args,
-#                 env_builder=gym_builder,
-#                 env_builder_args = {  "env_name" : "HalfCheetah-v4",
-#                                     "forward_reward_weight" : 1.0,
-#                                     "ctrl_cost_weight" : 0.1,
-#                                     "reset_noise_scale" : 0.1,
-#                                     "exclude_current_positions_from_observation" : True,
-#                                     "max_episode_steps" : 1000},
-#                 hyperparams = SAC_hyperparams(train_freq_vstep=1,
-#                                     grad_steps=1,
-#                                     q_lr=1e-3,
-#                                     policy_lr=3e-4,
-#                                     device = "cuda",
-#                                     gamma = 0.99,
-#                                     target_tau=0.005,
-#                                     buffer_size=1_000_000,
-#                                     total_steps = 10_000_000,
-#                                     batch_size=256,
-#                                     q_network_arch=[256,256],
-#                                     policy_network_arch=[256,256],
-#                                     learning_starts=1000,
-#                                     parallel_envs = 16,
-#                                     log_freq_vstep = 1000),
-#                 collector_device=th.device("cuda"))
-def make_env(env_id, idx, capture_video, run_name, gamma, log_folder, seed):
-    def thunk():
-        if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id)
-        env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = gym.wrappers.ClipAction(env)
-        env = gym.wrappers.NormalizeObservation(env)
-        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
-        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
-        lrenv = GymToLr(env,
-                        stepSimDuration_sec=0.02,
-                        maxStepsPerEpisode=1000,
-                        copy_observations=True,
-                        actions_to_numpy=True)
-        lrenv = ObsToDict(env=lrenv)        
-        return GymEnvWrapper(env=lrenv,
-                            episodeInfoLogFile = log_folder+f"/GymEnvWrapper_log.{seed:010d}.csv",
-                            quiet=True,
-                            use_wandb = True)
-
-    return thunk
-def make_clr(seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = ""):
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(env_builder_args["env_name"], i, False, str(int(time.time())), 0.99, run_folder, seed) for i in range(num_envs)]
-    )
-    return envs
+import copy
 
 
 
@@ -85,7 +21,21 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                         "clip_obs" : True,
                         "normalize_reward" : True,
                         "clip_reward" : True,
-                        "dict_obs" : True}
+                        "dict_obs" : True,
+                        "video_save_freq" : -1,
+                        "log_info_stats" : True}
+    video_eval_env_builder_args = copy.deepcopy(env_builder_args)
+    video_eval_env_builder_args["video_save_freq"] = 1
+    eval_conf_video_stoch = {
+        "name" : "video_stoch",
+        "deterministic" : False,
+        "eval_freq_ep" : num_envs*10,
+        "eval_eps" : 1,
+        "env_builder_args" : video_eval_env_builder_args,
+        "num_envs" : 1,
+        "init_on_reset_ratio" : 1.0
+    }
+    eval_configs = [eval_conf_video_stoch]
     train_device = th.device("cuda")
     collect_device = th.device("cpu")
     if args["algo"].lower() == "sac":
@@ -114,9 +64,11 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                     max_episode_duration=max_steps_per_episode,
                     validation_buffer_size = 0, #100_000,
                     validation_holdout_ratio = 0, #0.01,
-                    validation_batch_size = 0) #256)
+                    validation_batch_size = 0,
+                    eval_configurations=eval_configs) #256)
     elif args["algo"].lower() == "ppo":
         from rreal.algorithms.ppo import ppo_train, PPO_hyperparams
+        raise RuntimeError(f"Use ppo2, this one is bugged")
         ppo_train(seed=seed,
                   folderName=folderName,
                   run_id=run_id,
@@ -140,7 +92,8 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                   validation_buffer_size=0,
                   validation_holdout_ratio=0,
                   checkpoint_freq=-1,
-                  collector_device=collect_device)
+                  collector_device=collect_device,
+                  eval_configurations=eval_configs)
     elif args["algo"].lower() == "ppo2":
         from rreal.algorithms.ppo2 import ppo_train, PPO_hyperparams
         ppo_train(  seed=seed,
@@ -166,7 +119,8 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                 validation_buffer_size=0,
                 validation_holdout_ratio=0,
                 checkpoint_freq=-1,
-                collector_device=th.device("cpu"))
+                collector_device=th.device("cpu"),
+                eval_configurations=eval_configs)
 
 
 

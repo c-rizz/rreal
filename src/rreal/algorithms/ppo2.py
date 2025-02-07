@@ -156,6 +156,7 @@ class PPO(RLAgent):
         self.actor_logstd = nn.Parameter(th.zeros(1, self._hp.action_len, device=self._hp.th_device))
         self._optimizer = optim.Adam(self.parameters(), lr=self._hp.policy_lr, eps=1e-5)
 
+    @override
     def input_device(self):
         return self._hp.th_device
 
@@ -328,6 +329,8 @@ class Collector():
         self._latest_done = th.zeros(self._num_envs).to(th_device)
         self._device = th_device
         self._vec_env = self._vec_env
+        self._env_device = th.device("cuda")
+        self._policy_device = th.device("cpu")
 
     def single_observation_space(self):
         return self._single_observation_space
@@ -338,20 +341,21 @@ class Collector():
     def num_envs(self):
         return self._num_envs
 
-    def collect(self, vsteps_to_collect : int, buffer : PPORolloutBuffer, agent : PPO, policy_device : th.device):
-        term_count = th.as_tensor(0)
+    def collect(self, vsteps_to_collect : int, buffer : PPORolloutBuffer, agent : PPO):
+        term_count = th.as_tensor(0, device=self._env_device)
         with th.no_grad():
             buffer.reset()
             for step in range(0, vsteps_to_collect):
                 # ALGO LOGIC: action logic
                 start_obs = self._latest_obs
                 prev_done = self._latest_done
-                th_start_obs = map_tensor_tree(start_obs, lambda a: th.as_tensor(a, device = policy_device))
+                th_start_obs = map_tensor_tree(start_obs, lambda a: th.as_tensor(a, device = agent.input_device()))
                 action, logprob, _, value, _ = agent.get_action_logprob_entropy_critic_mean(obs_batch=th_start_obs)
 
                 # TRY NOT TO MODIFY: execute the game and log data.
-                obs_rew_term_trunc_info = self._vec_env.step(action.cpu().numpy())
-                next_obs, reward, terminations, truncations, infos = map_tensor_tree(obs_rew_term_trunc_info, lambda a: th.as_tensor(a))
+                action = action.to(device=self._env_device)
+                next_obs, reward, terminations, truncations, info = self._vec_env.step(action)
+                next_obs, reward, terminations, truncations = map_tensor_tree((next_obs, reward, terminations, truncations), lambda a: th.as_tensor(a))
                 next_obs = map_tensor_tree(next_obs, lambda t: t.detach().clone())
                 next_done = th.logical_or(terminations, truncations)
                 term_count += th.count_nonzero(next_done)
@@ -365,7 +369,7 @@ class Collector():
                 self._latest_obs = next_obs
                 self._latest_done = next_done
 
-            self._latest_obs = map_tensor_tree(self._latest_obs, lambda a: th.as_tensor(a, device = policy_device))
+            self._latest_obs = map_tensor_tree(self._latest_obs, lambda a: th.as_tensor(a, device = agent.input_device()))
             action, logprob, _, value, _ = agent.get_action_logprob_entropy_critic_mean(obs_batch=self._latest_obs)
             buffer.set(start_obss=self._latest_obs,
                         values=value.flatten(),
@@ -403,7 +407,7 @@ def train_on_policy(collector : Collector,
     ep_counter = 0 
     for iteration in range(train_steps):
         callback.on_collection_start()
-        terminated_eps = collector.collect(buffer=buffer, vsteps_to_collect=num_steps, agent=model, policy_device=model.input_device())
+        terminated_eps = collector.collect(buffer=buffer, vsteps_to_collect=num_steps, agent=model)
         collected_steps += num_steps*collector.num_envs()
         ep_counter += terminated_eps
         adarl.utils.session.default_session.run_info["collected_episodes"].value = ep_counter

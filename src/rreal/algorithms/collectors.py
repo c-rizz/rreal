@@ -4,7 +4,8 @@ from abc import ABC, abstractmethod
 from adarl.utils.buffers import BasicStorage
 from adarl.utils.shared_env_data import SimpleCommander
 from adarl.utils.tensor_trees import map_tensor_tree, map2_tensor_tree
-from adarl.utils.utils import pyTorch_makeDeterministic, dbg_check_finite
+from adarl.utils.utils import pyTorch_makeDeterministic
+from adarl.utils.dbg.dbg_checks import dbg_check_finite
 from stable_baselines3.common.vec_env.base_vec_env import CloudpickleWrapper
 from typing import List, Union, NamedTuple, Dict, Optional, Callable, Literal, Any
 import adarl.utils.dbg.ggLog as ggLog

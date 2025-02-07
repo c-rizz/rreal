@@ -9,7 +9,7 @@ class RLAgent(nn.Module, ABC):
     
     @abstractmethod
     def get_hidden_state(self):
-        raise NotImplementedError
+        raise NotImplementedError()
 
     def predict(self, observation_batch, deterministic = False):
         # Mostly for stable-baselines3 compatibility
@@ -22,16 +22,20 @@ class RLAgent(nn.Module, ABC):
 
     @abstractmethod
     def reset_hidden_state(self):
-        raise NotImplementedError
+        raise NotImplementedError()
 
     @abstractmethod
     def save(self, path : str):
-        raise NotImplementedError
+        raise NotImplementedError()
 
     @abstractmethod
     def load_(self, path : str):
-        raise NotImplementedError
+        raise NotImplementedError()
     
     @abstractmethod
     def load(cls, path : str):
-        raise NotImplementedError
+        raise NotImplementedError()
+    
+    @abstractmethod
+    def input_device(self):
+        raise NotImplementedError()
