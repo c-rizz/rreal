@@ -566,7 +566,8 @@ def train_off_policy(collector : ExperienceCollector,
             wlogs["sac/buffer_frames"] = buffer.stored_frames()
             wlogs["sac/val_buffer_frames"] = buffer.stored_validation_frames() if isinstance(buffer,BaseValidatingBuffer) else 0
             wandb_log(wlogs,throttle_period=2)
-
+        adarl.utils.session.default_session.run_info["train_iterations"].value = model._tot_grad_steps_count
+        
         # ------------------   Store collected experience  ------------------
         tmp_buff = collector.wait_collection(timeout = 300.0)
         new_episodes = tmp_buff.added_completed_episodes() - ep_counter

@@ -5,19 +5,16 @@ import time
 from dataclasses import dataclass
 
 import gymnasium as gym
-import numpy as np
 import torch as th
 import torch.nn as nn
 import torch.optim as optim
-import tyro
 from torch.distributions.normal import Normal
-from torch.utils.tensorboard import SummaryWriter
 from rreal.algorithms.sac_helpers import gym_builder, build_vec_env, wrap_with_logger, env_builder2vec, build_eval_callbacks
 import adarl.utils.session
 import inspect
 import copy
 from rreal.algorithms.sac_helpers import EnvBuilderProtocol, VecEnvBuilderProtocol
-from typing import Any
+from typing import Any, Final
 from adarl.utils.callbacks import TrainingCallback, CallbackList, CheckpointCallbackRB
 import adarl.utils.sigint_handler
 from rreal.algorithms.rl_agent import RLAgent
@@ -26,8 +23,11 @@ from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
 from adarl.utils.utils import numpy_to_torch_dtype_dict
 from adarl.utils.tensor_trees import map_tensor_tree
+import adarl.utils.dbg.ggLog as ggLog
+import numpy as np
+from adarl.utils.wandb_wrapper import wandb_log
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+def layer_init(layer, std=2, bias_const=0.0):
     th.nn.init.orthogonal_(layer.weight, std)
     th.nn.init.constant_(layer.bias, bias_const)
     return layer
@@ -92,8 +92,53 @@ class PPORolloutBuffer():
                 self._logprobs, #[:self._pos+1])
                 self._values) #[:self._pos+1],
     
+
+# # From https://github.com/pytorch/pytorch/issues/79197#issuecomment-1434511798
+# from dataclasses import is_dataclass
+# from typing import TypeVar
+# from torch.jit._dataclass_impls import synthesize__init__
+# import re
+# import inspect
+# import tempfile
+# import importlib.util
+# import importlib.machinery
+# import torch
+# T = TypeVar("T", bound=type)
+# # TODO: support __eq__ and __repr__
+# def jittable(cls: T) -> T:
+#     assert is_dataclass(cls)
+#     src = synthesize__init__(cls).source.replace(f"{cls.__module__}.{cls.__qualname__}", cls.__name__)
+#     # get `globals()` from the caller
+#     globals_dict = {k: v for k, v in inspect.stack()[1][0].f_globals.items()
+#                     if not re.match(r"__\w+__", k)}
+#     # # This is to handle `from ... import`, where the imported names are already in `globals()`
+#     # for param in inspect.signature(cls.__init__).parameters.values():
+#     #     if param.annotation.__module__.split(".")[0] not in globals_dict:
+#     #         src = src.replace(f"{param.annotation.__module__}.", "")
+#     # write source code into a temp file to allow `inspect.getsource` to load the source code
+#     with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp:
+#         tmp.write(src)
+#         tmp.flush()
+#     loader = importlib.machinery.SourceFileLoader(cls.__name__, tmp.name)
+#     spec = importlib.util.spec_from_loader(loader.name, loader)
+#     module = importlib.util.module_from_spec(spec)
+#     for k, v in globals_dict.items():
+#         setattr(module, k, v)
+#     setattr(module, cls.__name__, cls)
+#     spec.loader.exec_module(module)
+#     cls.__init__ = module.__init__
+#     # This is to prevent `jit.script` from recursively scripting annotations
+#     cls.__annotations__.clear()
+#     if not issubclass(cls, nn.Module):
+#         # Let `@jit.script` treat `cls` as a normal class
+#         del cls.__dataclass_fields__
+#     # Write `cls` back to caller's `globals()`, so that nested classes are visible to `@jit.script`
+#     inspect.stack()[1][0].f_globals[cls.__name__] = cls
+#     return cls
+
 class PPO(RLAgent):
-    @dataclass
+
+    @dataclass(repr=False, eq=False)
     class Hyperparams:
         minibatch_size: int
         th_device : th.device
@@ -129,6 +174,7 @@ class PPO(RLAgent):
         target_kl: float = None
         """the target KL divergence threshold"""
 
+    _hp : Final[Hyperparams]
 
     def __init__(self, hyperparams : Hyperparams,
                  feature_extractor : FeatureExtractor | None = None):
@@ -155,6 +201,19 @@ class PPO(RLAgent):
         ).to(self._hp.th_device)
         self.actor_logstd = nn.Parameter(th.zeros(1, self._hp.action_len, device=self._hp.th_device))
         self._optimizer = optim.Adam(self.parameters(), lr=self._hp.policy_lr, eps=1e-5)
+        self._grad_step_count = th.as_tensor(0, device=self._hp.th_device)
+        if self._hp.num_envs*self._hp.num_steps % self._hp.minibatch_size != 0:
+            raise RuntimeError(f"num_envs*num_steps must be a multiple of minibatch_size, but num_envs={self._hp.num_envs}, num_steps={self._hp.num_steps} and minibatch_size={self._hp.minibatch_size}")
+        self.__batch_size : Final[int] = int(self._hp.num_envs*self._hp.num_steps)
+        self.__minibatch_num : Final[int] = int(self.__batch_size/self._hp.minibatch_size)
+
+        self.__stats = { "tot_grad_steps_count":th.as_tensor(0, device=self._hp.th_device),
+                        "q_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
+                        "actor_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
+                        "entropy_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
+                        "avg_q_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
+                        "avg_actor_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
+                        "avg_entropy_loss":th.as_tensor(float("nan"), device=self._hp.th_device)}
 
     @override
     def input_device(self):
@@ -174,11 +233,44 @@ class PPO(RLAgent):
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(enc_obs_batch), action_mean
 
+    def compute_losses(self, mb_advantages, mb_values, mb_returns, mb_logprobs, newvalues, newlogprobs, entropies):
+        logratio = newlogprobs - mb_logprobs                
+        ratio = logratio.exp()
+        if self._hp.norm_adv:
+            mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+
+        # Policy loss
+        pg_loss1 = -mb_advantages * ratio
+        pg_loss2 = -mb_advantages * th.clamp(ratio, 1 - self._hp.clip_coef, 1 + self._hp.clip_coef)
+        policy_loss = th.max(pg_loss1, pg_loss2).mean()
+
+        # Value loss
+        newvalues = newvalues.view(-1)
+        if self._hp.clip_vloss:
+            v_loss_unclipped = (newvalues - mb_returns) ** 2
+            v_clipped = mb_values + th.clamp(
+                newvalues - mb_values,
+                -self._hp.clip_coef,
+                self._hp.clip_coef,
+            )
+            v_loss_clipped = (v_clipped - mb_returns) ** 2
+            v_loss_max = th.max(v_loss_unclipped, v_loss_clipped)
+            value_loss = 0.5 * v_loss_max.mean()
+        else:
+            value_loss = 0.5 * ((newvalues - mb_returns) ** 2).mean()
+
+        entropy_loss = entropies.mean()
+        loss = policy_loss - self._hp.ent_coef * entropy_loss + value_loss * self._hp.vf_coef
+        return loss, policy_loss, value_loss, entropy_loss
+
     @override
+    @th.jit.export
     def train_model(self, buff : PPORolloutBuffer):
+        # t_0 = time.monotonic()
         raw_obss, actions, rewards, dones, logprobs, values = buff.get_rollout_data()
         enc_obss = self._feature_extractor.extract_features(raw_obss) 
-
+        
+        # t_postenc = time.monotonic()
         # bootstrap value if not done
         with th.no_grad():
             advantages = th.zeros_like(rewards).to(self._hp.th_device)
@@ -189,76 +281,77 @@ class PPO(RLAgent):
                 delta = rewards[t] + self._hp.gamma * nextvalues * nextnonterminal - values[t]
                 advantages[t] = lastgaelam = delta + self._hp.gamma * self._hp.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values[:-1]
+        # t_postadv = time.monotonic()
         
         # flatten the batch
-        batch_size = self._hp.num_envs*self._hp.num_steps
-        b_encobs = enc_obss[:self._hp.num_steps].view((batch_size,) + enc_obss.size()[2:])
-        b_logprobs = logprobs[:self._hp.num_steps].view(batch_size)
-        b_actions = actions.view((batch_size,self._hp.action_len))
-        b_advantages = advantages.view(batch_size)
-        b_returns = returns.view(batch_size)
-        b_values = values[:self._hp.num_steps].view(batch_size)
+        minibatch_size = self._hp.minibatch_size
+        b_encobs = enc_obss[:self._hp.num_steps].view((self.__batch_size,) + enc_obss.size()[2:])
+        b_logprobs = logprobs[:self._hp.num_steps].view(self.__batch_size)
+        b_actions = actions.view((self.__batch_size,self._hp.action_len))
+        b_advantages = advantages.view(self.__batch_size)
+        b_returns = returns.view(self.__batch_size)
+        b_values = values[:self._hp.num_steps].view(self.__batch_size)
 
-        b_inds = np.arange(batch_size)
-        clipfracs = []
+        b_inds = th.zeros(size=(self.__batch_size,), dtype=th.long, device=self._hp.th_device)
+        # clipfracs = []
+        # t_pretrain = time.monotonic()
+        policy_losses = th.empty(size=(self._hp.update_epochs*int(self.__batch_size/self._hp.minibatch_size),), device=self._hp.th_device)
+        value_losses = th.empty(size=(self._hp.update_epochs*int(self.__batch_size/self._hp.minibatch_size),), device=self._hp.th_device)
+        entropy_losses = th.empty(size=(self._hp.update_epochs*int(self.__batch_size/self._hp.minibatch_size),), device=self._hp.th_device)
         for epoch in range(self._hp.update_epochs):
-            np.random.shuffle(b_inds)
-            for start in range(0, batch_size, self._hp.minibatch_size):
-                end = start + self._hp.minibatch_size
+            th.randperm(self.__batch_size, out=b_inds, device=self._hp.th_device)
+            # t_it0 = time.monotonic()
+            for i in range(self.__minibatch_num):
+                start = i*minibatch_size
+                end = start + minibatch_size
                 mb_inds = b_inds[start:end]
                 # print(f"mb_inds = {mb_inds}")
                 mb_encobs = b_encobs[mb_inds]
                 mb_acts = b_actions[mb_inds]
                 mb_logprobs = b_logprobs[mb_inds]
-                
-                _, newlogprob, entropy, newvalue, _ = self.get_action_logprob_entropy_critic_mean(obs_batch=None, enc_obs_batch=mb_encobs, action=mb_acts)
-                logratio = newlogprob - mb_logprobs                
-                ratio = logratio.exp()
-
-                with th.no_grad():
-                    old_approx_kl = (-logratio).mean()
-                    approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > self._hp.clip_coef).float().mean().item()]
-
+                mb_values = b_values[mb_inds]
                 mb_advantages = b_advantages[mb_inds]
-                if self._hp.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                mb_returns = b_returns[mb_inds]
 
-                # Policy loss
-                pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * th.clamp(ratio, 1 - self._hp.clip_coef, 1 + self._hp.clip_coef)
-                pg_loss = th.max(pg_loss1, pg_loss2).mean()
+                _, newlogprobs, entropies, newvalues, _ = self.get_action_logprob_entropy_critic_mean(obs_batch=None, enc_obs_batch=mb_encobs, action=mb_acts)
 
-                # Value loss
-                newvalue = newvalue.view(-1)
-                if self._hp.clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + th.clamp(
-                        newvalue - b_values[mb_inds],
-                        -self._hp.clip_coef,
-                        self._hp.clip_coef,
-                    )
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                    v_loss_max = th.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-                else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                # with th.no_grad():
+                #     old_approx_kl = (-logratio).mean()
+                #     approx_kl = ((ratio - 1) - logratio).mean()
+                #     clipfracs += [((ratio - 1.0).abs() > self._hp.clip_coef).float().mean().item()]
 
-                entropy_loss = entropy.mean()
-                loss = pg_loss - self._hp.ent_coef * entropy_loss + v_loss * self._hp.vf_coef
+                loss, policy_loss, value_loss, entropy_loss = self.compute_losses(   mb_advantages = mb_advantages,
+                                            mb_values = mb_values,
+                                            mb_returns = mb_returns,
+                                            mb_logprobs = mb_logprobs, 
+                                            newvalues = newvalues,
+                                            newlogprobs = newlogprobs,
+                                            entropies = entropies)
+                policy_losses[epoch*self.__minibatch_num+i] = policy_loss
+                value_losses[epoch*self.__minibatch_num+i] = value_loss
+                entropy_losses[epoch*self.__minibatch_num+i] = entropy_loss
 
                 self._optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.parameters(), self._hp.max_grad_norm)
                 self._optimizer.step()
+                self._grad_step_count += 1
+        
+            # if self._hp.target_kl is not None and approx_kl > self._hp.target_kl:
+            #     break
 
-            if self._hp.target_kl is not None and approx_kl > self._hp.target_kl:
-                break
 
-        y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
-        var_y = np.var(y_true)
-        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-
+        self.__stats.update({"tot_grad_steps_count":self._grad_step_count,
+                            "q_loss":value_loss,
+                            "actor_loss":policy_loss,
+                            "entropy_loss":entropy_loss,
+                            "avg_q_loss":th.mean(value_losses),
+                            "avg_actor_loss":th.mean(policy_losses),
+                            "avg_entropy_loss":th.mean(entropy_losses)})        # t_f = time.monotonic()
+        # ggLog.info(f"took {t_f-t_0}, train={t_f-t_pretrain}, adv={t_postadv-t_postenc}, its={tit/self._hp.update_epochs}, samp={tit_sample} net={tit_net} comp={tit_comp} back={tit_back} op={tit_op}")
+        # y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
+        # var_y = np.var(y_true)
+        # explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         # writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         # writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
@@ -270,6 +363,10 @@ class PPO(RLAgent):
         # writer.add_scalar("losses/explained_variance", explained_var, global_step)
         # print("SPS:", int(global_step / (time.time() - start_time)))
         # writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+
+    
+    def get_stats(self):
+        return self.__stats
 
     @override
     def get_hidden_state(self):
@@ -364,7 +461,7 @@ class Collector():
                             prev_dones=prev_done,
                             actions=action,
                             logprobs=logprob,
-                            rewards=th.tensor(reward).to(self._device).view(-1))
+                            rewards=th.as_tensor(reward, device=self._device).view(-1))
                 # buffer._obs[step] = start_obs
                 self._latest_obs = next_obs
                 self._latest_done = next_done
@@ -389,7 +486,8 @@ def train_on_policy(collector : Collector,
                     num_steps : int,
                     storage_torch_device : th.device,
                     train_steps : int,
-                    callbacks : list[TrainingCallback]):
+                    log_freq_vstep : int = -1,
+                    callbacks : list[TrainingCallback] = []):
     
     buffer = PPORolloutBuffer(num_steps, collector.num_envs(),
                                 obs_space=collector.single_observation_space(),
@@ -403,19 +501,54 @@ def train_on_policy(collector : Collector,
     #                           action_size=np.prod(collector.single_action_space().shape))
     callback = CallbackList(callbacks)
     callback.on_training_start()
-    collected_steps = 0
-    ep_counter = 0 
-    for iteration in range(train_steps):
+    global_step = 0
+    ep_counter = 0
+    t_coll_sl = 0
+    t_train_sl = 0
+    t_tot_sl = 0
+    steps_sl = 0
+    last_log_steps = float("-inf")
+    start_time = time.monotonic()
+    while global_step < train_steps and not adarl.utils.session.default_session.is_shutting_down():
         callback.on_collection_start()
+        t0 = time.monotonic()
         terminated_eps = collector.collect(buffer=buffer, vsteps_to_collect=num_steps, agent=model)
-        collected_steps += num_steps*collector.num_envs()
+        t_post_coll = time.monotonic()
+        t_coll_sl += t_post_coll-t0
+        global_step += num_steps*collector.num_envs()
+        steps_sl += num_steps*collector.num_envs()
         ep_counter += terminated_eps
         adarl.utils.session.default_session.run_info["collected_episodes"].value = ep_counter
-        adarl.utils.session.default_session.run_info["collected_steps"].value = collected_steps
+        adarl.utils.session.default_session.run_info["collected_steps"].value = global_step
         callback.on_collection_end(collected_episodes=int(terminated_eps.item()),
                                    collected_steps=num_steps,
                                    collected_data=None)
+        t_post_cb = time.monotonic()
+        # import torch._dynamo as dynamo
+        # explanation = dynamo.explain(model.train_model)(buffer)
+        # print(explanation)
+        # input("press ENTER")
         model.train_model(buffer)
+        adarl.utils.session.default_session.run_info["train_iterations"].value = model._grad_step_count.item()
+        t_f = time.monotonic()
+        t_train_sl += t_f-t_post_cb
+        t_tot_sl += t_f - t0
+
+        wlogs = {"ppo/"+k:v for k,v in model.get_stats().items()}
+        wandb_log(wlogs,throttle_period=1)
+        if global_step - last_log_steps > log_freq_vstep*collector.num_envs():
+            ggLog.info(f"ONTRAIN: expstps:{global_step}"
+                        f" trainstps={model._grad_step_count}"
+                        #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"
+                        f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s tot={t_tot_sl:.2f}"
+                        f" fps={steps_sl/t_tot_sl:.2f} collfps={steps_sl/t_coll_sl:.2f}"
+                        f" alltime_fps={global_step/(t_f-start_time):.2f} alltime_ips={model._grad_step_count/(t_f-start_time):.2f}")
+            t_coll_sl = 0
+            t_train_sl = 0
+            t_tot_sl = 0
+            steps_sl = 0
+            t_tot_sl = 0
+            
         adarl.utils.sigint_handler.haltOnSigintReceived()
     callback.on_training_end()
 
@@ -445,6 +578,7 @@ class PPO_hyperparams():
     num_envs : int
     num_steps : int
     gamma : float
+    log_freq_vstep : int
 
 def ppo_train(  seed : int,
                 folderName : str,
@@ -475,7 +609,6 @@ def ppo_train(  seed : int,
     validation_enabled = validation_buffer_size > 0 or validation_holdout_ratio > 0 or validation_batch_size > 0
 
     random.seed(seed)
-    np.random.seed(seed)
     th.manual_seed(seed)
     th.backends.cudnn.deterministic = True
 
@@ -505,7 +638,7 @@ def ppo_train(  seed : int,
     obs_space = collector.single_observation_space()
     agent = PPO(PPO.Hyperparams(minibatch_size=agent_hyperparams.minibatch_size,
                                     th_device=agent_hyperparams.th_device,
-                                    action_len=np.prod(action_space.shape),
+                                    action_len=int(np.prod(action_space.shape)),
                                     observation_space=obs_space,
                                     policy_arch=agent_hyperparams.policy_arch,
                                     q_network_arch=agent_hyperparams.q_network_arch,
@@ -517,7 +650,11 @@ def ppo_train(  seed : int,
                                     num_steps=agent_hyperparams.num_steps,
                                     gamma=agent_hyperparams.gamma,
                                     update_epochs=agent_hyperparams.update_epochs))
-
+    ggLog.info(f"Compiling PPO model...")
+    t0 = time.monotonic()
+    agent = th.compile(agent, fullgraph=True, mode="max-autotune")
+    t1 = time.monotonic()
+    ggLog.info(f"Torch model compilation took {t1-t0:.3f}s")
 
     # torchexplorer.watch(model, backend="wandb")
     # wandb.watch((agent, agent._actor, agent._critic), log="all", log_freq=1000, log_graph=False)
@@ -558,7 +695,8 @@ def ppo_train(  seed : int,
                     num_steps = agent_hyperparams.num_steps,
                     storage_torch_device = device,
                     train_steps = agent_hyperparams.total_steps,
-                    callbacks = callbacks)
+                    callbacks = callbacks,
+                    log_freq_vstep = agent_hyperparams.log_freq_vstep)
 
 
 
@@ -596,7 +734,8 @@ def example():
                                                     total_steps=1_000_000,
                                                     num_envs=8,
                                                     num_steps=2048,
-                                                    gamma=0.99),
+                                                    gamma=0.99,
+                                                    log_freq_vstep = 1000),
                 max_episode_duration=1000,
                 validation_batch_size=0,
                 validation_buffer_size=0,
