@@ -439,7 +439,7 @@ class Collector():
         return self._num_envs
 
     def collect(self, vsteps_to_collect : int, buffer : PPORolloutBuffer, agent : PPO):
-        term_count = th.as_tensor(0, device=self._env_device)
+        term_count = th.as_tensor(0).to(device=self._env_device, non_blocking=True)
         with th.no_grad():
             buffer.reset()
             for step in range(0, vsteps_to_collect):
