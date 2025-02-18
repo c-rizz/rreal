@@ -140,6 +140,7 @@ class SAC(RLAgent):
         observation_space : gym.spaces.Space
         feature_extractor_lr : float
         batch_size : int
+        max_grad_norm : float
 
     def __init__(self,
                  observation_space : gym.spaces.Space,
@@ -161,7 +162,8 @@ class SAC(RLAgent):
                  feature_extractor : FeatureExtractor | None = None,
                  feature_extractor_lr = 0.0,
                  batch_size = 512,
-                 reference_init_args : dict = {}):
+                 reference_init_args : dict = {},
+                 max_grad_norm : float = 0.5):
         super().__init__()
         _, _, _, values = inspect.getargvalues(inspect.currentframe())
         self._init_args = values
@@ -186,7 +188,8 @@ class SAC(RLAgent):
                                    target_entropy = target_entropy,
                                    observation_space = observation_space,
                                    feature_extractor_lr = feature_extractor_lr,
-                                   batch_size = batch_size)
+                                   batch_size = batch_size,
+                                   max_grad_norm=max_grad_norm)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = torch_device
         self._critic_updates = 0
@@ -387,6 +390,7 @@ class SAC(RLAgent):
         q_loss = self._compute_critic_loss(transitions)
         self._q_optimizer.zero_grad(set_to_none=True)
         q_loss.backward()
+        nn.utils.clip_grad_norm_(self._q_net.parameters(), self._hp.max_grad_norm)
         self._q_optimizer.step()
         self._critic_updates += 1
         self._last_q_loss = q_loss.detach()
@@ -404,6 +408,7 @@ class SAC(RLAgent):
         actor_loss = self._compute_actor_loss(transitions)
         self._actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
+        nn.utils.clip_grad_norm_(self._actor.parameters(), self._hp.max_grad_norm)
         self._actor_optimizer.step()
         self._last_actor_loss = actor_loss.detach()
         self._policy_updates += 1
@@ -420,6 +425,7 @@ class SAC(RLAgent):
             alpha_loss = self._compute_alpha_loss(transitions)
             self._alpha_optimizer.zero_grad(set_to_none=True)
             alpha_loss.backward()
+            nn.utils.clip_grad_norm_(self._log_alpha, self._hp.max_grad_norm)
             self._alpha_optimizer.step()
             self._alpha = self._log_alpha.exp().item()
         else:
@@ -565,7 +571,7 @@ def train_off_policy(collector : ExperienceCollector,
             wlogs = {"sac/"+k:v for k,v in model.get_stats().items()}
             wlogs["sac/buffer_frames"] = buffer.stored_frames()
             wlogs["sac/val_buffer_frames"] = buffer.stored_validation_frames() if isinstance(buffer,BaseValidatingBuffer) else 0
-            wandb_log(wlogs,throttle_period=2)
+            wandb_log(wlogs,throttle_period=1)
         adarl.utils.session.default_session.run_info["train_iterations"].value = model._tot_grad_steps_count
         
         # ------------------   Store collected experience  ------------------

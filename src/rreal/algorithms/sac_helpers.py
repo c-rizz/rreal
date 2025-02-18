@@ -342,7 +342,8 @@ def sac_train(  seed : int,
         device=device,
         storage_torch_device=device,
         handle_timeout_termination=True,
-        n_envs=hyperparams.parallel_envs)
+        n_envs=hyperparams.parallel_envs,
+        random_add=True)
     # rb = ThDictEpReplayBuffer(  buffer_size=hyperparams.buffer_size,
     #                             observation_space=observation_space,
     #                             action_space=action_space,
