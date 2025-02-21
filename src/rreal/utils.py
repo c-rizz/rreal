@@ -11,7 +11,9 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     hidden_activations : Callable[[],th.nn.Module] = th.nn.LeakyReLU,
                     return_ensemble_std : bool = False, use_torchscript : bool = False,
                     use_weightnorm : bool = False,
-                    weight_init_multiplier = 1.0):
+                    weight_init_multiplier = 1.0,
+                    layer_init_func : Callable[[th.nn.Module],None] | None = None,
+                    last_layer_init_func : Callable[[th.nn.Module],None] | None = None):
         
     if arch == "identity":
         if input_size != output_size:
@@ -29,6 +31,10 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                 ll = th.nn.Linear(layersizes[i],layersizes[i+1])
                 if use_weightnorm:
                     ll = weight_norm(ll)
+                if (i < len(layersizes) - 2 or last_layer_init_func is None) and layer_init_func is not None:
+                    layer_init_func(ll)
+                if i == len(layersizes) - 2 and last_layer_init_func is not None:
+                    last_layer_init_func(ll)
                 layers.append(ll)
                 if i < len(layersizes) - 2:
                     layers.append(hidden_activations())
@@ -37,8 +43,8 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
         net = Parallel(nets, return_mean=return_ensemble_mean, return_std=return_ensemble_std)
     else:
         raise AttributeError(f"Invalid arch {arch}")
-    if weight_init_multiplier != 1:
-        with th.no_grad():
+    with th.no_grad():
+        if weight_init_multiplier != 1:
             def scale_weights(m):
                 if isinstance(m, th.nn.Linear):
                     m.weight *= weight_init_multiplier

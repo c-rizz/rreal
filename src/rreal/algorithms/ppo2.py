@@ -26,11 +26,16 @@ from adarl.utils.tensor_trees import map_tensor_tree
 import adarl.utils.dbg.ggLog as ggLog
 import numpy as np
 from adarl.utils.wandb_wrapper import wandb_log
+from rreal.utils import build_mlp_net
 
-def layer_init(layer, std=2, bias_const=0.0):
+def layer_init(layer, std=2.0, bias_const=0.0):
     th.nn.init.orthogonal_(layer.weight, std)
     th.nn.init.constant_(layer.bias, bias_const)
     return layer
+
+def ortho_layer_init_(layer, std=2.0, bias_const=0.0):
+    th.nn.init.orthogonal_(layer.weight, std)
+    th.nn.init.constant_(layer.bias, bias_const)
 
 
 class PPORolloutBuffer():
@@ -144,8 +149,6 @@ class PPO(RLAgent):
         th_device : th.device
         action_len : int
         observation_space : gym.spaces.Space
-        policy_arch : list[int]
-        q_network_arch : list[int]
         action_min : th.Tensor
         action_max : th.Tensor
         q_lr : float
@@ -173,6 +176,10 @@ class PPO(RLAgent):
         """the maximum norm for the gradient clipping"""
         target_kl: float = None
         """the target KL divergence threshold"""
+        critic_network_arch : tuple[int,...] = (64,64)
+        """The layer sizes of the critic MLP"""
+        actor_network_arch : tuple[int,...] = (64,64)
+        """The layer sizes of the actor MLP"""
 
     _hp : Final[Hyperparams]
 
@@ -185,20 +192,39 @@ class PPO(RLAgent):
         else:
             raise NotImplementedError()
             self._feature_extractor = feature_extractor
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(self._feature_extractor.encoding_size(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
-        ).to(self._hp.th_device)
-        self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(self._feature_extractor.encoding_size(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, self._hp.action_len), std=0.01),
-        ).to(self._hp.th_device)
+        self.critic = build_mlp_net(arch=self._hp.critic_network_arch,
+                                    input_size=self._feature_extractor.encoding_size(),
+                                    output_size=1,
+                                    # use_weightnorm=True,
+                                    use_torchscript=True,
+                                    # hidden_activations=th.nn.Tanh,
+                                    layer_init_func=lambda m: ortho_layer_init_(m,1)).to(device=self._hp.th_device)
+        self.actor_mean = build_mlp_net(arch=self._hp.actor_network_arch,
+                                    input_size=self._feature_extractor.encoding_size(),
+                                    output_size=self._hp.action_len,
+                                    # use_weightnorm=True,
+                                    use_torchscript=True,
+                                    # weight_init_multiplier=0.01,
+                                    # hidden_activations=th.nn.Tanh,
+                                    layer_init_func=lambda m: ortho_layer_init_(m,1),
+                                    last_layer_init_func=lambda m: ortho_layer_init_(m,0.01)).to(device=self._hp.th_device)
+        
+        # self.critic = nn.Sequential(
+        #     layer_init(nn.Linear(self._feature_extractor.encoding_size(), 64)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(64, 64)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(64, 1), std=1.0),
+        # ).to(self._hp.th_device)
+        # self.actor_mean = nn.Sequential(
+        #     layer_init(nn.Linear(self._feature_extractor.encoding_size(), 64)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(64, 64)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(64, self._hp.action_len), std=0.01),
+        # ).to(self._hp.th_device)
+        # ggLog.info(f"critic:\n{self.critic}")
+        # ggLog.info(f"actor_mean:\n{self.actor_mean}")
         self.actor_logstd = nn.Parameter(th.zeros(1, self._hp.action_len, device=self._hp.th_device))
         self._optimizer = optim.Adam(self.parameters(), lr=self._hp.policy_lr, eps=1e-5)
         self._grad_step_count = th.as_tensor(0, device=self._hp.th_device)
@@ -569,8 +595,6 @@ def train_on_policy(collector : Collector,
 class PPO_hyperparams():
     minibatch_size : int
     th_device : th.device
-    policy_arch : list[int]
-    q_network_arch : list[int]
     q_lr : float
     policy_lr : float
     update_epochs : int
@@ -579,6 +603,8 @@ class PPO_hyperparams():
     num_steps : int
     gamma : float
     log_freq_vstep : int
+    critic_network_arch : tuple[int,...]
+    actor_network_arch : tuple[int,...]
 
 def ppo_train(  seed : int,
                 folderName : str,
@@ -640,8 +666,6 @@ def ppo_train(  seed : int,
                                     th_device=agent_hyperparams.th_device,
                                     action_len=int(np.prod(action_space.shape)),
                                     observation_space=obs_space,
-                                    policy_arch=agent_hyperparams.policy_arch,
-                                    q_network_arch=agent_hyperparams.q_network_arch,
                                     action_max=th.as_tensor(action_space.high, device=agent_hyperparams.th_device),
                                     action_min=th.as_tensor(action_space.low, device=agent_hyperparams.th_device),
                                     q_lr=agent_hyperparams.q_lr,
@@ -649,7 +673,9 @@ def ppo_train(  seed : int,
                                     num_envs=agent_hyperparams.num_envs,
                                     num_steps=agent_hyperparams.num_steps,
                                     gamma=agent_hyperparams.gamma,
-                                    update_epochs=agent_hyperparams.update_epochs))
+                                    update_epochs=agent_hyperparams.update_epochs,
+                                    actor_network_arch=agent_hyperparams.actor_network_arch,
+                                    critic_network_arch=agent_hyperparams.critic_network_arch))
     ggLog.info(f"Compiling PPO model...")
     t0 = time.monotonic()
     agent = th.compile(agent, fullgraph=True, mode="max-autotune")
