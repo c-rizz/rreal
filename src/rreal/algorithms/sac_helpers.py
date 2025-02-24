@@ -63,12 +63,10 @@ def gym_builder(seed, log_folder, is_eval, env_builder_args : dict[str,typing.An
     clip_reward = env_builder_args.pop("clip_reward",True)
     dict_obs = env_builder_args.pop("dict_obs",True)
     video_save_freq = env_builder_args.pop("video_save_freq",True)
-    env_kwargs : dict = copy.deepcopy(env_builder_args)
     stepLength_sec = 0.05
-    env_kwargs.pop("env_name")
     env = gym.make(env_builder_args["env_name"],
                     render_mode="rgb_array",
-                    **env_kwargs)
+                    **env_builder_args["gym_args"])
     # env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
     if clip_action:
         env = gym.wrappers.ClipAction(env)
@@ -181,7 +179,7 @@ def build_eval_callbacks(eval_configurations : list[dict],
 #     return envs
 
 def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams : SAC_hyperparams):
-    return SAC(observation_space=obs_space,
+    agent = SAC(observation_space=obs_space,
                 action_size=int(np.prod(act_space.shape)),
                 q_network_arch=hyperparams.q_network_arch,
                 q_lr=hyperparams.q_lr,
@@ -199,6 +197,8 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams : SAC_hy
                 batch_size = hyperparams.batch_size,
                 reference_init_args = hyperparams.reference_init_args,
                 target_entropy=hyperparams.target_entropy)
+    agent = th.compile(agent, mode="max-autotune", fullgraph=True)
+    return agent
 
 def build_collector(use_processes : bool,
                     vec_env_builder : VecEnvBuilderProtocol,
@@ -294,8 +294,14 @@ def sac_train(  seed : int,
     torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
 
-    if hyperparams.device == "cuda": hyperparams.device = "cuda:0"
-    device = th.device(hyperparams.device)
+    # if hyperparams.device == "cuda": hyperparams.device = "cuda:0"
+    if isinstance(hyperparams.device, str):
+        device = th.device(hyperparams.device)
+    else:
+        device = hyperparams.device
+    if device.index is None:
+        device = th.device(type=device.type, index=0)
+    print(f"Device = {device}")
     if collector_device is None:
         collector_device = device
     if vec_env_builder is None and env_builder is not None:
@@ -336,7 +342,8 @@ def sac_train(  seed : int,
         device=device,
         storage_torch_device=device,
         handle_timeout_termination=True,
-        n_envs=hyperparams.parallel_envs)
+        n_envs=hyperparams.parallel_envs,
+        random_add=True)
     # rb = ThDictEpReplayBuffer(  buffer_size=hyperparams.buffer_size,
     #                             observation_space=observation_space,
     #                             action_space=action_space,

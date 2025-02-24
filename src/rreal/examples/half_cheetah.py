@@ -10,10 +10,10 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
     max_steps_per_episode = 1000
     num_envs = 8
     env_builder_args = {"env_name" : "HalfCheetah-v4",
-                        "forward_reward_weight" : 1.0,
-                        "ctrl_cost_weight" : 0.1,
-                        "reset_noise_scale" : 0.1,
-                        "exclude_current_positions_from_observation" : True,
+                        "gym_args" : {  "forward_reward_weight" : 1.0,
+                                        "ctrl_cost_weight" : 0.1,
+                                        "reset_noise_scale" : 0.1,
+                                        "exclude_current_positions_from_observation" : True},
                         "max_episode_steps" : max_steps_per_episode,
                         "quiet" : True,
                         "clip_action" : True,
@@ -23,7 +23,8 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                         "clip_reward" : True,
                         "dict_obs" : True,
                         "video_save_freq" : -1,
-                        "log_info_stats" : True}
+                        "log_info_stats" : True,
+                        "th_device" : th.device("cpu")}
     video_eval_env_builder_args = copy.deepcopy(env_builder_args)
     video_eval_env_builder_args["video_save_freq"] = 1
     eval_conf_video_stoch = {
@@ -113,7 +114,8 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     total_steps=1_000_000,
                                                     num_envs=8,
                                                     num_steps=2048,
-                                                    gamma=0.99),
+                                                    gamma=0.99,
+                                                    log_freq_vstep=1000),
                 max_episode_duration=1000,
                 validation_batch_size=0,
                 validation_buffer_size=0,
