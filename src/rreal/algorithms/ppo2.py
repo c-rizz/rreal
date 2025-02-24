@@ -369,7 +369,7 @@ class Collector():
                 self._latest_obs = next_obs
                 self._latest_done = next_done
 
-            self._latest_obs = map_tensor_tree(self._latest_obs, lambda a: th.as_tensor(a, device = agent.input_device()))
+            self._latest_obs = map_tensor_tree(self._latest_obs, lambda a: th.as_tensor(a, device = policy_device))
             action, logprob, _, value, _ = agent.get_action_logprob_entropy_critic_mean(obs_batch=self._latest_obs)
             buffer.set(start_obss=self._latest_obs,
                         values=value.flatten(),
