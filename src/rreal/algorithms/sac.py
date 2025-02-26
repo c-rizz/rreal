@@ -12,7 +12,7 @@ from rreal.algorithms.rl_agent import RLAgent
 from rreal.feature_extractors import get_feature_extractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
-from rreal.utils import build_mlp_net
+from rreal.utils import build_mlp_net, scale_layer_weights
 from typing import List, Union, Literal
 import adarl.utils.callbacks
 import adarl.utils.dbg.ggLog as ggLog
@@ -37,7 +37,8 @@ class QNetwork(nn.Module):
                  q_network_arch : List[int],
                  observation_size : int,
                  torch_device : Union[str,th.device] = "cuda",
-                 nets_num : int = 1):
+                 nets_num : int = 1,
+                 initial_scale = 0.003):
         super().__init__()
         self._nets_num = nets_num
         self._obs_size = observation_size
@@ -47,7 +48,8 @@ class QNetwork(nn.Module):
                                      ensemble_size=self._nets_num,
                                      return_ensemble_mean=False,
                                      use_weightnorm=True,
-                                     use_torchscript=True).to(device=torch_device)
+                                     use_torchscript=True,
+                                     last_layer_init_func= lambda m: scale_layer_weights(m,initial_scale)).to(device=torch_device)
     
     def get_min_qval(self, observations, actions):
         qvals = self(observations, actions)
@@ -84,7 +86,9 @@ class Actor(nn.Module):
                                     last_activation_class=th.nn.LeakyReLU).to(device=torch_device)
         self.act_fc_mean = nn.Linear(policy_arch[-1], action_size, device=torch_device)
         self.act_fc_logstd = nn.Linear(policy_arch[-1], action_size, device=torch_device)
-
+        with th.no_grad():
+            scale_layer_weights(self.act_fc_mean, 0.001)
+            scale_layer_weights(self.act_fc_logstd, 0.001)
         if isinstance(action_max, int): action_max = float(action_max)
         if isinstance(action_min, int): action_min = float(action_min)
         if isinstance(action_max,float): action_max = th.as_tensor([action_max]*action_size, dtype=th.float32)
@@ -95,7 +99,7 @@ class Actor(nn.Module):
 
     def forward(self, observation_batch):
         hidden_batch = self.act_fc(observation_batch)
-        dbg_check_finite(hidden_batch)
+        # dbg_check_finite(hidden_batch)
         mean = self.act_fc_mean(hidden_batch)
         log_std = self.act_fc_logstd(hidden_batch)
         log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min # clamp the log_std network output
@@ -135,7 +139,7 @@ class SAC(RLAgent):
         targets_update_freq : int
         q_network_arch : List[int]
         policy_arch : List[int]
-        torch_device : Union[str,th.device]
+        torch_device : th.device
         target_entropy : float | None
         observation_space : gym.spaces.Space
         feature_extractor_lr : float
@@ -184,19 +188,20 @@ class SAC(RLAgent):
                                    targets_update_freq=target_update_freq,
                                    q_network_arch = q_network_arch,
                                    policy_arch = policy_arch,
-                                   torch_device = torch_device,
+                                   torch_device = th.device(torch_device),
                                    target_entropy = target_entropy,
                                    observation_space = observation_space,
                                    feature_extractor_lr = feature_extractor_lr,
                                    batch_size = batch_size,
                                    max_grad_norm=max_grad_norm)
         self._obs_space_sizes = sizetree_from_space(observation_space)
-        self.device = torch_device
+        self.device = self._hp.torch_device
         self._critic_updates = 0
         self._alpha_updates = 0
         self._policy_updates = 0
         if feature_extractor is None:
-            self._feature_extractor = StackVectorsFeatureExtractor(observation_space=observation_space)
+            self._feature_extractor = StackVectorsFeatureExtractor(observation_space=observation_space,
+                                                                   device=self._hp.torch_device)
         else:
             self._feature_extractor = feature_extractor
         self._q_net = QNetwork( observation_size=self._feature_extractor.encoding_size(),
@@ -224,10 +229,10 @@ class SAC(RLAgent):
             else:
                 self._target_entropy = self._hp.target_entropy
             self._log_alpha = th.zeros(1, requires_grad=True, device=torch_device)
-            self._alpha = self._log_alpha.exp().item()
+            self._alpha = self._log_alpha.exp()
             self._alpha_optimizer = optim.Adam([self._log_alpha], lr=self._hp.q_lr)
         else:
-            self._alpha = constant_entropy_temperature
+            self._alpha = th.as_tensor(constant_entropy_temperature).to(device=self._hp.torch_device, non_blocking=self._hp.torch_device.type=="cuda")
 
         if self._hp.feature_extractor_lr > 0:
             self._feature_extractor_optimizer = optim.Adam(list(self._feature_extractor.parameters()), lr=self._hp.feature_extractor_lr)
@@ -427,7 +432,7 @@ class SAC(RLAgent):
             alpha_loss.backward()
             nn.utils.clip_grad_norm_(self._log_alpha, self._hp.max_grad_norm)
             self._alpha_optimizer.step()
-            self._alpha = self._log_alpha.exp().item()
+            self._alpha = self._log_alpha.exp()
         else:
             alpha_loss = th.tensor(0.0, device=self.device)
         self._last_alpha_loss = alpha_loss.detach()
@@ -542,6 +547,9 @@ def train_off_policy(collector : ExperienceCollector,
     q_loss, actor_loss, alpha_loss = float("nan"),float("nan"),float("nan")
     start_time = time.monotonic()
     last_log_steps = float("-inf")
+
+
+    # th.cuda.memory._record_memory_history(max_entries=100_000)
     while global_step < total_timesteps and not adarl.utils.session.default_session.is_shutting_down():
         s0b = buffer.collected_frames()
         t0 = time.monotonic()
@@ -571,7 +579,7 @@ def train_off_policy(collector : ExperienceCollector,
             wlogs = {"sac/"+k:v for k,v in model.get_stats().items()}
             wlogs["sac/buffer_frames"] = buffer.stored_frames()
             wlogs["sac/val_buffer_frames"] = buffer.stored_validation_frames() if isinstance(buffer,BaseValidatingBuffer) else 0
-            wandb_log(wlogs,throttle_period=1)
+            wandb_log(wlogs,throttle_period=2)
         adarl.utils.session.default_session.run_info["train_iterations"].value = model._tot_grad_steps_count
         
         # ------------------   Store collected experience  ------------------
@@ -620,5 +628,10 @@ def train_off_policy(collector : ExperienceCollector,
             dictlist = [f"{k}:{v:.6g}" for k,v in collector.get_stats().items()]
             ggLog.info(f"Collection: {', '.join(dictlist)}")
             t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl, t_buff_sl, t_add_sl = 0,0,0,0,0,0,0
+            free, total = th.cuda.mem_get_info(th.device('cuda:0'))
+            mem_used_MB = (total - free) / 1024 ** 2
+            ggLog.info(f"{t}: cuda mem usage = {mem_used_MB}")
+        # jax.profiler.save_device_memory_profile(f"jax_memory_{t}.prof")
+        # th.cuda.memory._dump_snapshot(f"memory_{t}_th.pickle")
         adarl.utils.sigint_handler.haltOnSigintReceived()
     callbacks.on_training_end()

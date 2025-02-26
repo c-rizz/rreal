@@ -27,6 +27,7 @@ import adarl.utils.dbg.ggLog as ggLog
 import numpy as np
 from adarl.utils.wandb_wrapper import wandb_log
 from rreal.utils import build_mlp_net
+import jax.profiler 
 
 def layer_init(layer, std=2.0, bias_const=0.0):
     th.nn.init.orthogonal_(layer.weight, std)
@@ -53,7 +54,8 @@ class PPORolloutBuffer():
         self._dones = th.zeros((num_steps+1, num_envs), device=device)
         self._values = th.zeros((num_steps+1, num_envs), device=device)
         self._pos = 0
-
+        tot_bytes = self._actions.nbytes + self._logprobs.nbytes + self._rewards.nbytes + self._dones.nbytes + self._values.nbytes
+        ggLog.info(f"PPO Rollout buffer will occupy {tot_bytes/1024/1024}MiB")
     
     def add(self, start_obss, actions, logprobs, rewards, prev_dones, values):
         for k in start_obss.keys():
@@ -492,7 +494,7 @@ class Collector():
                 self._latest_obs = next_obs
                 self._latest_done = next_done
 
-            self._latest_obs = map_tensor_tree(self._latest_obs, lambda a: th.as_tensor(a, device = policy_device))
+            self._latest_obs = map_tensor_tree(self._latest_obs, lambda a: th.as_tensor(a, device = agent.input_device()))
             action, logprob, _, value, _ = agent.get_action_logprob_entropy_critic_mean(obs_batch=self._latest_obs)
             buffer.set(start_obss=self._latest_obs,
                         values=value.flatten(),
@@ -574,7 +576,12 @@ def train_on_policy(collector : Collector,
             t_tot_sl = 0
             steps_sl = 0
             t_tot_sl = 0
-            
+            t = f"{time.time():.3f}"
+            # jax.profiler.save_device_memory_profile(f"jax_memory_{t}.prof")
+            # th.cuda.memory._dump_snapshot(f"jax_memory_{t}.pickle")
+            free, total = th.cuda.mem_get_info(th.device('cuda:0'))
+            mem_used_MB = (total - free) / 1024 ** 2
+            ggLog.info(f"{t}: cuda mem usage = {mem_used_MB}")
         adarl.utils.sigint_handler.haltOnSigintReceived()
     callback.on_training_end()
 
@@ -623,6 +630,10 @@ def ppo_train(  seed : int,
                 collector_device : th.device | None = None,
                 debug_level : int = 2,
                 no_wandb : bool = False):
+
+    #     th.cuda.memory._record_memory_history(
+    #        max_entries=100_000
+    #    )
 
     run_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),

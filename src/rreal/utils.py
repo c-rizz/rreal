@@ -5,6 +5,12 @@ from torch.nn.utils.parametrizations import weight_norm
 from adarl.utils.tensor_trees import TensorTree
 import gymnasium as gym
 
+def scale_layer_weights(m : th.nn.Module, multiplier):
+    if isinstance(m, th.nn.Linear):
+        m.weight *= multiplier
+        m.bias *= multiplier
+    else:
+        raise RuntimeError(f"Unexpected module type {type(m)}")    
 def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     last_activation_class : Callable[[],th.nn.Module] = th.nn.Identity,
                     return_ensemble_mean = True,
@@ -31,10 +37,11 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                 ll = th.nn.Linear(layersizes[i],layersizes[i+1])
                 if use_weightnorm:
                     ll = weight_norm(ll)
-                if (i < len(layersizes) - 2 or last_layer_init_func is None) and layer_init_func is not None:
-                    layer_init_func(ll)
-                if i == len(layersizes) - 2 and last_layer_init_func is not None:
-                    last_layer_init_func(ll)
+                with th.no_grad():
+                    if (i < len(layersizes) - 2 or last_layer_init_func is None) and layer_init_func is not None:
+                        layer_init_func(ll)
+                    if i == len(layersizes) - 2 and last_layer_init_func is not None:
+                        last_layer_init_func(ll)
                 layers.append(ll)
                 if i < len(layersizes) - 2:
                     layers.append(hidden_activations())
@@ -45,11 +52,7 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
         raise AttributeError(f"Invalid arch {arch}")
     with th.no_grad():
         if weight_init_multiplier != 1:
-            def scale_weights(m):
-                if isinstance(m, th.nn.Linear):
-                    m.weight *= weight_init_multiplier
-                    m.bias *= weight_init_multiplier
-            net.apply(scale_weights)
+            net.apply(lambda m: scale_layer_weights(m,weight_init_multiplier))
     if use_torchscript:
         net = th.compile(net)
     return net
