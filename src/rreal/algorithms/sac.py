@@ -630,7 +630,7 @@ def train_off_policy(collector : ExperienceCollector,
             t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl, t_buff_sl, t_add_sl = 0,0,0,0,0,0,0
             free, total = th.cuda.mem_get_info(th.device('cuda:0'))
             mem_used_MB = (total - free) / 1024 ** 2
-            ggLog.info(f"{t}: cuda mem usage = {mem_used_MB}")
+            # ggLog.info(f"{t}: cuda mem usage = {mem_used_MB}")
         # jax.profiler.save_device_memory_profile(f"jax_memory_{t}.prof")
         # th.cuda.memory._dump_snapshot(f"memory_{t}_th.pickle")
         adarl.utils.sigint_handler.haltOnSigintReceived()
