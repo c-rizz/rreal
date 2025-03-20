@@ -277,7 +277,8 @@ def sac_train(  seed : int,
                 checkpoint_freq : int = 100,
                 collector_device : th.device | None = None,
                 debug_level : int = 2,
-                no_wandb : bool = False):
+                no_wandb : bool = False,
+                log_weights_and_grads = False):
 
     run_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
@@ -331,7 +332,8 @@ def sac_train(  seed : int,
     model = build_sac(observation_space, action_space, hyperparams)
 
     # torchexplorer.watch(model, backend="wandb")
-    wandb.watch((model, model._actor, model._q_net), log="all", log_freq=1000, log_graph=False)
+    if log_weights_and_grads:
+        wandb.watch((model, model._actor, model._q_net), log="all", log_freq=1000, log_graph=False)
 
     # compiled_model = th.compile(model)
 

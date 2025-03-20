@@ -34,8 +34,8 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
 
     def extract_features(self, observation_batch) -> th.Tensor:
         with th.no_grad():
-            cat = self._obs_converter.getVectorPart(observation_batch)
-            return self._normalizer(cat)
+            vec_part = self._obs_converter.getVectorPart(observation_batch)
+            return self._normalizer(vec_part)
     
     def encoding_size(self) -> int:
         return self._obs_converter.vector_part_size()

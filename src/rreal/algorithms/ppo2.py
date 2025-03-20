@@ -41,6 +41,8 @@ def ortho_layer_init_(layer, std=2.0, bias_const=0.0):
 
 class PPORolloutBuffer():
     def __init__(self, num_steps, num_envs, obs_space : gym.spaces.Dict, act_space_shape, device):
+        self.num_steps = num_steps
+        self.num_envs = num_envs
         self._storage_th_device = device
         self._obs = {
             key: th.zeros(  size=(num_steps+1, num_envs) + space.shape,
@@ -190,7 +192,8 @@ class PPO(RLAgent):
         super().__init__()
         self._hp = copy.deepcopy(hyperparams)
         if feature_extractor is None:
-            self._feature_extractor = StackVectorsFeatureExtractor(observation_space=self._hp.observation_space)
+            self._feature_extractor = StackVectorsFeatureExtractor(observation_space=self._hp.observation_space,
+                                                                   device=hyperparams.th_device)
         else:
             raise NotImplementedError()
             self._feature_extractor = feature_extractor
@@ -296,7 +299,9 @@ class PPO(RLAgent):
     def train_model(self, buff : PPORolloutBuffer):
         # t_0 = time.monotonic()
         raw_obss, actions, rewards, dones, logprobs, values = buff.get_rollout_data()
+        raw_obss = map_tensor_tree(raw_obss, lambda l: l.flatten(0,1))
         enc_obss = self._feature_extractor.extract_features(raw_obss) 
+        enc_obss = map_tensor_tree(enc_obss, lambda l: l.view((buff.num_steps+1, buff.num_envs)+l.shape[1:]))
         
         # t_postenc = time.monotonic()
         # bootstrap value if not done

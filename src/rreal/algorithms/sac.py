@@ -30,6 +30,7 @@ import zipfile
 from difflib import ndiff
 import copy
 from typing_extensions import override
+from adarl.utils.async_cuda2cpu_queue import log_async
 
 class QNetwork(nn.Module):
     def __init__(self,
@@ -482,7 +483,7 @@ class SAC(RLAgent):
         return critic_loss, actor_loss, alpha_loss
 
     @override
-    def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[float,float,float]:
+    def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[th.Tensor,th.Tensor,th.Tensor]:
         q_act_alpha_losses = [None]*iterations
         for i in range(iterations):
             transitions = buffer.sample(self._hp.batch_size)
@@ -544,7 +545,7 @@ def train_off_policy(collector : ExperienceCollector,
     step_counter = 0
     steps_sl = 0
     train_count = 0
-    q_loss, actor_loss, alpha_loss = float("nan"),float("nan"),float("nan")
+    q_loss, actor_loss, alpha_loss = th.as_tensor(float("nan")),th.as_tensor(float("nan")),th.as_tensor(float("nan"))
     start_time = time.monotonic()
     last_log_steps = float("-inf")
 
@@ -618,6 +619,8 @@ def train_off_policy(collector : ExperienceCollector,
         # ggLog.info(f"global_steps = {global_step}")
         if global_step - last_log_steps > log_freq_vstep*num_envs:
             last_log_steps = global_step
+            log_async(f"SAC: expsteps={global_step}"+" q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}",
+                      tensors=dict(q_loss=q_loss,actor_loss=actor_loss,alpha_loss=alpha_loss))
             ggLog.info(f"SAC: expsteps={global_step} q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}")
             ggLog.info(f"OFFTRAIN: expstps:{global_step}"
                        f" trainstps={model._tot_grad_steps_count}"
