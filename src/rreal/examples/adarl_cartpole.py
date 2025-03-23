@@ -208,7 +208,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     learning_starts=5*max_steps_per_episode,
                                                     log_freq_vstep = 1000,
                                                     reference_init_args={},
-                                                    target_entropy=None),
+                                                    target_entropy_factor=None),
                     collector_device=collect_device,
                     max_episode_duration=max_steps_per_episode,
                     validation_buffer_size = 0, #100_000,

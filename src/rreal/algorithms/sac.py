@@ -159,7 +159,7 @@ class SAC(RLAgent):
                  torch_device : Union[str,th.device] = "cuda",
                  auto_entropy_temperature : bool = True,
                  constant_entropy_temperature : float | None = None,
-                 target_entropy : float | None = None,
+                 target_entropy_factor : float | None = None,
                  gamma : float = 0.99,
                  target_tau = 0.005,
                  policy_update_freq = 2,
@@ -168,7 +168,8 @@ class SAC(RLAgent):
                  feature_extractor_lr = 0.0,
                  batch_size = 512,
                  reference_init_args : dict = {},
-                 max_grad_norm : float = 0.5):
+                 max_grad_norm : float = 0.5,
+                 target_entropy : None = None):
         super().__init__()
         _, _, _, values = inspect.getargvalues(inspect.currentframe())
         self._init_args = values
@@ -176,6 +177,8 @@ class SAC(RLAgent):
         self._init_args.pop("__class__")
         self._init_args.pop("feature_extractor") # Will be saved separately
         self._init_args = copy.deepcopy(self._init_args)
+        if target_entropy_factor is None:
+            target_entropy_factor = -1.0
         self._hp = SAC.Hyperparams(q_lr=q_lr,
                                    policy_lr = policy_lr,
                                    gamma=gamma,
@@ -190,7 +193,7 @@ class SAC(RLAgent):
                                    q_network_arch = q_network_arch,
                                    policy_arch = policy_arch,
                                    torch_device = th.device(torch_device),
-                                   target_entropy = target_entropy,
+                                   target_entropy = target_entropy_factor*action_size,
                                    observation_space = observation_space,
                                    feature_extractor_lr = feature_extractor_lr,
                                    batch_size = batch_size,
@@ -225,10 +228,7 @@ class SAC(RLAgent):
                             torch_device=self._hp.torch_device)
         self._actor_optimizer = optim.Adam(list(self._actor.parameters()), lr=self._hp.policy_lr)
         if self._hp.auto_entropy_temperature:
-            if self._hp.target_entropy is None:
-                self._target_entropy = -self._hp.action_size
-            else:
-                self._target_entropy = self._hp.target_entropy
+            self._target_entropy = self._hp.target_entropy
             self._log_alpha = th.zeros(1, requires_grad=True, device=torch_device)
             self._alpha = self._log_alpha.exp()
             self._alpha_optimizer = optim.Adam([self._log_alpha], lr=self._hp.q_lr)
