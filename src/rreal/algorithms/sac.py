@@ -55,7 +55,8 @@ class QNetwork(nn.Module):
     def get_min_qval(self, observations, actions):
         qvals = self(observations, actions)
         # ggLog.info(f"qvals.size() = {qvals.size()}")
-        min_q = th.min(qvals,dim=1).values
+        # min_q = qvals[:,0]
+        min_q = th.min(qvals,dim=1).values # this causes a cuda sync on backward
         # min_q = min_q.squeeze(1)
         # ggLog.info(f"min_q.size() = {min_q.size()}")
         return min_q
@@ -230,7 +231,7 @@ class SAC(RLAgent):
         if self._hp.auto_entropy_temperature:
             self._target_entropy = self._hp.target_entropy
             self._log_alpha = th.zeros(1, requires_grad=True, device=torch_device)
-            self._alpha = self._log_alpha.exp()
+            self._alpha = self._log_alpha.exp().detach()
             self._alpha_optimizer = optim.Adam([self._log_alpha], lr=self._hp.q_lr)
         else:
             self._alpha = th.as_tensor(constant_entropy_temperature).to(device=self._hp.torch_device, non_blocking=self._hp.torch_device.type=="cuda")
@@ -405,6 +406,7 @@ class SAC(RLAgent):
     def _compute_actor_loss(self, transitions : TransitionBatch):
         observations = self._feature_extractor.extract_features(transitions.observations)
         act, act_log_prob, _ = self._actor.sample_action(observations)
+        # with th.no_grad():
         min_q_pi = self._q_net.get_min_qval(observations, act) # cannot reuse those from _update_value_func, the value function has changed
         # ggLog.info(f"min_q_pi.size() = {min_q_pi.size()}")
         # ggLog.info(f"act_log_prob.size() = {act_log_prob.size()}")
@@ -433,7 +435,7 @@ class SAC(RLAgent):
             alpha_loss.backward()
             nn.utils.clip_grad_norm_(self._log_alpha, self._hp.max_grad_norm)
             self._alpha_optimizer.step()
-            self._alpha = self._log_alpha.exp()
+            self._alpha = self._log_alpha.exp().detach()
         else:
             alpha_loss = th.tensor(0.0, device=self.device)
         self._last_alpha_loss = alpha_loss.detach()
@@ -455,6 +457,8 @@ class SAC(RLAgent):
             self._feature_extractor_optimizer.step()
 
     def _update(self, transitions : TransitionBatch):
+        # sync_dbg_mode = th.cuda.get_sync_debug_mode()
+        # th.cuda.set_sync_debug_mode("error")
         if self._feature_extractor_optimizer is not None:
             self._feature_extractor_optimizer.zero_grad(set_to_none=True) # gradients will be accumulated by both actor and critic
         self._update_critic(transitions = transitions)
@@ -469,6 +473,7 @@ class SAC(RLAgent):
             did_train_something = True
         if did_train_something:
             self._update_feature_extractor()
+        # th.cuda.set_sync_debug_mode(sync_dbg_mode)
         return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
     
     def validate(self, buffer : BaseValidatingBuffer, batch_size : int):
