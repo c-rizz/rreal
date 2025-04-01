@@ -108,7 +108,6 @@ def cartpole_venv_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                         autoreset = False,
                                         quiet = True)
             return GymRunnerWrapper(runner=vrunner, quiet=quiet), 1/stepLength_sec
-        # from jumping_leg.experiments.build_quad import quad_env_builder
         env = build_vec_env(env_builder=single_env_builder,
                             env_builder_args=env_builder_args,
                             log_folder=run_folder,

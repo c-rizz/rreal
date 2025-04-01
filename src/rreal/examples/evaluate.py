@@ -8,7 +8,6 @@ import time
 import numpy as np
 import torch
 import torch as th
-# import jumping_leg.experiments.build_jumping_leg_env as build_jumping_leg_env
 import inspect
 import adarl.utils.session
 from adarl.utils.buffers import ThDReplayBuffer
