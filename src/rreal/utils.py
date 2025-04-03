@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Callable
 import torch as th
 from rreal.nets.Parallel import Parallel

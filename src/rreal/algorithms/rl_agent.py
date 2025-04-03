@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch.nn as nn
 from adarl.utils.buffers import TransitionBatch, BaseBuffer
 from abc import abstractmethod, ABC
