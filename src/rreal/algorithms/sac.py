@@ -75,6 +75,8 @@ class Actor(nn.Module):
                         action_min : Union[float, th.Tensor] = -1,
                         log_std_max = 2,
                         log_std_min = -5,
+                        log_std_init = -3.0,
+                        init_noise = 0.001,
                         torch_device : Union[str,th.device] = "cuda"):
         super().__init__()
         self._log_std_max = log_std_max
@@ -86,11 +88,14 @@ class Actor(nn.Module):
         else:
             self.act_fc = build_mlp_net(arch=policy_arch[:-1],input_size=observation_size, output_size=policy_arch[-1],
                                     last_activation_class=th.nn.LeakyReLU).to(device=torch_device)
-        self.act_fc_mean = nn.Linear(policy_arch[-1], action_size, device=torch_device)
-        self.act_fc_logstd = nn.Linear(policy_arch[-1], action_size, device=torch_device)
-        with th.no_grad():
-            scale_layer_weights(self.act_fc_mean, 0.001)
-            scale_layer_weights(self.act_fc_logstd, 0.001)
+        self.act_fc_mean = build_mlp_net(arch=[],
+                                         input_size=policy_arch[-1],
+                                         output_size=action_size,
+                                         last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=0.0)).to(device=torch_device)
+        self.act_fc_logstd = build_mlp_net(arch=[],
+                                         input_size=policy_arch[-1],
+                                         output_size=action_size,
+                                         last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=log_std_init)).to(device=torch_device)        
         if isinstance(action_max, int): action_max = float(action_max)
         if isinstance(action_min, int): action_min = float(action_min)
         if isinstance(action_max,float): action_max = th.as_tensor([action_max]*action_size, dtype=th.float32)
@@ -147,6 +152,7 @@ class SAC(RLAgent):
         feature_extractor_lr : float
         batch_size : int
         max_grad_norm : float
+        log_std_init : float
 
     def __init__(self,
                  observation_space : gym.spaces.Space,
@@ -170,7 +176,8 @@ class SAC(RLAgent):
                  batch_size = 512,
                  reference_init_args : dict = {},
                  max_grad_norm : float = 0.5,
-                 target_entropy : None = None):
+                 target_entropy : None = None,
+                 actor_log_std_init = -3.0):
         super().__init__()
         _, _, _, values = inspect.getargvalues(inspect.currentframe())
         self._init_args = values
@@ -198,7 +205,8 @@ class SAC(RLAgent):
                                    observation_space = observation_space,
                                    feature_extractor_lr = feature_extractor_lr,
                                    batch_size = batch_size,
-                                   max_grad_norm=max_grad_norm)
+                                   max_grad_norm=max_grad_norm,
+                                   log_std_init = actor_log_std_init)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = self._hp.torch_device
         self._critic_updates = 0
@@ -226,7 +234,8 @@ class SAC(RLAgent):
                             action_size = self._hp.action_size,
                             action_min = self._hp.action_min,
                             action_max = self._hp.action_max,
-                            torch_device=self._hp.torch_device)
+                            torch_device=self._hp.torch_device,
+                            log_std_init=self._hp.log_std_init)
         self._actor_optimizer = optim.Adam(list(self._actor.parameters()), lr=self._hp.policy_lr)
         if self._hp.auto_entropy_temperature:
             self._target_entropy = self._hp.target_entropy

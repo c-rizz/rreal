@@ -195,7 +195,8 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams : SAC_hy
                 target_update_freq=1,
                 batch_size = hyperparams.batch_size,
                 reference_init_args = hyperparams.reference_init_args,
-                target_entropy_factor=hyperparams.target_entropy_factor)
+                target_entropy_factor=hyperparams.target_entropy_factor,
+                actor_log_std_init = hyperparams.actor_log_std_init)
     agent = th.compile(agent, mode="max-autotune", fullgraph=True)
     return agent
 
@@ -259,6 +260,7 @@ class SAC_hyperparams:
     log_freq_vstep : int
     reference_init_args : dict
     target_entropy_factor : float | None
+    actor_log_std_init : float
 
 def sac_train(  seed : int,
                 folderName : str,

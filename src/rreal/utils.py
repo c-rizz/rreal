@@ -6,12 +6,14 @@ from torch.nn.utils.parametrizations import weight_norm
 from adarl.utils.tensor_trees import TensorTree
 import gymnasium as gym
 
-def scale_layer_weights(m : th.nn.Module, multiplier):
+def scale_layer_weights(m : th.nn.Module, multiplier, bias_offset = 0.0):
     if isinstance(m, th.nn.Linear):
         m.weight *= multiplier
         m.bias *= multiplier
+        m.bias += bias_offset
     else:
         raise RuntimeError(f"Unexpected module type {type(m)}")    
+    
 def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     last_activation_class : Callable[[],th.nn.Module] = th.nn.Identity,
                     return_ensemble_mean = True,
