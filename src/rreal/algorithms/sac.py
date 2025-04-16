@@ -582,6 +582,7 @@ def train_off_policy(collector : ExperienceCollector,
             model.validate(buffer, batch_size=validation_batch_size)
         t_after_val = time.monotonic()
         if trained:
+            ggLog.info(f"SAC: "+str([f"{k}={v}, " for k,v in model.get_stats().items()]))
             wlogs = {"sac/"+k:v for k,v in model.get_stats().items()}
             wlogs["sac/buffer_frames"] = buffer.stored_frames()
             wlogs["sac/val_buffer_frames"] = buffer.stored_validation_frames() if isinstance(buffer,BaseValidatingBuffer) else 0

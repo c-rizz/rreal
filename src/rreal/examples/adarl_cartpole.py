@@ -15,8 +15,8 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
     mode = env_builder_args["mode"]
     th_device = env_builder_args["th_device"]
     quiet = env_builder_args["quiet"]
-    max_steps= 1000
-    stepLength_sec= 50/1024
+    max_steps= env_builder_args["max_steps"]
+    stepLength_sec= env_builder_args["step_length_sec"]
     video_save_freq = env_builder_args["video_save_freq"]
     if mode == "gz":
         raise NotImplementedError()
@@ -61,20 +61,23 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
     elif mode == "mjx":
         from adarl.adapters.MjxJointImpedanceAdapter import MjxJointImpedanceAdapter
         import jax
+        sim_dt = 4/1024
         adapter = MjxJointImpedanceAdapter( vec_size=num_envs,
                                             enable_rendering=env_builder_args.pop("enable_rendering"),
                                             jax_device=jax.devices("gpu")[0],
                                             output_th_device = th_device,
-                                            sim_step_dt=4/4096,
+                                            sim_step_dt=sim_dt,
                                             step_length_sec=stepLength_sec,
                                             realtime_factor=-1.0,
                                             gui_env_index=0,
                                             default_max_joint_impedance_ctrl_torque=100.0,
                                             show_gui=False,
-                                            log_freq=10_000,
+                                            log_freq=max_steps*(stepLength_sec/sim_dt),
                                             record_whole_joint_trajectories = False,
                                             log_freq_joints_trajectories = int(250*(50/1024)/(2/4096)),
-                                            log_folder=run_folder)
+                                            log_folder=run_folder,
+                                            opt_preset="fastest",
+                                            add_ground=False)
     else:
         print(f"Requested unknown controller '{mode}'")
         exit(0)
@@ -82,7 +85,10 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                    maxStepsPerEpisode=max_steps,
                                    render=True,
                                    step_duration_sec=stepLength_sec,
-                                   th_device=adapter.output_th_device())
+                                   th_device=adapter.output_th_device(),
+                                   img_obs=env_builder_args.pop("img_obs"),
+                                   task=env_builder_args.pop("task"),
+                                   sparse_reward=env_builder_args.pop("sparse_reward"))
     env = ObsToDict(env=env)
     vrunner = EnvRunner(env=env, verbose=False, quiet=quiet, episodeInfoLogFile=run_folder+"/vec_runner.log",
                         render_envs=[0], autoreset=autoreset,
@@ -91,14 +97,20 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                     fps = 1/stepLength_sec,
                                     outFolder=run_folder+"/RunnerRecorder",
                                     env_index=0,
-                                    saveFrequency_ep=video_save_freq)
+                                    saveFrequency_ep=video_save_freq,
+                                    overlay_text_xy=(0.025,0.025),
+                                    overlay_text_height=0.035,
+                                    overlay_text_color_rgb=(255,150,0),
+                                    overlay_text_func=lambda vo, a, r, te, tr, info:   
+                                            f"\n"
+                                            f"Angle    {info['pole_angle']: .3f}")
     return vrunner
 
 def cartpole_venv_builder(  seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = ""):
     mode = env_builder_args["mode"]
     quiet = env_builder_args["quiet"]
     stepLength_sec= 50/1024
-    if mode == "pybullet":
+    if False: #mode == "pybullet":
         device = env_builder_args["th_device"]
         def single_env_builder(seed : int, log_folder : str, is_eval : bool, env_builder_args : dict[str, Any]):
             vrunner = cartpole_vrun_builder(seed = seed,

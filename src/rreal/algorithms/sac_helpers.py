@@ -31,6 +31,8 @@ import adarl.utils.session as session
 from rreal.algorithms.rl_agent import RLAgent
 from adarl.envs.vector_env_checker import VectorEnvChecker
 from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
+from adarl.envs.vec.EnvRunnerInterface import EnvRunnerInterface
+from adarl.envs.vec.GymVecRunnerWrapper import GymVecRunnerWrapper
 
 class EnvBuilderProtocol(typing.Protocol):
     def __call__(self, seed : int, log_folder : str, is_eval : bool, env_builder_args : dict) -> tuple[gym.Env,float]:
@@ -39,6 +41,11 @@ class EnvBuilderProtocol(typing.Protocol):
 class VecEnvBuilderProtocol(typing.Protocol):
     def __call__(self, seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = "") -> gym.vector.VectorEnv:
         ...
+
+class VecEnvRunnerBuilderProtocol(typing.Protocol):
+    def __call__(self, seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = "", autoreset = True, quiet = False) -> EnvRunnerInterface:
+        ...
+
 
 def gym_builder(seed, log_folder, is_eval, env_builder_args : dict[str,typing.Any]):
     # env = gym.make(env_builder_args["env_name"], render_mode="rgb_array")
@@ -236,8 +243,14 @@ def wrap_with_logger(vec_env_builder : VecEnvBuilderProtocol) -> VecEnvBuilderPr
         return venv
     return wrapped_builder
 
-
-
+def wrap_with_gym(vec_runner_builder : VecEnvRunnerBuilderProtocol) -> VecEnvBuilderProtocol:
+    def wrapped_builder(seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = ""):
+        return GymVecRunnerWrapper(  runner=vec_runner_builder( seed = seed,
+                                                                run_folder = run_folder,
+                                                                env_builder_args = env_builder_args,
+                                                                num_envs = num_envs),
+                                    quiet=env_builder_args["quiet"])
+    return wrapped_builder
 
 from dataclasses import dataclass
 @dataclass

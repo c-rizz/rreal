@@ -10,8 +10,9 @@ def scale_layer_weights(m : th.nn.Module, multiplier):
     if isinstance(m, th.nn.Linear):
         m.weight *= multiplier
         m.bias *= multiplier
-    else:
-        raise RuntimeError(f"Unexpected module type {type(m)}")    
+    # elif not any(True for _ in m.parameters()): # if not empty
+    #     raise RuntimeError(f"Unexpected module type {type(m)}")    
+
 def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     last_activation_class : Callable[[],th.nn.Module] = th.nn.Identity,
                     return_ensemble_mean = True,
