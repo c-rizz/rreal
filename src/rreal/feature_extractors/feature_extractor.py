@@ -1,6 +1,7 @@
 from abc import abstractmethod, ABC
 import torch as th
 import zipfile
+import typing
 
 class FeatureExtractor(ABC, th.nn.Module):
     @abstractmethod
@@ -24,5 +25,5 @@ class FeatureExtractor(ABC, th.nn.Module):
     def train_extractor(self, global_step, grad_steps, buffer):
         raise NotImplementedError()
     
-    def get_init_args(self):
+    def get_init_args(self) -> dict[str,typing.Any]:
         return self._init_args

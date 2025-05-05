@@ -77,7 +77,8 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                             log_freq_joints_trajectories = int(250*(50/1024)/(2/4096)),
                                             log_folder=run_folder,
                                             opt_preset="fastest",
-                                            add_ground=False)
+                                            add_ground=False,
+                                            add_sky=False)
     else:
         print(f"Requested unknown controller '{mode}'")
         exit(0)
@@ -88,7 +89,8 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                    th_device=adapter.output_th_device(),
                                    img_obs=env_builder_args.pop("img_obs"),
                                    task=env_builder_args.pop("task"),
-                                   sparse_reward=env_builder_args.pop("sparse_reward"))
+                                   sparse_reward=env_builder_args.pop("sparse_reward"),
+                                   img_obs_resolution=env_builder_args.pop("img_obs_resolution"))
     env = ObsToDict(env=env)
     vrunner = EnvRunner(env=env, verbose=False, quiet=quiet, episodeInfoLogFile=run_folder+"/vec_runner.log",
                         render_envs=[0], autoreset=autoreset,

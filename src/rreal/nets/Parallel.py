@@ -40,11 +40,12 @@ class Parallel(nn.ModuleList):
     Parallelly runs provided modules. Returns one batch containig an ensemble of outputs in each element.
     E.g.: You have 3 submodules, each returning an output of size (5,), you input a (1024,10) batch, you get a (1024,3,5) output
     """
-    def __init__(self, modules, return_mean : bool = False, return_std = False):
+    def __init__(self, modules, return_mean : bool = False, return_std = False, return_concat : bool = False):
         super().__init__( modules )
         self._modules_num = len(modules)
         self._output_mean : Final[bool] = return_mean
         self._output_std : Final[bool] = return_std
+        self._output_concat : Final[bool]  = return_concat
         # self._streams = [th.cuda.Stream() for _ in range(len(modules))]
 
     def forward(self, x):
@@ -71,7 +72,6 @@ class Parallel(nn.ModuleList):
             results = [th.jit.wait(fut) for fut in futures]
         else:
             results = [model(x) for model in self] # avoid the fork
-        stacked_outs = th.stack(results, dim=1)
 
         # modules = list(self)
         # results = [None]*len(modules)
@@ -80,12 +80,16 @@ class Parallel(nn.ModuleList):
         # stacked_outs = th.stack(results, dim=1)
 
         if self._output_mean:
+            stacked_outs = th.stack(results, dim=1)
             if self._output_std:
-                return th.stack([th.mean(stacked_outs, dim=1), th.std(stacked_outs, dim=1)], dim=0)
+                return th.stack([th.mean(stacked_outs, dim=1),
+                                 th.std(stacked_outs, dim=1)], dim=0)
             else:
                 return th.mean(stacked_outs, dim=1)
+        elif self._output_concat:
+            return th.concat(results, dim=1)
         else:
-            return stacked_outs
+            return th.stack(results, dim=1)
 
 class MeanStd(nn.Module):
     def __init__(self, dim = 1):
