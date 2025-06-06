@@ -43,7 +43,7 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
     
     @override
     @classmethod
-    def load(cls, file : zipfile.ZipFile | str):
+    def load(cls, file : zipfile.ZipFile | str, name : str = "feature_extractor"):
         # if isinstance(file,str): # just for compatibility
         #     fname = file+".feature_extractor.extra.yaml"
         #     ggLog.info(f"opening {fname}")
@@ -53,9 +53,9 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         #         state_dict = th.load(state_file)
         # elif isinstance(file,zipfile.ZipFile):
         if isinstance(file,zipfile.ZipFile):
-            with file.open("feature_extractor.extra.yaml", "r") as init_args_yamlfile:
+            with file.open(f"{name}.extra.fe.yaml", "r") as init_args_yamlfile:
                 extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
-            with file.open("feature_extractor.state.pth", "r") as state_file:
+            with file.open(f"{name}.state.fe.pth", "r") as state_file:
                 state_dict = th.load(state_file)
         else:
             raise RuntimeError(f"Unexpected input type")
@@ -65,14 +65,14 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         fe.load_state_dict(state_dict)
     
     @override
-    def save_to_archive(self, archive : zipfile.ZipFile):
+    def save_to_archive(self, archive : zipfile.ZipFile, name : str = "feature_extractor"):
         extra = {}
         extra["init_args"] = self._init_args
         extra["class_name"] = self.__class__.__name__
         # ggLog.info(f"saving extra={extra}")
-        with archive.open("feature_extractor.extra.yaml", "w") as init_args_yamlfile:
+        with archive.open(f"{name}.extra.fe.yaml", "w") as init_args_yamlfile:
             init_args_yamlfile.write(yaml.dump(extra,default_flow_style=None).encode("utf-8"))
-        with archive.open("feature_extractor.state.pth", "w") as state_file:
+        with archive.open(f"{name}.state.fe.pth", "w") as state_file:
             th.save(self.state_dict(), state_file)
             
 

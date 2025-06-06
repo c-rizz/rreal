@@ -32,6 +32,7 @@ import copy
 from typing_extensions import override
 from adarl.utils.async_cuda2cpu_queue import log_async
 import pprint
+import adarl.utils.spaces as spaces
 
 class QNetwork(nn.Module):
     def __init__(self,
@@ -102,6 +103,8 @@ class Actor(nn.Module):
         if isinstance(action_max,float): action_max = th.as_tensor([action_max]*action_size, dtype=th.float32)
         if isinstance(action_min,float): action_min = th.as_tensor([action_min]*action_size, dtype=th.float32)
         # save action scaling factors as non-trained parameters
+        self.action_bias : th.Tensor
+        self.action_scale : th.Tensor
         self.register_buffer("action_scale", th.as_tensor((action_max - action_min) / 2.0, dtype=th.float32, device=torch_device))
         self.register_buffer("action_bias",  th.as_tensor((action_max + action_min) / 2.0, dtype=th.float32, device=torch_device))
 
@@ -150,10 +153,14 @@ class SAC(RLAgent):
         torch_device : th.device
         target_entropy : float | None
         observation_space : gym.spaces.Space
+        actor_observation_space : gym.spaces.Space
+        critic_observation_space : gym.spaces.Space
         feature_extractor_lr : float
         batch_size : int
         max_grad_norm : float
         log_std_init : float
+        actor_observation_filter : list[str] | None
+        critic_observation_filter : list[str] | None
 
     def __init__(self,
                  observation_space : gym.spaces.Space,
@@ -172,22 +179,39 @@ class SAC(RLAgent):
                  target_tau = 0.005,
                  policy_update_freq = 2,
                  target_update_freq = 1,
-                 feature_extractor : FeatureExtractor | None = None,
+                 critic_feature_extractor : FeatureExtractor | None = None,
+                 actor_feature_extractor : FeatureExtractor | None = None,
                  feature_extractor_lr = 0.0,
                  batch_size = 512,
                  reference_init_args : dict = {},
                  max_grad_norm : float = 0.5,
-                 target_entropy : None = None,
-                 actor_log_std_init = -3.0):
+                 actor_log_std_init = -3.0,
+                 actor_observation_filter : list[str] | None = None,
+                 critic_observation_filter : list[str] | None = None):
         super().__init__()
-        _, _, _, values = inspect.getargvalues(inspect.currentframe())
+        _, _, _, values = inspect.getargvalues(inspect.currentframe()) #type: ignore
         self._init_args = values
         self._init_args.pop("self")
         self._init_args.pop("__class__")
-        self._init_args.pop("feature_extractor") # Will be saved separately
+        self._init_args.pop("critic_feature_extractor") # Will be saved separately
+        self._init_args.pop("actor_feature_extractor") # Will be saved separately
         self._init_args = copy.deepcopy(self._init_args)
         if target_entropy_factor is None:
             target_entropy_factor = -1.0
+        if actor_observation_filter != None:
+            if isinstance(observation_space, spaces.gym_spaces.Dict):
+                actor_observation_space = spaces.gym_spaces.Dict({k:v for k,v in observation_space.spaces.items() if k in actor_observation_filter})
+            else:
+                raise RuntimeError(f"observation space must be a Dict to use actor_observation_filter, but it's a {type(observation_space)}")
+        else:
+            actor_observation_space = observation_space
+        if critic_observation_filter != None:
+            if isinstance(observation_space, spaces.gym_spaces.Dict):
+                critic_observation_space = spaces.gym_spaces.Dict({k:v for k,v in observation_space.spaces.items() if k in critic_observation_filter})
+            else:
+                raise RuntimeError(f"observation space must be a Dict to use actor_observation_filter, but it's a {type(observation_space)}")
+        else:
+            critic_observation_space = observation_space
         self._hp = SAC.Hyperparams(q_lr=q_lr,
                                    policy_lr = policy_lr,
                                    gamma=gamma,
@@ -207,23 +231,42 @@ class SAC(RLAgent):
                                    feature_extractor_lr = feature_extractor_lr,
                                    batch_size = batch_size,
                                    max_grad_norm=max_grad_norm,
-                                   log_std_init = actor_log_std_init)
+                                   log_std_init = actor_log_std_init,
+                                   actor_observation_space = actor_observation_space,
+                                   critic_observation_space = critic_observation_space,
+                                   actor_observation_filter = actor_observation_filter,
+                                   critic_observation_filter = critic_observation_filter)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = self._hp.torch_device
         self._critic_updates = 0
         self._alpha_updates = 0
         self._policy_updates = 0
-        if feature_extractor is None:
-            self._feature_extractor = StackVectorsFeatureExtractor(observation_space=observation_space,
+        self._share_actor_critic_feature_extractor = actor_feature_extractor == critic_feature_extractor
+        if self._share_actor_critic_feature_extractor:
+            if critic_feature_extractor is None or actor_feature_extractor is None: # second considition is just for typing
+                self._critic_feature_extractor = StackVectorsFeatureExtractor(observation_space=critic_observation_space,
                                                                    device=self._hp.torch_device)
+                self._actor_feature_extractor = self._critic_feature_extractor
+            else:
+                self._critic_feature_extractor = critic_feature_extractor
+                self._actor_feature_extractor = actor_feature_extractor
         else:
-            self._feature_extractor = feature_extractor
-        self._q_net = QNetwork( observation_size=self._feature_extractor.encoding_size(),
+            if critic_feature_extractor is None:
+                self._critic_feature_extractor = StackVectorsFeatureExtractor(observation_space=critic_observation_space,
+                                                                    device=self._hp.torch_device)
+            else:
+                self._critic_feature_extractor = critic_feature_extractor
+            if actor_feature_extractor is None:
+                self._actor_feature_extractor = StackVectorsFeatureExtractor(observation_space=actor_observation_space,
+                                                                    device=self._hp.torch_device)
+            else:
+                self._actor_feature_extractor = actor_feature_extractor
+        self._q_net = QNetwork( observation_size=self._critic_feature_extractor.encoding_size(),
                                 action_size=self._hp.action_size,
                                 q_network_arch=q_network_arch,
                                 torch_device=self._hp.torch_device,
                                 nets_num=2)
-        self._q_net_target = QNetwork(  observation_size=self._feature_extractor.encoding_size(),
+        self._q_net_target = QNetwork(  observation_size=self._critic_feature_extractor.encoding_size(),
                                         action_size=self._hp.action_size,
                                         q_network_arch=q_network_arch,
                                         torch_device=self._hp.torch_device,
@@ -231,7 +274,7 @@ class SAC(RLAgent):
         self._q_net_target.load_state_dict(self._q_net.state_dict())
         self._q_optimizer = optim.Adam(self._q_net.parameters(), lr=self._hp.q_lr)
         self._actor = Actor(policy_arch=policy_arch,
-                            observation_size=self._feature_extractor.encoding_size(),
+                            observation_size=self._actor_feature_extractor.encoding_size(),
                             action_size = self._hp.action_size,
                             action_min = self._hp.action_min,
                             action_max = self._hp.action_max,
@@ -247,9 +290,14 @@ class SAC(RLAgent):
             self._alpha = th.as_tensor(constant_entropy_temperature).to(device=self._hp.torch_device, non_blocking=self._hp.torch_device.type=="cuda")
 
         if self._hp.feature_extractor_lr > 0:
-            self._feature_extractor_optimizer = optim.Adam(list(self._feature_extractor.parameters()), lr=self._hp.feature_extractor_lr)
+            self._critic_feature_extractor_optimizer = optim.Adam(list(self._critic_feature_extractor.parameters()), lr=self._hp.feature_extractor_lr)
+            if self._share_actor_critic_feature_extractor:
+                self._actor_feature_extractor_optimizer = self._critic_feature_extractor_optimizer
+            else:
+                self._actor_feature_extractor_optimizer = optim.Adam(list(self._actor_feature_extractor.parameters()), lr=self._hp.feature_extractor_lr)
         else:
-            self._feature_extractor_optimizer = None
+            self._critic_feature_extractor_optimizer = None
+            self._actor_feature_extractor_optimizer = None
 
         self._last_q_loss = th.as_tensor(float("nan"), device=self.device)
         self._last_actor_loss = th.as_tensor(float("nan"), device=self.device)
@@ -264,8 +312,20 @@ class SAC(RLAgent):
                         "val_alpha_loss":0.0,
                         "alpha":0.0}
 
-    def get_feature_extractor(self):
-        return self._feature_extractor
+    def get_actor_subobservation(self, observation : dict | th.Tensor):
+        if self._hp.actor_observation_filter is None:
+            return observation
+        else:
+            return {k:observation[k] for k in self._hp.actor_observation_filter}
+
+    def get_critic_subobservation(self, observation : dict | th.Tensor):
+        if self._hp.actor_observation_filter is None:
+            return observation
+        else:
+            return {k:observation[k] for k in self._hp.actor_observation_filter}
+
+    def get_feature_extractors(self):
+        return self._critic_feature_extractor, self._actor_feature_extractor
 
     def save(self, path : str):
         with zipfile.ZipFile(path, mode="w") as archive:
@@ -276,28 +336,44 @@ class SAC(RLAgent):
                 extra["init_args"] = self._init_args
                 extra["hyperparams"] = asdict(self._hp)
                 extra["class_name"] = self.__class__.__name__
-                extra["feature_extractor_class_name"] = self._feature_extractor.__class__.__name__
-                extra["feature_extractor_init_args"] = self._feature_extractor.get_init_args()
+                extra["critic_feature_extractor_class_name"] = self._critic_feature_extractor.__class__.__name__
+                extra["critic_feature_extractor_init_args"] = self._critic_feature_extractor.get_init_args()
+                extra["actor_feature_extractor_class_name"] = self._actor_feature_extractor.__class__.__name__
+                extra["actor_feature_extractor_init_args"] = self._actor_feature_extractor.get_init_args()
                 # print(extra)
                 # for k in extra["init_args"]:
                 #     print("k=",k)
                 #     yaml.dump(extra["init_args"][k],default_flow_style=None)
                 extra_file.write(yaml.dump(extra,default_flow_style=None).encode("utf-8"))
-            self._feature_extractor.save_to_archive(archive)
+            self._critic_feature_extractor.save_to_archive(archive, name="actor_feature_extractor")
+            self._actor_feature_extractor.save_to_archive(archive, name="actor_feature_extractor")
             # th.save( self._feature_extractor.state_dict(), path+".fe_state.pth")
         
+    def _check_feature_extractor(self, current_featur_extractor, loaded_fe_name, loaded_fe_args):
+        if current_featur_extractor.__class__.__name__ != loaded_fe_name:
+            ggLog.warn(f"feature_extractor_class_name of loaded model differs from that of self.\n"
+                       f"loaded = {loaded_fe_name}, self's = {self._critic_feature_extractor.__class__.__name__}")
+            raise RuntimeError("Unmatched init_args")
+        if current_featur_extractor.get_init_args() != loaded_fe_args:
+            import difflib
+            self_init_args_yaml = yaml.dump(current_featur_extractor.get_init_args())
+            load_init_args_yaml = yaml.dump(loaded_fe_args)
+            diff = "".join(difflib.unified_diff(self_init_args_yaml.splitlines(keepends=True),
+                                        load_init_args_yaml.splitlines(keepends=True),
+                                        fromfile="self",
+                                        tofile="loaded",
+                                        lineterm=""))
+            ggLog.warn(f"init args of loaded model differ from those of self.\n"
+                       f"self init_args = \n{self_init_args_yaml}\n"
+                       f"load init_args = \n{load_init_args_yaml}\n"
+                       f"diff init_args = \n{diff}")
+            raise RuntimeError("Unmatched init_args")
 
     def load_(self, path : str):
         # Before loading the state dict we try to check that the models are compatible
-        try:
-            with zipfile.ZipFile(path) as archive:
-                with archive.open("init_args.yaml", "r") as init_args_yamlfile:
-                    extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
-            is_zipfile = True
-        except:
-            with open(path+".extra.yaml", "r") as init_args_yamlfile:
+        with zipfile.ZipFile(path) as archive:
+            with archive.open("init_args.yaml", "r") as init_args_yamlfile:
                 extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
-            is_zipfile = False
         if "class_name" in extra and extra["class_name"] != self.__class__.__name__:
             raise RuntimeError(f"File was not saved by this class")
         if self._init_args != extra["init_args"]:
@@ -311,51 +387,27 @@ class SAC(RLAgent):
             diffs = [l for l in diffs if len(l)>0 and l[0] != ' ']
             ggLog.warn(f"Args comparison with loaded model:\n{''.join(diffs)}")
             # raise RuntimeError("Unmatched init_args")
-        if self._feature_extractor.__class__.__name__ != extra["feature_extractor_class_name"]:
-            ggLog.warn(f"feature_extractor_class_name of loaded model differs from that of self.\n"
-                       f"loaded = {extra['feature_extractor_class_name']}, self's = {self._feature_extractor.__class__.__name__}")
-            raise RuntimeError("Unmatched init_args")
-        if  self._feature_extractor.get_init_args() != extra["feature_extractor_init_args"]:
-            import difflib
-            self_init_args_yaml = yaml.dump(self._feature_extractor.get_init_args())
-            load_init_args_yaml = yaml.dump(extra['feature_extractor_init_args'])
-            diff = "".join(difflib.unified_diff(self_init_args_yaml.splitlines(keepends=True),
-                                        load_init_args_yaml.splitlines(keepends=True),
-                                        fromfile="self",
-                                        tofile="loaded",
-                                        lineterm=""))
-            ggLog.warn(f"init args of loaded model differ from those of self.\n"
-                       f"self init_args = \n{self_init_args_yaml}\n"
-                       f"load init_args = \n{load_init_args_yaml}\n"
-                       f"diff init_args = \n{diff}")
-            raise RuntimeError("Unmatched init_args")
-        if is_zipfile:
-            with zipfile.ZipFile(path) as archive:
-                with archive.open("sac.pth", "r") as sac_file:
-                    self.load_state_dict(th.load(sac_file))
-        else:
-            self.load_state_dict(th.load(path))
+        self._check_feature_extractor(self._critic_feature_extractor,
+                                      extra["critic_feature_extractor_class_name"],
+                                      extra["critic_feature_extractor_init_args"])
+        self._check_feature_extractor(self._actor_feature_extractor,
+                                      extra["actor_feature_extractor_class_name"],
+                                      extra["actor_feature_extractor_init_args"])
+        with zipfile.ZipFile(path) as archive:
+            with archive.open("sac.pth", "r") as sac_file:
+                self.load_state_dict(th.load(sac_file))
 
     @classmethod
     def load(cls, path : str):
-        try:
-            with zipfile.ZipFile(path) as archive:
-                with archive.open("init_args.yaml", "r") as init_args_yamlfile:
-                    extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
-            is_zipfile = True
-        except:
-            with open(path+".extra.yaml", "r") as init_args_yamlfile:
+        with zipfile.ZipFile(path) as archive:
+            with archive.open("init_args.yaml", "r") as init_args_yamlfile:
                 extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
-            is_zipfile = False
         if "class_name" in extra and extra["class_name"] != cls.__name__:
             raise RuntimeError(f"File was not saved by this class")
         sac_init_args = extra["init_args"]
         feature_extractor_class = get_feature_extractor(extra["feature_extractor_class_name"])
-        if is_zipfile:
-            with zipfile.ZipFile(path) as archive:
-                sac_init_args["feature_extractor"] = feature_extractor_class.load(archive)
-        else:
-            sac_init_args["feature_extractor"] = feature_extractor_class.load(path)
+        with zipfile.ZipFile(path) as archive:
+            sac_init_args["feature_extractor"] = feature_extractor_class.load(archive)
         ggLog.info(f"load(): building model with args: \n"+pprint.pformat(sac_init_args))
         model = SAC(**sac_init_args)
         # At this point we should have a model that is initialized exactly like the one that was saved
@@ -370,16 +422,17 @@ class SAC(RLAgent):
 
 
         # check if it is not a batch, if so, unsqueeze
-        d = map2_tensor_tree(observation_batch, self._obs_space_sizes,
-                        lambda obs,obs_space_size: obs.dim() == len(obs_space_size))
-        batched = not all(flatten_tensor_tree(d).values())
-        if not batched:
+        has_right_dims = map2_tensor_tree(observation_batch, self._obs_space_sizes,
+                                            lambda obs,obs_space_size: obs.dim() == len(obs_space_size))
+        is_batched = not all(flatten_tensor_tree(has_right_dims).values())
+        if not is_batched:
             observation_batch = map_tensor_tree(observation_batch, lambda t: t.unsqueeze(0))
-        observation_batch = map_tensor_tree(observation_batch, lambda t: t.to(device = self.device, dtype = th.float32))
 
-        observation_batch = self._feature_extractor.extract_features(observation_batch)
+        observation_batch = self.get_actor_subobservation(observation_batch)
+        observation_batch = map_tensor_tree(observation_batch, lambda t: t.to(device = self.device, dtype = th.float32))
+        observation_batch = self._actor_feature_extractor.extract_features(observation_batch)
         action, log_prob, mean = self._actor.sample_action(observation_batch)
-        if not batched:
+        if not is_batched:
             action = action.squeeze()
             mean = mean.squeeze()
             log_prob = log_prob.squeeze()
@@ -397,17 +450,24 @@ class SAC(RLAgent):
         return
 
     def _compute_critic_loss(self, transitions : TransitionBatch):
-        observations = self._feature_extractor.extract_features(transitions.observations)
-        next_observations = self._feature_extractor.extract_features(transitions.next_observations)        
+        critic_obss = self.get_critic_subobservation(transitions.observations)
+        critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
         with th.no_grad():
+            critic_next_obss = self.get_critic_subobservation(transitions.observations)
+            crit_next_enc_obss = self._critic_feature_extractor.extract_features(critic_next_obss)   
+            if self._share_actor_critic_feature_extractor:     
+                act_next_enc_obss = crit_next_enc_obss
+            else:
+                actor_next_obss = self.get_actor_subobservation(transitions.observations)
+                act_next_enc_obss = self._actor_feature_extractor.extract_features(actor_next_obss)
             # Compute next-values for TD
-            next_state_actions, next_state_log_pi, _ = self._actor.sample_action(next_observations)
-            q_next = self._q_net_target.get_min_qval(next_observations, next_state_actions)
+            next_state_actions, next_state_log_pi, _ = self._actor.sample_action(act_next_enc_obss)
+            q_next = self._q_net_target.get_min_qval(crit_next_enc_obss, next_state_actions)
             soft_q_next = q_next - self._alpha * next_state_log_pi
             td_q_values = transitions.rewards.flatten() + (1 - transitions.terminated.flatten()) * self._hp.gamma * (soft_q_next).view(-1)
 
         # ggLog.info(f"td_q_values.size() = {td_q_values.size()}")
-        q_values = self._q_net(observations, transitions.actions)
+        q_values = self._q_net(critic_enc_obss, transitions.actions)
         # ggLog.info(f"q_values.size() = {q_values.size()}")
         td_q_values = td_q_values.unsqueeze(1).unsqueeze(2)
         td_q_values = td_q_values.expand(-1,2,1)
@@ -425,10 +485,13 @@ class SAC(RLAgent):
 
 
     def _compute_actor_loss(self, transitions : TransitionBatch):
-        observations = self._feature_extractor.extract_features(transitions.observations)
-        act, act_log_prob, _ = self._actor.sample_action(observations)
+        actor_obss = self.get_actor_subobservation(transitions.observations)
+        actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
+        act, act_log_prob, _ = self._actor.sample_action(actor_enc_obss)
         # with th.no_grad():
-        min_q_pi = self._q_net.get_min_qval(observations, act) # cannot reuse those from _update_value_func, the value function has changed
+        critic_obss = self.get_critic_subobservation(transitions.observations)
+        critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
+        min_q_pi = self._q_net.get_min_qval(critic_enc_obss, act) # cannot reuse those from _update_value_func, the value function has changed
         # ggLog.info(f"min_q_pi.size() = {min_q_pi.size()}")
         # ggLog.info(f"act_log_prob.size() = {act_log_prob.size()}")
         return ((self._alpha * act_log_prob) - min_q_pi).mean()
@@ -443,9 +506,10 @@ class SAC(RLAgent):
         self._policy_updates += 1
 
     def _compute_alpha_loss(self, transitions : TransitionBatch):
-        observations = self._feature_extractor.extract_features(transitions.observations)
         with th.no_grad():
-            _, act_log_prob, _ = self._actor.sample_action(observations)
+            actor_obss = self.get_actor_subobservation(transitions.observations)
+            actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
+            _, act_log_prob, _ = self._actor.sample_action(actor_enc_obss)
             self._stats["avg_log_prob"] = act_log_prob.mean()
         return (-self._log_alpha.exp() * (act_log_prob + self._target_entropy)).mean()
     
@@ -474,14 +538,22 @@ class SAC(RLAgent):
             self._target_update(param, target_param, self._hp.target_tau)
 
     def _update_feature_extractor(self):
-        if self._feature_extractor_optimizer is not None:
-            self._feature_extractor_optimizer.step()
+        if self._share_actor_critic_feature_extractor:
+            if self._critic_feature_extractor_optimizer is not None:
+                self._critic_feature_extractor_optimizer.step()
+        else:
+            if self._critic_feature_extractor_optimizer is not None:
+                self._critic_feature_extractor_optimizer.step()
+            if self._actor_feature_extractor_optimizer is not None:
+                self._actor_feature_extractor_optimizer.step()
 
     def _update(self, transitions : TransitionBatch):
         # sync_dbg_mode = th.cuda.get_sync_debug_mode()
         # th.cuda.set_sync_debug_mode("error")
-        if self._feature_extractor_optimizer is not None:
-            self._feature_extractor_optimizer.zero_grad(set_to_none=True) # gradients will be accumulated by both actor and critic
+        if self._critic_feature_extractor_optimizer is not None:
+            self._critic_feature_extractor_optimizer.zero_grad(set_to_none=True)
+        if self._actor_feature_extractor_optimizer is not None:
+            self._actor_feature_extractor_optimizer.zero_grad(set_to_none=True)
         self._update_critic(transitions = transitions)
         did_train_something = False
         if self._critic_updates % self._hp.policy_update_freq == 0:

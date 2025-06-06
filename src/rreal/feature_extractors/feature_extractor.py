@@ -14,11 +14,11 @@ class FeatureExtractor(ABC, th.nn.Module):
     
     @classmethod
     @abstractmethod
-    def load(cls, archive : zipfile.ZipFile):
+    def load(cls, archive : zipfile.ZipFile, name : str = "feature_extractor"):
         raise NotImplementedError()
     
     @abstractmethod
-    def save_to_archive(self, archive : zipfile.ZipFile):
+    def save_to_archive(self, archive : zipfile.ZipFile, name : str = "feature_extractor"):
         raise NotImplementedError()
     
     @abstractmethod
