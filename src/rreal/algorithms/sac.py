@@ -241,7 +241,8 @@ class SAC(RLAgent):
         self._critic_updates = 0
         self._alpha_updates = 0
         self._policy_updates = 0
-        self._share_actor_critic_feature_extractor = actor_feature_extractor == critic_feature_extractor
+        self._share_actor_critic_feature_extractor = (actor_feature_extractor==critic_feature_extractor and
+                                                      actor_observation_filter==critic_observation_filter)
         if self._share_actor_critic_feature_extractor:
             if critic_feature_extractor is None or actor_feature_extractor is None: # second considition is just for typing
                 self._critic_feature_extractor = StackVectorsFeatureExtractor(observation_space=critic_observation_space,
