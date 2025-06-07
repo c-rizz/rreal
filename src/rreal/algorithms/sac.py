@@ -319,10 +319,10 @@ class SAC(RLAgent):
             return {k:observation[k] for k in self._hp.actor_observation_filter}
 
     def get_critic_subobservation(self, observation : dict | th.Tensor):
-        if self._hp.actor_observation_filter is None:
+        if self._hp.critic_observation_filter is None:
             return observation
         else:
-            return {k:observation[k] for k in self._hp.actor_observation_filter}
+            return {k:observation[k] for k in self._hp.critic_observation_filter}
 
     def get_feature_extractors(self):
         return self._critic_feature_extractor, self._actor_feature_extractor
@@ -345,7 +345,7 @@ class SAC(RLAgent):
                 #     print("k=",k)
                 #     yaml.dump(extra["init_args"][k],default_flow_style=None)
                 extra_file.write(yaml.dump(extra,default_flow_style=None).encode("utf-8"))
-            self._critic_feature_extractor.save_to_archive(archive, name="actor_feature_extractor")
+            self._critic_feature_extractor.save_to_archive(archive, name="critic_feature_extractor")
             self._actor_feature_extractor.save_to_archive(archive, name="actor_feature_extractor")
             # th.save( self._feature_extractor.state_dict(), path+".fe_state.pth")
         
@@ -405,9 +405,14 @@ class SAC(RLAgent):
         if "class_name" in extra and extra["class_name"] != cls.__name__:
             raise RuntimeError(f"File was not saved by this class")
         sac_init_args = extra["init_args"]
-        feature_extractor_class = get_feature_extractor(extra["feature_extractor_class_name"])
         with zipfile.ZipFile(path) as archive:
-            sac_init_args["feature_extractor"] = feature_extractor_class.load(archive)
+            critic_feature_extractor_class = get_feature_extractor(extra["critic_feature_extractor_class_name"])
+            sac_init_args["critic_feature_extractor"] = critic_feature_extractor_class.load(archive)
+            if extra["share_feature_extractor"]:
+                sac_init_args["actor_feature_extractor"] = sac_init_args["critic_feature_extractor"]
+            else:
+                actor_feature_extractor_class = get_feature_extractor(extra["actor_feature_extractor_class_name"])
+                sac_init_args["actor_feature_extractor"] = actor_feature_extractor_class.load(archive)
         ggLog.info(f"load(): building model with args: \n"+pprint.pformat(sac_init_args))
         model = SAC(**sac_init_args)
         # At this point we should have a model that is initialized exactly like the one that was saved
@@ -453,12 +458,12 @@ class SAC(RLAgent):
         critic_obss = self.get_critic_subobservation(transitions.observations)
         critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
         with th.no_grad():
-            critic_next_obss = self.get_critic_subobservation(transitions.observations)
+            critic_next_obss = self.get_critic_subobservation(transitions.next_observations)
             crit_next_enc_obss = self._critic_feature_extractor.extract_features(critic_next_obss)   
             if self._share_actor_critic_feature_extractor:     
                 act_next_enc_obss = crit_next_enc_obss
             else:
-                actor_next_obss = self.get_actor_subobservation(transitions.observations)
+                actor_next_obss = self.get_actor_subobservation(transitions.next_observations)
                 act_next_enc_obss = self._actor_feature_extractor.extract_features(actor_next_obss)
             # Compute next-values for TD
             next_state_actions, next_state_log_pi, _ = self._actor.sample_action(act_next_enc_obss)
@@ -489,8 +494,11 @@ class SAC(RLAgent):
         actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
         act, act_log_prob, _ = self._actor.sample_action(actor_enc_obss)
         # with th.no_grad():
-        critic_obss = self.get_critic_subobservation(transitions.observations)
-        critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
+        if self._share_actor_critic_feature_extractor:
+            critic_enc_obss = actor_enc_obss
+        else:
+            critic_obss = self.get_critic_subobservation(transitions.observations)
+            critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
         min_q_pi = self._q_net.get_min_qval(critic_enc_obss, act) # cannot reuse those from _update_value_func, the value function has changed
         # ggLog.info(f"min_q_pi.size() = {min_q_pi.size()}")
         # ggLog.info(f"act_log_prob.size() = {act_log_prob.size()}")
