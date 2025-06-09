@@ -30,7 +30,6 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
         adapter = VecSimJointImpedanceAdapterWrapper(adapter = RosXbotGazeboAdapter(model_name = robot_name,
                                                                                     stepLength_sec = stepLength_sec,
                                                                                     forced_ros_master_uri = None,
-
                                                                                     maxObsDelay = float("+inf"),
                                                                                     blocking_observation = False,
                                                                                     is_floating_base = True,
@@ -62,6 +61,8 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
         from adarl.adapters.MjxJointImpedanceAdapter import MjxJointImpedanceAdapter
         import jax
         sim_dt = 4/1024
+        if env_builder_args["step_length_sec"] % sim_dt != 0:
+            raise RuntimeError(f"step_length_sec {env_builder_args['step_length_sec']} is not a multimple of sim_dt {sim_dt}")
         adapter = MjxJointImpedanceAdapter( vec_size=num_envs,
                                             enable_rendering=env_builder_args.pop("enable_rendering"),
                                             jax_device=jax.devices("gpu")[0],
@@ -80,7 +81,7 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                             add_ground=False,
                                             add_sky=False)
     else:
-        print(f"Requested unknown controller '{mode}'")
+        print(f"Requested unknown adapter '{mode}'")
         exit(0)
     env = CartpoleContinuousVecEnv(adapter=adapter,
                                    maxStepsPerEpisode=max_steps,
@@ -111,7 +112,7 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
 def cartpole_venv_builder(  seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = ""):
     mode = env_builder_args["mode"]
     quiet = env_builder_args["quiet"]
-    stepLength_sec= 50/1024
+    stepLength_sec= env_builder_args["step_length_sec"]
     if False: #mode == "pybullet":
         device = env_builder_args["th_device"]
         def single_env_builder(seed : int, log_folder : str, is_eval : bool, env_builder_args : dict[str, Any]):
@@ -182,7 +183,13 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                         "enable_rendering" : False,
                         "log_info_stats" : True,
                         "quiet" : True,
-                        "video_save_freq" : False}
+                        "video_save_freq" : 0,
+                        "max_steps" : 1000,
+                        "step_length_sec" : 48/1024,
+                        "img_obs" : False,
+                        "task" : "balance",
+                        "sparse_reward" :  False,
+                        "img_obs_resolution" : 64}
     video_eval_env_builder_args = copy.deepcopy(env_builder_args)
     video_eval_env_builder_args["video_save_freq"] = 1
     video_eval_env_builder_args["enable_rendering"] = True
@@ -215,7 +222,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     gamma = 0.99,
                                                     target_tau=0.005,
                                                     buffer_size=1_000_000,
-                                                    total_steps = 10_000_000,
+                                                    total_steps = 1_000_000,
                                                     q_network_arch=[256,256],
                                                     policy_network_arch=[256,256],
                                                     learning_starts=5*max_steps_per_episode,
