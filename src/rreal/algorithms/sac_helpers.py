@@ -276,8 +276,8 @@ class SAC_hyperparams:
     reference_init_args : dict
     target_entropy_factor : float | None
     actor_log_std_init : float
-    actor_observation_filter : list[str]
-    critic_observation_filter : list[str]
+    actor_observation_filter : list[str] | None = None
+    critic_observation_filter : list[str] | None = None
 
 def sac_train(  seed : int,
                 folderName : str,
