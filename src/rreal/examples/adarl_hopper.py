@@ -1,7 +1,7 @@
 #!/usr/bin/env python3  
 
-from rreal.algorithms.sac_helpers import sac_train, SAC_hyperparams, gym_builder
-from adarl.envs.examples.HopperEnv import HopperEnv
+from rreal.algorithms.sac_helpers import sac_train, SAC_hyperparams, env_builder2vec
+from adarl.envs.examples.old.HopperEnv import HopperEnv
 from adarl.envs.GymEnvWrapper import GymEnvWrapper
 from adarl.adapters.PyBulletAdapter import PyBulletAdapter
 from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
@@ -56,6 +56,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
     num_envs = 128
     sac_train(seed, folderName, run_id, args,
                 env_builder=builder,
+                vec_env_builder=env_builder2vec(builder, collector_device=th.device("cuda"), env_action_device=th.device("cuda"), purely_numpy=False),
                 env_builder_args = {"video_save_freq" : 0},
                 hyperparams = SAC_hyperparams(  train_freq_vstep=16,
                                                 grad_steps=32,
@@ -71,7 +72,10 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                 q_network_arch=[256,256],
                                                 policy_network_arch=[256,256],
                                                 learning_starts=num_envs*max_steps_per_episode,
-                                                log_freq_vstep = 1000),
+                                                log_freq_vstep = 1000,
+                                                target_entropy_factor=-0.5,
+                                                actor_log_std_init=-3.0,
+                                                reference_init_args =   {}),
                 collector_device=th.device("cpu"),
                 max_episode_duration=max_steps_per_episode,
                 validation_buffer_size = 100_000,

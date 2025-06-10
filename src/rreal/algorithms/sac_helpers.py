@@ -152,6 +152,7 @@ def env_builder2vec(env_builder : EnvBuilderProtocol,
                                                                                             env_action_device=env_action_device,
                                                                                             purely_numpy = purely_numpy)
 
+
 def build_eval_callbacks(eval_configurations : list[dict],
                          vec_env_builder : VecEnvBuilderProtocol,
                          run_folder : str,
@@ -259,31 +260,50 @@ from dataclasses import dataclass
 @dataclass
 class SAC_hyperparams:
     q_network_arch : list[int]
+    """The architecture of the Q network, a list of hidden layer sizes"""
     policy_network_arch : list[int]
+    """The architecture of the policy network, a list of hidden layer sizes"""
     q_lr : float
+    """The learning rate for the Q network"""
     policy_lr : float
+    """The learning rate for the policy network"""
     device : str | th.device
+    """The torch device where the model will be located"""
     gamma : float
+    """The discount factor for the Q-learning algorithm"""
     target_tau : float
+    """The target update factor for the soft update of the target network"""
     buffer_size : int
+    """The size of the replay buffer"""
     total_steps : int
+    """The total number of steps to train the model for"""
     train_freq_vstep : int
+    """The numer of vectorized experience collection steps (i.e. steps/parallel_envs) between training steps"""
     learning_starts : int
+    """The number of steps to collect before starting training"""
     grad_steps : int
+    """The number of gradient steps to take per training step"""
     batch_size : int
+    """The batch size used for computing gradient updates"""
     parallel_envs : int
+    """The number of parallel environments to use for experience collection"""
     log_freq_vstep : int
+    """The frequency of logging, in number of vectorized steps (i.e. steps/parallel_envs)"""
     reference_init_args : dict
+    """Additional arguments that will be saved together with the model, just for reference on how it was trained"""
     target_entropy_factor : float | None
+    """The factor used to compute the target entropy as target_entropy_factor*action_size, by default it is -1.0"""
     actor_log_std_init : float
+    """The initial value of the log standard deviation of the actor's policy, by default it is -3.0"""
     actor_observation_filter : list[str] | None = None
+    """The list of observation keys to filter in the actor's policy, by default it is None (no filtering, all observation keys are used)"""
     critic_observation_filter : list[str] | None = None
+    """The list of observation keys to filter in the critic's Q network, by default it is None (no filtering, all observation keys are used)"""
 
 def sac_train(  seed : int,
                 folderName : str,
                 run_id : str,
                 args,
-                env_builder : EnvBuilderProtocol | None,
                 vec_env_builder : VecEnvBuilderProtocol | None,
                 env_builder_args : dict,
                 hyperparams : SAC_hyperparams,
@@ -323,14 +343,6 @@ def sac_train(  seed : int,
     print(f"Device = {device}")
     if collector_device is None:
         collector_device = device
-    if vec_env_builder is None and env_builder is not None:
-        vec_env_builder = lambda seed, run_folder, num_envs, env_builder_args, env_name="": build_vec_env(   env_builder=env_builder,
-                                                                                                env_builder_args=env_builder_args,
-                                                                                                log_folder=run_folder,
-                                                                                                seed=seed,
-                                                                                                num_envs=num_envs,
-                                                                                                collector_device=collector_device,
-                                                                                                env_action_device=collector_device)
     if vec_env_builder is None:
         raise RuntimeError(f"You must specify either vec_env_builder or env_builder")
     vec_env_builder = wrap_with_logger(vec_env_builder)
