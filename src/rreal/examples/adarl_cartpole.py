@@ -2,7 +2,7 @@
 
 from rreal.algorithms.sac_helpers import sac_train, SAC_hyperparams, gym_builder, build_vec_env
 import copy
-from adarl.envs.examples.CartpoleVecEnv import CartpoleContinuousVecEnv
+from adarl.envs.examples.CartpoleContinuousVecEnv import CartpoleContinuousVecEnv
 from adarl.envs.vec.EnvRunner import EnvRunner
 from adarl.envs.vec.EnvRunnerRecorderWrapper import EnvRunnerRecorderWrapper
 from adarl.envs.vec.GymVecRunnerWrapper import GymVecRunnerWrapper
@@ -55,8 +55,8 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                                                             global_max_torque_position_control = 100,
                                                                             real_time_factor=None,
                                                                             th_device=th_device),
-                                                            vec_size = num_envs,
-                                                            th_device = th_device)
+                                                        vec_size = num_envs,
+                                                        th_device = th_device)
     elif mode == "mjx":
         from adarl.adapters.MjxJointImpedanceAdapter import MjxJointImpedanceAdapter
         import jax
@@ -77,22 +77,20 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                             record_whole_joint_trajectories = False,
                                             log_freq_joints_trajectories = int(250*(50/1024)/(2/4096)),
                                             log_folder=run_folder,
-                                            opt_preset="fastest",
+                                            opt_preset="fast",
                                             add_ground=False,
                                             add_sky=False)
     else:
         print(f"Requested unknown adapter '{mode}'")
         exit(0)
     env = CartpoleContinuousVecEnv(adapter=adapter,
-                                   maxStepsPerEpisode=max_steps,
+                                   max_episode_steps=max_steps,
                                    render=True,
                                    step_duration_sec=stepLength_sec,
                                    th_device=adapter.output_th_device(),
-                                   img_obs=env_builder_args.pop("img_obs"),
                                    task=env_builder_args.pop("task"),
-                                   sparse_reward=env_builder_args.pop("sparse_reward"),
-                                   img_obs_resolution=env_builder_args.pop("img_obs_resolution"))
-    env = ObsToDict(env=env)
+                                   sparse_reward=env_builder_args.pop("sparse_reward"))
+    # env = ObsToDict(env=env)
     vrunner = EnvRunner(env=env, verbose=False, quiet=quiet, episodeInfoLogFile=run_folder+"/vec_runner.log",
                         render_envs=[0], autoreset=autoreset,
                         log_freq = max_steps)
@@ -113,7 +111,7 @@ def cartpole_venv_builder(  seed : int, run_folder : str, num_envs : int, env_bu
     mode = env_builder_args["mode"]
     quiet = env_builder_args["quiet"]
     stepLength_sec= env_builder_args["step_length_sec"]
-    if False: #mode == "pybullet":
+    if mode == "pybullet": # pybullet does not have a vectorized adapter, so we parallelized multiple envs
         device = env_builder_args["th_device"]
         def single_env_builder(seed : int, log_folder : str, is_eval : bool, env_builder_args : dict[str, Any]):
             vrunner = cartpole_vrun_builder(seed = seed,
@@ -176,95 +174,69 @@ def cartpole_venv_builder(  seed : int, run_folder : str, num_envs : int, env_bu
 
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
     import torch as th
+    # DEfine the arguments for the training environment
     max_steps_per_episode = 1000
-    num_envs = 8
+    num_envs = 32
     env_builder_args = {"mode":args["mode"],
                         "th_device" : th.device("cuda") if args["mode"] == "mjx" else th.device("cpu"),
                         "enable_rendering" : False,
                         "log_info_stats" : True,
                         "quiet" : True,
                         "video_save_freq" : 0,
-                        "max_steps" : 1000,
+                        "max_steps" : max_steps_per_episode,
                         "step_length_sec" : 48/1024,
-                        "img_obs" : False,
                         "task" : "balance",
-                        "sparse_reward" :  False,
-                        "img_obs_resolution" : 64}
+                        "sparse_reward" :  True}
+    
+    # Define the arguments for the evaluation environment(s)
     video_eval_env_builder_args = copy.deepcopy(env_builder_args)
     video_eval_env_builder_args["video_save_freq"] = 1
     video_eval_env_builder_args["enable_rendering"] = True
     eval_conf_video_stoch = {
         "name" : "video_stoch",
-        "deterministic" : False,
-        "eval_freq_ep" : num_envs*10,
-        "eval_eps" : 1,
-        "env_builder_args" : video_eval_env_builder_args,
-        "num_envs" : 1,
-        "init_on_reset_ratio" : 1.0
+        "deterministic" : False, # If using the policy as deterministic or not
+        "eval_freq_ep" : num_envs*10, # How often perform evaluation runs are performed
+        "eval_eps" : 1, # how many episodes to run for each evaluation run
+        "env_builder_args" : video_eval_env_builder_args, # env args for the eval
+        "num_envs" : 1, # numbero of parallel eval envs
     }
-    eval_configs = [
-        eval_conf_video_stoch
-        ]
+    eval_configs = [eval_conf_video_stoch]
+    
+    # Train
     train_device = th.device("cuda",0)
-    collect_device = th.device("cpu")
+    collect_device = env_builder_args["th_device"]
     if args["algorithm"].lower() == "sac":
-        sac_train(seed, folderName, run_id, args,
-                    env_builder=None,
-                    env_builder_args = env_builder_args,
-                    vec_env_builder=cartpole_venv_builder,
-                    hyperparams = SAC_hyperparams(  train_freq_vstep=16,
-                                                    grad_steps=16,
+        sac_train(  seed, # Seed used across this run
+                    folderName, # Folder wher run outpusts are saved
+                    run_id, # Id of the run
+                    args, # Run arguments
+                    vec_env_builder  = cartpole_venv_builder,
+                    env_builder_args = env_builder_args, 
+                    hyperparams = SAC_hyperparams(  train_freq_vstep=16, # do 1 train step every 16 vsteps
+                                                    grad_steps=16, # do 16 grad steps per train step
                                                     parallel_envs = num_envs,
-                                                    batch_size = 512,
+                                                    batch_size = 512, 
                                                     q_lr=1e-3,
                                                     policy_lr=3e-4,
                                                     device = train_device,
                                                     gamma = 0.99,
                                                     target_tau=0.005,
                                                     buffer_size=1_000_000,
-                                                    total_steps = 1_000_000,
-                                                    q_network_arch=[256,256],
-                                                    policy_network_arch=[256,256],
-                                                    learning_starts=5*max_steps_per_episode,
-                                                    log_freq_vstep = 1000,
-                                                    reference_init_args={},
-                                                    target_entropy_factor=None,
-                                                    actor_log_std_init=-3.0),
-                    collector_device=collect_device,
-                    max_episode_duration=max_steps_per_episode,
-                    validation_buffer_size = 0, #100_000,
-                    validation_holdout_ratio = 0, #0.01,
-                    validation_batch_size = 0,
-                    eval_configurations=eval_configs) #256)
-    elif args["algorithm"].lower() == "ppo":
-        from rreal.algorithms.ppo import ppo_train, PPO_hyperparams
-        raise RuntimeError(f"Use ppo2, this one is bugged")
-        ppo_train(seed=seed,
-                  folderName=folderName,
-                  run_id=run_id,
-                  args=args,
-                  env_builder=gym_builder,
-                  vec_env_builder=None,
-                  env_builder_args=env_builder_args,
-                  agent_hyperparams=PPO_hyperparams(minibatch_size=512,
-                                                    th_device=train_device,
-                                                    policy_arch=[64,64],
+                                                    total_steps = num_envs*max_steps_per_episode*100, # Total training steps to do
                                                     q_network_arch=[64,64],
-                                                    total_steps = 1000_000,
-                                                    q_lr=0.0003,
-                                                    policy_lr=0.0003,
-                                                    num_envs=num_envs,
-                                                    num_steps=2048,
-                                                    gamma=0.99,
-                                                    update_epochs=10),
-                  max_episode_duration=max_steps_per_episode,
-                  validation_batch_size=0,
-                  validation_buffer_size=0,
-                  validation_holdout_ratio=0,
-                  checkpoint_freq=-1,
-                  collector_device=collect_device,
-                  eval_configurations=eval_configs)
-    elif args["algorithm"].lower() == "ppo2":
+                                                    policy_network_arch=[64,64],
+                                                    learning_starts=num_envs*max_steps_per_episode*50, # The training of the agent starts after these steps are collected
+                                                    log_freq_vstep = 1000, # Print logs at this frequency
+                                                    reference_init_args={"env_builder_args": env_builder_args}, # Save also these arguments when the policy gets saved
+                                                    target_entropy_factor=-0.5,
+                                                    actor_log_std_init=-1.0),
+                    collector_device=collect_device, # Device used byt the experience collector, if possible keep this on cuda
+                    max_episode_duration=max_steps_per_episode,
+                    validation_buffer_size = 0, #100_000, # Used for computing validation losses
+                    validation_holdout_ratio = 0, #0.01, # Put this amount of experience in the validation buffer instead of training 
+                    validation_batch_size = 0, # Batch size for the validation losses
+                    eval_configurations=eval_configs) # Evaluation environments config
+    elif args["algorithm"].lower() == "ppo":
         from rreal.algorithms.ppo2 import ppo_train, PPO_hyperparams
         ppo_train(  seed=seed,
                 folderName=folderName,
@@ -283,14 +255,14 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     num_steps=2048,
                                                     gamma=0.99,
                                                     log_freq_vstep=1000,
-                                                    critic_network_arch=(128,128),
-                                                    actor_network_arch=(128,128)),
+                                                    critic_network_arch=(64,64),
+                                                    actor_network_arch=(64,64)),
                 max_episode_duration=1000,
                 validation_batch_size=0,
                 validation_buffer_size=0,
                 validation_holdout_ratio=0,
                 checkpoint_freq=-1,
-                collector_device=th.device("cpu"),
+                collector_device=collect_device,
                 eval_configurations=eval_configs)
 
 
@@ -311,14 +283,15 @@ if __name__ == "__main__":
     ap.set_defaults(feature=True)
     args = vars(ap.parse_args())
 
-    
-    launchRun(  seedsNum=args["seedsNum"],
-                seedsOffset=args["seedsOffset"],
+    # The following launches the run function creating appropriate folders, determining the urn_id, performing some initial setup
+    launchRun(  seedsNum=args["seedsNum"], # How many seeds to run
+                seedsOffset=args["seedsOffset"], # What seed to start from
                 runFunction=runFunction,
-                maxProcs=1,
-                launchFilePath=__file__,
-                resumeFolder = None,
-                args = args,
+                maxProcs=1, # How many parallel runs to do
+                launchFilePath=__file__, # Path to this file, used to save it for reference
+                resumeFolder = None, # Used to resume a run from the folder generated by a previous run
+                args = args, # Args received by the runFunction
                 debug_level = -10,
-                start_adarl=False,
-                pkgs_to_save=["adarl","rreal"])
+                start_adarl=False, # Used to automatically run the adarl setup, instead of doing it maually in the runFunction
+                pkgs_to_save=["adarl","rreal"] # Will save these packages for future reference
+                )
