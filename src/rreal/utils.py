@@ -6,7 +6,7 @@ from torch.nn.utils.parametrizations import weight_norm
 from adarl.utils.tensor_trees import TensorTree
 import gymnasium as gym
 
-def scale_layer_weights(m : th.nn.Module, multiplier, bias_offset = 0.0):
+def scale_layer_weights(m : th.nn.Module, multiplier, bias_offset : th.Tensor | float = 0.0):
     if isinstance(m, th.nn.Linear):
         m.weight *= multiplier
         m.bias *= multiplier

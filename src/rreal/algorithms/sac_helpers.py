@@ -33,6 +33,7 @@ from adarl.envs.vector_env_checker import VectorEnvChecker
 from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
 from adarl.envs.vec.EnvRunnerInterface import EnvRunnerInterface
 from adarl.envs.vec.GymVecRunnerWrapper import GymVecRunnerWrapper
+import adarl.utils.spaces as spaces
 
 class EnvBuilderProtocol(typing.Protocol):
     def __call__(self, seed : int, log_folder : str, is_eval : bool, env_builder_args : dict) -> tuple[gym.Env,float]:
@@ -206,7 +207,8 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams : SAC_hy
                 target_entropy_factor=hyperparams.target_entropy_factor,
                 actor_log_std_init = hyperparams.actor_log_std_init,
                 actor_observation_filter=hyperparams.actor_observation_filter,
-                critic_observation_filter=hyperparams.critic_observation_filter)
+                critic_observation_filter=hyperparams.critic_observation_filter,
+                action_init=act_space.zero_action if isinstance(act_space,spaces.ThBox) else 0.0)
     agent = th.compile(agent, mode="max-autotune", fullgraph=True)
     return agent
 

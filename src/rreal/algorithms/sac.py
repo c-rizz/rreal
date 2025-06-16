@@ -79,34 +79,36 @@ class Actor(nn.Module):
                         log_std_min = -5,
                         log_std_init = -3.0,
                         init_noise = 0.001,
-                        torch_device : Union[str,th.device] = "cuda"):
+                        torch_device : Union[str,th.device] = "cuda",
+                        action_mean_init = 0.0):
         super().__init__()
         self._log_std_max = log_std_max
         self._log_std_min = log_std_min
         self.device = torch_device
         self._obs_size = observation_size
+        # save action scaling factors as non-trained parameters
+        if isinstance(action_max, int): action_max = float(action_max)
+        if isinstance(action_min, int): action_min = float(action_min)
+        if isinstance(action_max,float): action_max = th.as_tensor([action_max]*action_size, dtype=th.float32)
+        if isinstance(action_min,float): action_min = th.as_tensor([action_min]*action_size, dtype=th.float32)
+        self.action_bias : th.Tensor
+        self.action_scale : th.Tensor
+        self.register_buffer("action_scale", th.as_tensor((action_max - action_min) / 2.0, dtype=th.float32, device=torch_device))
+        self.register_buffer("action_bias",  th.as_tensor((action_max + action_min) / 2.0, dtype=th.float32, device=torch_device))
         if len(policy_arch)<1:
             raise RuntimeError(f"Invalid policy arch {policy_arch}, must have at least 1 layer")
         else:
             self.act_fc = build_mlp_net(arch=policy_arch[:-1],input_size=observation_size, output_size=policy_arch[-1],
                                     last_activation_class=th.nn.LeakyReLU).to(device=torch_device)
+        mean_init = th.atanh((action_mean_init-self.action_bias)/self.action_scale).to("cpu")
         self.act_fc_mean = build_mlp_net(arch=[],
                                          input_size=policy_arch[-1],
                                          output_size=action_size,
-                                         last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=0.0)).to(device=torch_device)
+                                         last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=mean_init)).to(device=torch_device)
         self.act_fc_logstd = build_mlp_net(arch=[],
                                          input_size=policy_arch[-1],
                                          output_size=action_size,
                                          last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=log_std_init)).to(device=torch_device)        
-        if isinstance(action_max, int): action_max = float(action_max)
-        if isinstance(action_min, int): action_min = float(action_min)
-        if isinstance(action_max,float): action_max = th.as_tensor([action_max]*action_size, dtype=th.float32)
-        if isinstance(action_min,float): action_min = th.as_tensor([action_min]*action_size, dtype=th.float32)
-        # save action scaling factors as non-trained parameters
-        self.action_bias : th.Tensor
-        self.action_scale : th.Tensor
-        self.register_buffer("action_scale", th.as_tensor((action_max - action_min) / 2.0, dtype=th.float32, device=torch_device))
-        self.register_buffer("action_bias",  th.as_tensor((action_max + action_min) / 2.0, dtype=th.float32, device=torch_device))
 
     def forward(self, observation_batch):
         hidden_batch = self.act_fc(observation_batch)
@@ -142,6 +144,7 @@ class SAC(RLAgent):
         gamma : float
         auto_entropy_temperature : bool
         constant_entropy_temperature : float | None
+        action_init : float | th.Tensor
         action_size : int
         action_min : th.Tensor
         action_max : th.Tensor
@@ -187,7 +190,8 @@ class SAC(RLAgent):
                  max_grad_norm : float = 0.5,
                  actor_log_std_init = -3.0,
                  actor_observation_filter : list[str] | None = None,
-                 critic_observation_filter : list[str] | None = None):
+                 critic_observation_filter : list[str] | None = None,
+                 action_init : th.Tensor | float = 0.0):
         super().__init__()
         _, _, _, values = inspect.getargvalues(inspect.currentframe()) #type: ignore
         self._init_args = values
@@ -217,6 +221,7 @@ class SAC(RLAgent):
                                    gamma=gamma,
                                    auto_entropy_temperature=auto_entropy_temperature,
                                    constant_entropy_temperature=constant_entropy_temperature,
+                                   action_init=action_init,
                                    action_size=action_size,
                                    action_min = th.as_tensor(action_min),
                                    action_max = th.as_tensor(action_max),
@@ -280,7 +285,8 @@ class SAC(RLAgent):
                             action_min = self._hp.action_min,
                             action_max = self._hp.action_max,
                             torch_device=self._hp.torch_device,
-                            log_std_init=self._hp.log_std_init)
+                            log_std_init=self._hp.log_std_init,
+                            action_mean_init=self._hp.action_init)
         self._actor_optimizer = optim.Adam(list(self._actor.parameters()), lr=self._hp.policy_lr)
         if self._hp.auto_entropy_temperature:
             self._target_entropy = self._hp.target_entropy
@@ -317,13 +323,15 @@ class SAC(RLAgent):
         if self._hp.actor_observation_filter is None:
             return observation
         else:
-            return {k:observation[k] for k in self._hp.actor_observation_filter}
+            r = {k:observation.get(k,None) for k in self._hp.actor_observation_filter}
+            return {k:v for k,v in r.items() if v is not None}
 
     def get_critic_subobservation(self, observation : dict | th.Tensor):
         if self._hp.critic_observation_filter is None:
             return observation
         else:
-            return {k:observation[k] for k in self._hp.critic_observation_filter}
+            r = {k:observation.get(k,None) for k in self._hp.critic_observation_filter}
+            return {k:v for k,v in r.items() if v is not None}
 
     def get_feature_extractors(self):
         return self._critic_feature_extractor, self._actor_feature_extractor
