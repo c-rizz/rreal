@@ -1,5 +1,5 @@
 #!/usr/bin/env python3  
-
+from __future__ import annotations
 from rreal.algorithms.sac_helpers import sac_train, SAC_hyperparams, gym_builder, build_vec_env
 import copy
 from adarl.envs.examples.CartpoleContinuousVecEnv import CartpoleContinuousVecEnv
@@ -90,7 +90,7 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                    th_device=adapter.output_th_device(),
                                    task=env_builder_args.pop("task"),
                                    sparse_reward=env_builder_args.pop("sparse_reward"))
-    # env = ObsToDict(env=env)
+    env = ObsToDict(env=env)
     vrunner = EnvRunner(env=env, verbose=False, quiet=quiet, episodeInfoLogFile=run_folder+"/vec_runner.log",
                         render_envs=[0], autoreset=autoreset,
                         log_freq = max_steps)
