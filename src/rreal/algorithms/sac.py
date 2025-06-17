@@ -340,7 +340,7 @@ class SAC(RLAgent):
         with zipfile.ZipFile(path, mode="w") as archive:
             with archive.open("sac.pth", "w") as sac_file:
                 th.save(self.state_dict(), sac_file)
-            with archive.open("init_args.yaml", "w") as extra_file:
+            with archive.open("extra.yaml", "w") as extra_file:
                 extra = {}
                 extra["init_args"] = self._init_args
                 extra["hyperparams"] = asdict(self._hp)
@@ -349,6 +349,7 @@ class SAC(RLAgent):
                 extra["critic_feature_extractor_init_args"] = self._critic_feature_extractor.get_init_args()
                 extra["actor_feature_extractor_class_name"] = self._actor_feature_extractor.__class__.__name__
                 extra["actor_feature_extractor_init_args"] = self._actor_feature_extractor.get_init_args()
+                extra["share_feature_extractor"] = self._share_actor_critic_feature_extractor
                 # print(extra)
                 # for k in extra["init_args"]:
                 #     print("k=",k)
@@ -381,7 +382,7 @@ class SAC(RLAgent):
     def load_(self, path : str):
         # Before loading the state dict we try to check that the models are compatible
         with zipfile.ZipFile(path) as archive:
-            with archive.open("init_args.yaml", "r") as init_args_yamlfile:
+            with archive.open("extra.yaml", "r") as init_args_yamlfile:
                 extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
         if "class_name" in extra and extra["class_name"] != self.__class__.__name__:
             raise RuntimeError(f"File was not saved by this class")
@@ -409,19 +410,19 @@ class SAC(RLAgent):
     @classmethod
     def load(cls, path : str):
         with zipfile.ZipFile(path) as archive:
-            with archive.open("init_args.yaml", "r") as init_args_yamlfile:
+            with archive.open("extra.yaml", "r") as init_args_yamlfile:
                 extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
         if "class_name" in extra and extra["class_name"] != cls.__name__:
             raise RuntimeError(f"File was not saved by this class")
         sac_init_args = extra["init_args"]
         with zipfile.ZipFile(path) as archive:
             critic_feature_extractor_class = get_feature_extractor(extra["critic_feature_extractor_class_name"])
-            sac_init_args["critic_feature_extractor"] = critic_feature_extractor_class.load(archive)
+            sac_init_args["critic_feature_extractor"] = critic_feature_extractor_class.load(archive, name="critic_feature_extractor")
             if extra["share_feature_extractor"]:
                 sac_init_args["actor_feature_extractor"] = sac_init_args["critic_feature_extractor"]
             else:
                 actor_feature_extractor_class = get_feature_extractor(extra["actor_feature_extractor_class_name"])
-                sac_init_args["actor_feature_extractor"] = actor_feature_extractor_class.load(archive)
+                sac_init_args["actor_feature_extractor"] = actor_feature_extractor_class.load(archive, name="actor_feature_extractor")
         ggLog.info(f"load(): building model with args: \n"+pprint.pformat(sac_init_args))
         model = SAC(**sac_init_args)
         # At this point we should have a model that is initialized exactly like the one that was saved
