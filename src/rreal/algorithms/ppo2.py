@@ -232,7 +232,8 @@ class PPO(RLAgent):
         # ggLog.info(f"actor_mean:\n{self.actor_mean}")
         self.actor_logstd = nn.Parameter(th.zeros(1, self._hp.action_len, device=self._hp.th_device))
         self._optimizer = optim.Adam(self.parameters(), lr=self._hp.policy_lr, eps=1e-5)
-        self._grad_step_count = th.as_tensor(0, device=self._hp.th_device)
+        self._grad_step_count = 0
+        self._grad_step_count_th = th.as_tensor(0, device=self._hp.th_device)
         if self._hp.num_envs*self._hp.num_steps % self._hp.minibatch_size != 0:
             raise RuntimeError(f"num_envs*num_steps must be a multiple of minibatch_size, but num_envs={self._hp.num_envs}, num_steps={self._hp.num_steps} and minibatch_size={self._hp.minibatch_size}")
         self.__batch_size : Final[int] = int(self._hp.num_envs*self._hp.num_steps)
@@ -368,13 +369,13 @@ class PPO(RLAgent):
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.parameters(), self._hp.max_grad_norm)
                 self._optimizer.step()
-                self._grad_step_count += 1
-        
+                self._grad_step_count_th += 1
+                self._grad_step_count += 1        
             # if self._hp.target_kl is not None and approx_kl > self._hp.target_kl:
             #     break
 
 
-        self.__stats.update({"tot_grad_steps_count":self._grad_step_count,
+        self.__stats.update({"tot_grad_steps_count":self._grad_step_count_th,
                             "q_loss":value_loss,
                             "actor_loss":policy_loss,
                             "entropy_loss":entropy_loss,
@@ -562,13 +563,13 @@ def train_on_policy(collector : Collector,
         # print(explanation)
         # input("press ENTER")
         model.train_model(buffer)
-        adarl.utils.session.default_session.run_info["train_iterations"].value = model._grad_step_count.item()
+        adarl.utils.session.default_session.run_info["train_iterations"].value = model._grad_step_count
         t_f = time.monotonic()
         t_train_sl += t_f-t_post_cb
         t_tot_sl += t_f - t0
 
         wlogs = {"ppo/"+k:v for k,v in model.get_stats().items()}
-        wandb_log(wlogs,throttle_period=1)
+        wandb_log(wlogs,throttle_period=1, silent_throttling=True)
         if global_step - last_log_steps > log_freq_vstep*collector.num_envs():
             ggLog.info(f"ONTRAIN: expstps:{global_step}"
                         f" trainstps={model._grad_step_count}"
@@ -586,7 +587,7 @@ def train_on_policy(collector : Collector,
             # th.cuda.memory._dump_snapshot(f"jax_memory_{t}.pickle")
             free, total = th.cuda.mem_get_info(th.device('cuda:0'))
             mem_used_MB = (total - free) / 1024 ** 2
-            ggLog.info(f"{t}: cuda mem usage = {mem_used_MB}")
+            # ggLog.info(f"{t}: cuda mem usage = {mem_used_MB}")
         adarl.utils.sigint_handler.haltOnSigintReceived()
     callback.on_training_end()
 
