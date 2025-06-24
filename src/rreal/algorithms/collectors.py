@@ -27,7 +27,7 @@ import torch.multiprocessing as mp
 class ExperienceCollector(ABC):
     def __init__(self, vec_env : gym.vector.VectorEnv,
                         buffer : Optional[BasicStorage] = None,
-                        log_freq = 50):
+                        log_freq = 0):
         self._vec_env = vec_env
         self._current_obs : dict[str, th.Tensor] = None # type: ignore
         self._collector_model : th.nn.Module
@@ -127,7 +127,7 @@ class ExperienceCollector(ABC):
         self._stats["ttot_wtime_ratio"] = t_tot/(tf-self._last_collection_end_wtime)
         self._last_collection_end_wtime = tf
         self._last_collection_wallduration = t_tot
-        if self._collect_count % self._log_freq == 0:
+        if self._log_freq >0 and self._collect_count % self._log_freq == 0:
             ggLog.info(f"collected: "+', '.join([f"{k}:{v:.6g}" for k,v in self._stats.items()]))
 
     def collection_duration(self):
