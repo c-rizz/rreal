@@ -386,16 +386,25 @@ class SAC(RLAgent):
                 extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
         if "class_name" in extra and extra["class_name"] != self.__class__.__name__:
             raise RuntimeError(f"File was not saved by this class")
-        if self._init_args != extra["init_args"]:
+        flat_self = flatten_tensor_tree(self._init_args)
+        flat_load = flatten_tensor_tree(extra["init_args"])
+        equal_fields = map2_tensor_tree(flat_self, flat_load, lambda a,b: th.all(a==b) if isinstance(a,th.Tensor) else a==b)
+        if not all(equal_fields):
             ggLog.warn("init args of loaded model differ from those of self.")
             load_yaml_args = yaml.dump(extra['init_args'])
             original_yaml_args = yaml.dump(self._init_args)
             ggLog.warn(f"self._init_args = \n{original_yaml_args}")
             ggLog.warn(f"load init_args  = \n{load_yaml_args}")
-            diffs = ndiff(   original_yaml_args.splitlines(keepends=True),
-                            load_yaml_args.splitlines(keepends=True))
-            diffs = [l for l in diffs if len(l)>0 and l[0] != ' ']
-            ggLog.warn(f"Args comparison with loaded model:\n{''.join(diffs)}")
+            differing_fields = [k for k,v in equal_fields.items() if v==False]
+            ggLog.warn(f"Differing fields:")
+            for k in differing_fields:
+                ggLog.warn(f"k:\n"
+                           f"    self={flat_self[k]}\n"
+                           f"    load={flat_load[k]}")
+            # diffs = ndiff(   original_yaml_args.splitlines(keepends=True),
+            #                 load_yaml_args.splitlines(keepends=True))
+            # diffs = [l for l in diffs if len(l)>0 and l[0] != ' ']
+            # ggLog.warn(f"Args comparison with loaded model:\n{''.join(diffs)}")
             # raise RuntimeError("Unmatched init_args")
         self._check_feature_extractor(self._critic_feature_extractor,
                                       extra["critic_feature_extractor_class_name"],
