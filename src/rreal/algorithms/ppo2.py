@@ -214,22 +214,6 @@ class PPO(RLAgent):
                                     layer_init_func=lambda m: ortho_layer_init_(m,1),
                                     last_layer_init_func=lambda m: ortho_layer_init_(m,0.01)).to(device=self._hp.th_device)
         
-        # self.critic = nn.Sequential(
-        #     layer_init(nn.Linear(self._feature_extractor.encoding_size(), 64)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(64, 64)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(64, 1), std=1.0),
-        # ).to(self._hp.th_device)
-        # self.actor_mean = nn.Sequential(
-        #     layer_init(nn.Linear(self._feature_extractor.encoding_size(), 64)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(64, 64)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(64, self._hp.action_len), std=0.01),
-        # ).to(self._hp.th_device)
-        # ggLog.info(f"critic:\n{self.critic}")
-        # ggLog.info(f"actor_mean:\n{self.actor_mean}")
         self.actor_logstd = nn.Parameter(th.zeros(1, self._hp.action_len, device=self._hp.th_device))
         self._optimizer = optim.Adam(self.parameters(), lr=self._hp.policy_lr, eps=1e-5)
         self._grad_step_count = 0
@@ -239,7 +223,7 @@ class PPO(RLAgent):
         self.__batch_size : Final[int] = int(self._hp.num_envs*self._hp.num_steps)
         self.__minibatch_num : Final[int] = int(self.__batch_size/self._hp.minibatch_size)
 
-        self.__stats = { "tot_grad_steps_count":th.as_tensor(0, device=self._hp.th_device),
+        self.__stats = {"tot_grad_steps_count":th.as_tensor(0, device=self._hp.th_device),
                         "q_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
                         "actor_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
                         "entropy_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
@@ -571,6 +555,7 @@ def train_on_policy(collector : Collector,
         wlogs = {"ppo/"+k:v for k,v in model.get_stats().items()}
         wandb_log(wlogs,throttle_period=1, silent_throttling=True)
         if global_step - last_log_steps > log_freq_vstep*collector.num_envs():
+            last_log_steps = global_step
             ggLog.info(f"ONTRAIN: expstps:{global_step}"
                         f" trainstps={model._grad_step_count}"
                         #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"
@@ -582,11 +567,11 @@ def train_on_policy(collector : Collector,
             t_tot_sl = 0
             steps_sl = 0
             t_tot_sl = 0
-            t = f"{time.time():.3f}"
+            # t = f"{time.time():.3f}"
             # jax.profiler.save_device_memory_profile(f"jax_memory_{t}.prof")
             # th.cuda.memory._dump_snapshot(f"jax_memory_{t}.pickle")
-            free, total = th.cuda.mem_get_info(th.device('cuda:0'))
-            mem_used_MB = (total - free) / 1024 ** 2
+            # free, total = th.cuda.mem_get_info(th.device('cuda:0'))
+            # mem_used_MB = (total - free) / 1024 ** 2
             # ggLog.info(f"{t}: cuda mem usage = {mem_used_MB}")
         adarl.utils.sigint_handler.haltOnSigintReceived()
     callback.on_training_end()
@@ -769,8 +754,8 @@ def example():
                 env_builder_args=env_builder_args,
                 agent_hyperparams=PPO_hyperparams(  minibatch_size=512,
                                                     th_device=th.device("cuda"),
-                                                    policy_arch=None,
-                                                    q_network_arch=None,
+                                                    actor_network_arch=(64,64),
+                                                    critic_network_arch=(64,64),
                                                     q_lr=None,
                                                     policy_lr=3e-4,
                                                     update_epochs=10,

@@ -651,12 +651,7 @@ def train_off_policy(collector : ExperienceCollector,
 
     collector.reset()
     global_step = 0
-    t_coll_sl = 0
-    t_train_sl = 0
-    t_val_sl = 0
-    t_buff_sl = 0
-    t_tot_sl = 0
-    t_add_sl = 0
+    t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl, t_buff_sl, t_add_sl, t_start_sl, t_end_callbacks_sl,t_wait_collect_sl = 0,0,0,0,0,0,0,0,0,0
     
     if callbacks is None:
         callbacks = []
@@ -711,6 +706,7 @@ def train_off_policy(collector : ExperienceCollector,
         
         # ------------------   Store collected experience  ------------------
         tmp_buff = collector.wait_collection(timeout = 300.0)
+        t_after_wait = time.monotonic()
         new_episodes = tmp_buff.added_completed_episodes() - ep_counter
         ep_counter = tmp_buff.added_completed_episodes()
         step_counter = tmp_buff.added_frames()
@@ -721,7 +717,7 @@ def train_off_policy(collector : ExperienceCollector,
         callbacks.on_collection_end(collected_steps=vsteps_to_collect*num_envs,
                                    collected_episodes=new_episodes,
                                    collected_data=tmp_buff)
-        t_before_buff = time.monotonic()
+        t_after_endcallback = time.monotonic()
         t_add = 0
         for (obs, next_obs, action, reward, terminated, truncated) in tmp_buff.replay():
             tpa = time.monotonic()
@@ -736,11 +732,14 @@ def train_off_policy(collector : ExperienceCollector,
         global_step += steps_to_collect
         steps_sl += steps_to_collect
         tf = time.monotonic()
-        t_train_sl += t_after_train - t_before_train
-        t_val_sl += t_after_val - t_after_train
-        t_buff_sl += t_after_buff - t_before_buff
-        t_add_sl += t_add
-        t_tot_sl += tf-t0
+        t_start_sl              += t_before_train       - t0
+        t_train_sl              += t_after_train        - t_before_train
+        t_val_sl                += t_after_val          - t_after_train
+        t_wait_collect_sl       += t_after_wait         - t_after_val
+        t_end_callbacks_sl      += t_after_endcallback  - t_after_wait
+        t_buff_sl               += t_after_buff         - t_after_endcallback
+        t_add_sl                += t_add
+        t_tot_sl                += tf-t0
         t = time.monotonic()
         # ggLog.info(f"global_steps = {global_step}")
         if global_step - last_log_steps > log_freq_vstep*num_envs:
@@ -751,12 +750,20 @@ def train_off_policy(collector : ExperienceCollector,
             ggLog.info(f"OFFTRAIN: expstps:{global_step}"
                        f" trainstps={model._tot_grad_steps_count}"
                     #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"
-                       f" coll={t_coll_sl:.2f}s train={t_train_sl:.2f}s val={t_val_sl:.2f}s buff={t_buff_sl:.2f}s add={t_add_sl:.2f}s tot={t_tot_sl:.2f}"
+                       f" tcoll={t_coll_sl:.2f}"
+                       f" train={t_train_sl:.2f}"
+                       f" tstrt={t_start_sl:.2f}"
+                       f" tval={t_val_sl:.2f}"
+                       f" twait={t_wait_collect_sl:.2f}"
+                       f" tce={t_end_callbacks_sl:.2f}"
+                       f" tbuff={t_buff_sl:.2f}"
+                       f" tadd={t_add_sl:.2f}"
+                       f" tot={t_tot_sl:.2f}"
                        f" fps={steps_sl/t_tot_sl:.2f} collfps={steps_sl/t_coll_sl:.2f}"
                        f" alltime_fps={global_step/(t-start_time):.2f} alltime_ips={model._tot_grad_steps_count/(t-start_time):.2f}")
             dictlist = [f"{k}:{v:.6g}" for k,v in collector.get_stats().items()]
             ggLog.info(f"Collection: {', '.join(dictlist)}")
-            t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl, t_buff_sl, t_add_sl = 0,0,0,0,0,0,0
+            t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl, t_buff_sl, t_add_sl, t_start_sl, t_end_callbacks_sl, t_wait_collect_sl = 0,0,0,0,0,0,0,0,0,0
             free, total = th.cuda.mem_get_info(th.device('cuda:0'))
             mem_used_MB = (total - free) / 1024 ** 2
             # ggLog.info(f"{t}: cuda mem usage = {mem_used_MB}")
