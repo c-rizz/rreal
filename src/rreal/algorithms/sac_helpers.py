@@ -208,7 +208,8 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams : SAC_hy
                 actor_log_std_init = hyperparams.actor_log_std_init,
                 actor_observation_filter=hyperparams.actor_observation_filter,
                 critic_observation_filter=hyperparams.critic_observation_filter,
-                action_init=act_space.zero_action if isinstance(act_space,spaces.ThBox) else 0.0)
+                action_init=act_space.zero_action if isinstance(act_space,spaces.ThBox) else 0.0,
+                target_entropy_factor_annealing=hyperparams.target_entropy_factor_annealing)
     agent = th.compile(agent, mode="max-autotune", fullgraph=True)
     return agent
 
@@ -301,6 +302,9 @@ class SAC_hyperparams:
     """The list of observation keys to filter in the actor's policy, by default it is None (no filtering, all observation keys are used)"""
     critic_observation_filter : list[str] | None = None
     """The list of observation keys to filter in the critic's Q network, by default it is None (no filtering, all observation keys are used)"""
+    target_entropy_factor_annealing : tuple[str, list[th.Tensor | float]] | None = None
+    """The target entropy factor annealing function, by default it is None (no annealing), see predefined annealings in sac.py"""
+
 
 def sac_train(  seed : int,
                 folderName : str,

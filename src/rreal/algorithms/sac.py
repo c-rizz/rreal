@@ -33,6 +33,38 @@ from typing_extensions import override
 from adarl.utils.async_cuda2cpu_queue import log_async
 import pprint
 import adarl.utils.spaces as spaces
+from typing import Protocol
+
+class AnnealingFunction(Protocol):
+        def __call__(self,  global_step : int, iterations : int) -> float:
+            ...
+def get_constant_annealing(value : float) -> AnnealingFunction:
+    """
+    Returns a function that always returns the same value.
+    This is used for the target entropy in SAC.
+    """
+    def constant_annealing(global_step : int, iterations : int) -> float:
+        return value
+    return constant_annealing
+
+def get_ramp_annealing(ramp_start_step : int, ramp_end_step : int, start_value : float, end_value : float) -> AnnealingFunction:
+    """
+    Returns a function that ramps from start_value to end_value between ramp_start_step and ramp_end_step.
+    """
+    def ramp_annealing(global_step : int, iterations : int) -> float:
+        if global_step < ramp_start_step:
+            return start_value
+        elif global_step > ramp_end_step:
+            return end_value
+        else:
+            progress = (global_step - ramp_start_step) / (ramp_end_step - ramp_start_step)
+            return start_value + progress * (end_value - start_value)
+    return ramp_annealing
+
+annealings = {
+    "constant": get_constant_annealing,
+    "ramp": get_ramp_annealing
+}
 
 class QNetwork(nn.Module):
     def __init__(self,
@@ -99,15 +131,18 @@ class Actor(nn.Module):
             raise RuntimeError(f"Invalid policy arch {policy_arch}, must have at least 1 layer")
         else:
             self.act_fc = build_mlp_net(arch=policy_arch[:-1],input_size=observation_size, output_size=policy_arch[-1],
-                                    last_activation_class=th.nn.LeakyReLU).to(device=torch_device)
+                                    last_activation_class=th.nn.LeakyReLU,
+                                    use_weightnorm=True).to(device=torch_device)
         mean_init = th.atanh((action_mean_init-self.action_bias)/self.action_scale).to("cpu")
         self.act_fc_mean = build_mlp_net(arch=[],
                                          input_size=policy_arch[-1],
                                          output_size=action_size,
+                                         use_weightnorm=True,
                                          last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=mean_init)).to(device=torch_device)
         self.act_fc_logstd = build_mlp_net(arch=[],
                                          input_size=policy_arch[-1],
                                          output_size=action_size,
+                                         use_weightnorm=True,
                                          last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=log_std_init)).to(device=torch_device)        
 
     def forward(self, observation_batch):
@@ -123,17 +158,17 @@ class Actor(nn.Module):
         std = log_std.exp()
         normal = th.distributions.Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
-        y_t = th.tanh(x_t) # squash the action in [-1,1]
         log_prob = normal.log_prob(x_t) # get the probability of the actions that we sampled
+        y_t = th.tanh(x_t) # squash the action in [-1,1]
 
         # scale mean and action to the proper bounds
         mean = th.tanh(mean) * self.action_scale + self.action_bias
         action = y_t * self.action_scale + self.action_bias
 
-        log_prob = log_prob - th.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6) # correct the probability for the squashing
+        log_prob = log_prob - th.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6) # correct the probability for the squashing and scaling
         log_prob = log_prob.sum(1, keepdim=True) # get probability per each multidimensional action, not for each action component
 
-        return action, log_prob, mean
+        return action, log_prob, mean, log_std
 
 
 class SAC(RLAgent):
@@ -154,7 +189,7 @@ class SAC(RLAgent):
         q_network_arch : List[int]
         policy_arch : List[int]
         torch_device : th.device
-        target_entropy : float | None
+        target_entropy_factor : float
         observation_space : gym.spaces.Space
         actor_observation_space : gym.spaces.Space
         critic_observation_space : gym.spaces.Space
@@ -164,6 +199,7 @@ class SAC(RLAgent):
         log_std_init : float
         actor_observation_filter : list[str] | None
         critic_observation_filter : list[str] | None
+        target_entropy_annealing : tuple[Literal["constant", "ramp"], list[float | th.Tensor]] | None = None
 
     def __init__(self,
                  observation_space : gym.spaces.Space,
@@ -191,7 +227,8 @@ class SAC(RLAgent):
                  actor_log_std_init = -3.0,
                  actor_observation_filter : list[str] | None = None,
                  critic_observation_filter : list[str] | None = None,
-                 action_init : th.Tensor | float = 0.0):
+                 action_init : th.Tensor | float = 0.0,
+                 target_entropy_factor_annealing : tuple[Literal["constant", "ramp"], list[float | th.Tensor]] | None = None):
         super().__init__()
         _, _, _, values = inspect.getargvalues(inspect.currentframe()) #type: ignore
         self._init_args = values
@@ -231,7 +268,7 @@ class SAC(RLAgent):
                                    q_network_arch = q_network_arch,
                                    policy_arch = policy_arch,
                                    torch_device = th.device(torch_device),
-                                   target_entropy = target_entropy_factor*action_size,
+                                   target_entropy_factor = target_entropy_factor,
                                    observation_space = observation_space,
                                    feature_extractor_lr = feature_extractor_lr,
                                    batch_size = batch_size,
@@ -240,7 +277,8 @@ class SAC(RLAgent):
                                    actor_observation_space = actor_observation_space,
                                    critic_observation_space = critic_observation_space,
                                    actor_observation_filter = actor_observation_filter,
-                                   critic_observation_filter = critic_observation_filter)
+                                   critic_observation_filter = critic_observation_filter,
+                                   target_entropy_annealing = target_entropy_factor_annealing)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = self._hp.torch_device
         self._critic_updates = 0
@@ -288,8 +326,12 @@ class SAC(RLAgent):
                             log_std_init=self._hp.log_std_init,
                             action_mean_init=self._hp.action_init)
         self._actor_optimizer = optim.Adam(list(self._actor.parameters()), lr=self._hp.policy_lr)
+        self._base_target_entropy_factor = th.as_tensor(self._hp.target_entropy_factor, device=self._hp.torch_device, dtype=th.float32)
+        self._target_entropy = self._base_target_entropy_factor*self._hp.action_size
+        if target_entropy_factor_annealing is None:
+            target_entropy_factor_annealing = ("constant", [self._base_target_entropy_factor])
+        self._target_entropy_factor_annealing : AnnealingFunction = annealings[target_entropy_factor_annealing[0]](*target_entropy_factor_annealing[1])
         if self._hp.auto_entropy_temperature:
-            self._target_entropy = self._hp.target_entropy
             self._log_alpha = th.zeros(1, requires_grad=True, device=torch_device)
             self._alpha = self._log_alpha.exp().detach()
             self._alpha_optimizer = optim.Adam([self._log_alpha], lr=self._hp.q_lr)
@@ -440,7 +482,7 @@ class SAC(RLAgent):
         return model
 
     @override
-    def predict_action(self, observation_batch, deterministic = False):
+    def predict_action(self, observation_batch, deterministic = False, info_return : dict | None = None):
         # s = {k:v.size() for k,v in observation.items()}
         # ggLog.info(f"predict: observation = {s}")
 
@@ -455,11 +497,16 @@ class SAC(RLAgent):
         observation_batch = self.get_actor_subobservation(observation_batch)
         observation_batch = map_tensor_tree(observation_batch, lambda t: t.to(device = self.device, dtype = th.float32))
         observation_batch = self._actor_feature_extractor.extract_features(observation_batch)
-        action, log_prob, mean = self._actor.sample_action(observation_batch)
+        action, log_prob, mean, log_std = self._actor.sample_action(observation_batch)
         if not is_batched:
             action = action.squeeze()
             mean = mean.squeeze()
             log_prob = log_prob.squeeze()
+        if info_return is not None:
+            info_return["mean"] = mean
+            info_return["log_prob"] = log_prob
+            info_return["action"] = action
+            info_return["log_std"] = log_std
         if deterministic:
             return mean
         else:
@@ -485,10 +532,11 @@ class SAC(RLAgent):
                 actor_next_obss = self.get_actor_subobservation(transitions.next_observations)
                 act_next_enc_obss = self._actor_feature_extractor.extract_features(actor_next_obss)
             # Compute next-values for TD
-            next_state_actions, next_state_log_pi, _ = self._actor.sample_action(act_next_enc_obss)
+            next_state_actions, next_state_log_pi, _, _ = self._actor.sample_action(act_next_enc_obss)
             q_next = self._q_net_target.get_min_qval(crit_next_enc_obss, next_state_actions)
             soft_q_next = q_next - self._alpha * next_state_log_pi
             td_q_values = transitions.rewards.flatten() + (1 - transitions.terminated.flatten()) * self._hp.gamma * (soft_q_next).view(-1)
+
 
         # ggLog.info(f"td_q_values.size() = {td_q_values.size()}")
         q_values = self._q_net(critic_enc_obss, transitions.actions)
@@ -511,7 +559,7 @@ class SAC(RLAgent):
     def _compute_actor_loss(self, transitions : TransitionBatch):
         actor_obss = self.get_actor_subobservation(transitions.observations)
         actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
-        act, act_log_prob, _ = self._actor.sample_action(actor_enc_obss)
+        act, act_log_prob, _, _ = self._actor.sample_action(actor_enc_obss)
         # with th.no_grad():
         if self._share_actor_critic_feature_extractor:
             critic_enc_obss = actor_enc_obss
@@ -536,8 +584,12 @@ class SAC(RLAgent):
         with th.no_grad():
             actor_obss = self.get_actor_subobservation(transitions.observations)
             actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
-            _, act_log_prob, _ = self._actor.sample_action(actor_enc_obss)
+            _, act_log_prob, _, _ = self._actor.sample_action(actor_enc_obss)
             self._stats["avg_log_prob"] = act_log_prob.mean()
+            self._stats["min_log_prob"] = act_log_prob.min()
+            self._stats["max_log_prob"] = act_log_prob.max()
+            self._stats["q95_log_prob"] = act_log_prob.quantile(0.95)
+            self._stats["q05_log_prob"] = act_log_prob.quantile(0.05)
         return (-self._log_alpha.exp() * (act_log_prob + self._target_entropy)).mean()
     
     def _update_alpha(self, transitions : TransitionBatch):
@@ -610,9 +662,11 @@ class SAC(RLAgent):
     @override
     def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[th.Tensor,th.Tensor,th.Tensor]:
         q_act_alpha_losses = [None]*iterations
+        target_entropy_cpu = self._target_entropy_factor_annealing(global_step, iterations)*self._hp.action_size
+        self._target_entropy = th.as_tensor(target_entropy_cpu).to(device=self.device, dtype=th.float32, non_blocking=self.device.type=="cuda")
         for i in range(iterations):
             transitions = buffer.sample(self._hp.batch_size)
-            transitions = map_tensor_tree(transitions, lambda t : t.to(device=self.device, non_blocking=True))
+            transitions = map_tensor_tree(transitions, lambda t : t.to(device=self.device, non_blocking=self.device.type=="cuda"))
             # th.cuda.synchronize(self.device)
             q_act_alpha_losses[i] = self._update(transitions = transitions)
             self._tot_grad_steps_count += 1
@@ -623,7 +677,8 @@ class SAC(RLAgent):
                             "q_loss":q_loss,
                             "actor_loss":actor_loss,
                             "alpha_loss":alpha_loss,
-                            "alpha":self._alpha})
+                            "alpha":self._alpha,
+                            "target_entropy":target_entropy_cpu})
         return q_loss, actor_loss, alpha_loss
 
     @override
