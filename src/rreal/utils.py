@@ -61,3 +61,14 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
     if use_torchscript:
         net = th.compile(net)
     return net
+
+def split_params_for_weight_decay(model : th.nn.Module, weight_decay : float, decay_bias : bool = False):
+    decay = []
+    no_decay = []
+    for name, param in model.named_parameters():
+        if (name.endswith(".bias") and not decay_bias) or name.endswith(".weight_g") or name.endswith(".original1"):
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    return [{'params': decay,       'weight_decay': weight_decay},
+            {'params': no_decay,    'weight_decay': 0.0}]

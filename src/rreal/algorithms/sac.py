@@ -12,7 +12,7 @@ from rreal.algorithms.rl_agent import RLAgent
 from rreal.feature_extractors import get_feature_extractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
-from rreal.utils import build_mlp_net, scale_layer_weights
+from rreal.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay
 from typing import List, Union, Literal
 import adarl.utils.callbacks
 import adarl.utils.dbg.ggLog as ggLog
@@ -34,6 +34,64 @@ from adarl.utils.async_cuda2cpu_queue import log_async
 import pprint
 import adarl.utils.spaces as spaces
 from typing import Protocol
+
+@dataclass
+class SAC_init_hparams:
+    q_network_arch : list[int]
+    """The architecture of the Q network, a list of hidden layer sizes"""
+    policy_arch : list[int]
+    """The architecture of the policy network, a list of hidden layer sizes"""
+    q_lr : float
+    """The learning rate for the Q network"""
+    policy_lr : float
+    """The learning rate for the policy network"""
+    device : str | th.device
+    """The torch device where the model will be located"""
+    gamma : float
+    """The discount factor for the Q-learning algorithm"""
+    target_tau : float
+    """The target update factor for the soft update of the target network"""
+    buffer_size : int
+    """The size of the replay buffer"""
+    total_steps : int
+    """The total number of steps to train the model for"""
+    train_freq_vstep : int
+    """The numer of vectorized experience collection steps (i.e. steps/parallel_envs) between training steps"""
+    learning_starts : int
+    """The number of steps to collect before starting training"""
+    grad_steps : int
+    """The number of gradient steps to take per training step"""
+    batch_size : int
+    """The batch size used for computing gradient updates"""
+    parallel_envs : int
+    """The number of parallel environments to use for experience collection"""
+    log_freq_vstep : int
+    """The frequency of logging, in number of vectorized steps (i.e. steps/parallel_envs)"""
+    reference_init_args : dict
+    """Additional arguments that will be saved together with the model, just for reference on how it was trained"""
+    target_entropy_factor : float | None
+    """The factor used to compute the target entropy as target_entropy_factor*action_size, by default it is -1.0"""
+    actor_log_std_init : float
+    """The initial value of the log standard deviation of the actor's policy, by default it is -3.0"""
+    actor_observation_filter : list[str] | None = None
+    """The list of observation keys to filter in the actor's policy, by default it is None (no filtering, all observation keys are used)"""
+    critic_observation_filter : list[str] | None = None
+    """The list of observation keys to filter in the critic's Q network, by default it is None (no filtering, all observation keys are used)"""
+    target_entropy_factor_annealing : tuple[Literal['constant', 'ramp'], list[float | th.Tensor]] | None = None
+    """The target entropy factor annealing function, by default it is None (no annealing), see predefined annealings in sac.py"""
+    action_reference_obs_key : str | None = None
+    """The observation key that will be used as a reference for the action, meaning the actor distribution is computed as `mean = NN(obs) + act_ref` 
+      by default it is None (no reference, the mean is produced from the network directly)"""
+    max_grad_norm : float = 0.5
+    feature_extractor_lr : float = 0.0
+    torch_device : Union[str,th.device] = "cuda"
+    policy_update_freq : int = 2
+    target_update_freq : int = 1
+    auto_entropy_temperature : bool =True
+    constant_entropy_temperature : float | None =None
+    critic_weight_decay : float = 0.0
+    actor_weight_decay : float = 0.0
+
 
 class AnnealingFunction(Protocol):
         def __call__(self,  global_step : int, iterations : int) -> float:
@@ -73,16 +131,18 @@ class QNetwork(nn.Module):
                  observation_size : int,
                  torch_device : Union[str,th.device] = "cuda",
                  nets_num : int = 1,
-                 initial_scale = 0.003):
+                 initial_scale = 0.003,
+                 use_weightnorm : bool = True):
         super().__init__()
         self._nets_num = nets_num
         self._obs_size = observation_size
+        self._use_weightnorm = use_weightnorm
         self._q_nets = build_mlp_net(arch=q_network_arch,
                                      input_size=action_size + observation_size,
                                      output_size=1,
                                      ensemble_size=self._nets_num,
                                      return_ensemble_mean=False,
-                                     use_weightnorm=True,
+                                     use_weightnorm=self._use_weightnorm,
                                      use_torchscript=True,
                                      last_layer_init_func= lambda m: scale_layer_weights(m,initial_scale)).to(device=torch_device)
     
@@ -112,12 +172,14 @@ class Actor(nn.Module):
                         log_std_init = -3.0,
                         init_noise = 0.001,
                         torch_device : Union[str,th.device] = "cuda",
-                        action_mean_init = 0.0):
+                        action_mean_init = 0.0,
+                        use_weightnorm : bool = True):
         super().__init__()
         self._log_std_max = log_std_max
         self._log_std_min = log_std_min
         self.device = torch_device
         self._obs_size = observation_size
+        self._use_weightnorm = use_weightnorm
         # save action scaling factors as non-trained parameters
         if isinstance(action_max, int): action_max = float(action_max)
         if isinstance(action_min, int): action_min = float(action_min)
@@ -131,19 +193,22 @@ class Actor(nn.Module):
             raise RuntimeError(f"Invalid policy arch {policy_arch}, must have at least 1 layer")
         else:
             self.act_fc = build_mlp_net(arch=policy_arch[:-1],input_size=observation_size, output_size=policy_arch[-1],
-                                    last_activation_class=th.nn.LeakyReLU,
-                                    use_weightnorm=True).to(device=torch_device)
+                                    last_activation_class=th.nn.Tanh,
+                                    hidden_activations=th.nn.Tanh,
+                                    use_weightnorm=self._use_weightnorm).to(device=torch_device)
         mean_init = th.atanh((action_mean_init-self.action_bias)/self.action_scale).to("cpu")
         self.act_fc_mean = build_mlp_net(arch=[],
                                          input_size=policy_arch[-1],
                                          output_size=action_size,
-                                         use_weightnorm=True,
-                                         last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=mean_init)).to(device=torch_device)
+                                         use_weightnorm=self._use_weightnorm,
+                                         last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=mean_init),
+                                         hidden_activations=th.nn.Tanh).to(device=torch_device,)
         self.act_fc_logstd = build_mlp_net(arch=[],
                                          input_size=policy_arch[-1],
                                          output_size=action_size,
-                                         use_weightnorm=True,
-                                         last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=log_std_init)).to(device=torch_device)        
+                                         use_weightnorm=self._use_weightnorm,
+                                         last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=log_std_init),
+                                         hidden_activations=th.nn.Tanh).to(device=torch_device)        
 
     def forward(self, observation_batch):
         hidden_batch = self.act_fc(observation_batch)
@@ -153,8 +218,10 @@ class Actor(nn.Module):
         log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min # clamp the log_std network output
         return mean, log_std
 
-    def sample_action(self, observation_batch):
+    def sample_action(self, observation_batch, reference_action : th.Tensor | None = None):
         mean, log_std = self(observation_batch)
+        if reference_action is not None:
+            mean = mean + reference_action
         std = log_std.exp()
         normal = th.distributions.Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
@@ -174,61 +241,46 @@ class Actor(nn.Module):
 class SAC(RLAgent):
     @dataclass
     class Hyperparams():
-        q_lr : float
-        policy_lr : float
-        gamma : float
-        auto_entropy_temperature : bool
-        constant_entropy_temperature : float | None
         action_init : float | th.Tensor
-        action_size : int
-        action_min : th.Tensor
         action_max : th.Tensor
-        target_tau : float
-        policy_update_freq : int
-        targets_update_freq : int
-        q_network_arch : List[int]
-        policy_arch : List[int]
-        torch_device : th.device
-        target_entropy_factor : float
-        observation_space : gym.spaces.Space
+        action_min : th.Tensor
+        action_reference_obs_key : str | None
+        action_size : int
+        actor_observation_filter : list[str] | None
         actor_observation_space : gym.spaces.Space
+        auto_entropy_temperature : bool
+        batch_size : int
+        constant_entropy_temperature : float | None
+        critic_observation_filter : list[str] | None
         critic_observation_space : gym.spaces.Space
         feature_extractor_lr : float
-        batch_size : int
-        max_grad_norm : float
+        gamma : float
         log_std_init : float
-        actor_observation_filter : list[str] | None
-        critic_observation_filter : list[str] | None
-        target_entropy_annealing : tuple[Literal["constant", "ramp"], list[float | th.Tensor]] | None = None
+        max_grad_norm : float
+        observation_space : gym.spaces.Space
+        policy_arch : List[int]
+        policy_lr : float
+        policy_update_freq : int
+        q_lr : float
+        q_network_arch : List[int]
+        target_entropy_annealing : tuple[Literal["constant", "ramp"], list[float | th.Tensor]] | None
+        target_entropy_factor : float
+        target_tau : float
+        targets_update_freq : int
+        torch_device : th.device
+        critic_weight_decay : float
+        actor_weight_decay : float
 
     def __init__(self,
-                 observation_space : gym.spaces.Space,
                  action_size : int,
-                 q_network_arch : List[int] = [256,256],
-                 q_lr : float = 0.005,
-                 policy_lr : float = 0.005,
-                 policy_arch : List[int] = [256,256],
-                 action_min : Union[float, List[float]] = -1.0,
-                 action_max : Union[float, List[float]] = 1.0,
-                 torch_device : Union[str,th.device] = "cuda",
-                 auto_entropy_temperature : bool = True,
-                 constant_entropy_temperature : float | None = None,
-                 target_entropy_factor : float | None = None,
-                 gamma : float = 0.99,
-                 target_tau = 0.005,
-                 policy_update_freq = 2,
-                 target_update_freq = 1,
-                 critic_feature_extractor : FeatureExtractor | None = None,
-                 actor_feature_extractor : FeatureExtractor | None = None,
-                 feature_extractor_lr = 0.0,
-                 batch_size = 512,
-                 reference_init_args : dict = {},
-                 max_grad_norm : float = 0.5,
-                 actor_log_std_init = -3.0,
-                 actor_observation_filter : list[str] | None = None,
-                 critic_observation_filter : list[str] | None = None,
+                 init_hparams : SAC_init_hparams,
+                 observation_space : gym.spaces.Space,
                  action_init : th.Tensor | float = 0.0,
-                 target_entropy_factor_annealing : tuple[Literal["constant", "ramp"], list[float | th.Tensor]] | None = None):
+                 action_max : Union[float, List[float]] = 1.0,
+                 action_min : Union[float, List[float]] = -1.0,
+                 actor_feature_extractor : FeatureExtractor | None = None,
+                 critic_feature_extractor : FeatureExtractor | None = None
+                 ):
         super().__init__()
         _, _, _, values = inspect.getargvalues(inspect.currentframe()) #type: ignore
         self._init_args = values
@@ -237,55 +289,61 @@ class SAC(RLAgent):
         self._init_args.pop("critic_feature_extractor") # Will be saved separately
         self._init_args.pop("actor_feature_extractor") # Will be saved separately
         self._init_args = copy.deepcopy(self._init_args)
-        if target_entropy_factor is None:
-            target_entropy_factor = -1.0
-        if actor_observation_filter != None:
+        init_hparams = copy.deepcopy(init_hparams)
+        if init_hparams.target_entropy_factor is None:
+            init_hparams.target_entropy_factor = -1.0
+        if init_hparams.actor_observation_filter != None:
             if isinstance(observation_space, spaces.gym_spaces.Dict):
-                actor_observation_space = spaces.gym_spaces.Dict({k:v for k,v in observation_space.spaces.items() if k in actor_observation_filter})
+                actor_observation_space = spaces.gym_spaces.Dict({k:v for k,v in observation_space.spaces.items() if k in init_hparams.actor_observation_filter})
             else:
                 raise RuntimeError(f"observation space must be a Dict to use actor_observation_filter, but it's a {type(observation_space)}")
         else:
             actor_observation_space = observation_space
-        if critic_observation_filter != None:
+        if init_hparams.critic_observation_filter != None:
             if isinstance(observation_space, spaces.gym_spaces.Dict):
-                critic_observation_space = spaces.gym_spaces.Dict({k:v for k,v in observation_space.spaces.items() if k in critic_observation_filter})
+                critic_observation_space = spaces.gym_spaces.Dict({k:v for k,v in observation_space.spaces.items() if k in init_hparams.critic_observation_filter})
             else:
                 raise RuntimeError(f"observation space must be a Dict to use actor_observation_filter, but it's a {type(observation_space)}")
         else:
             critic_observation_space = observation_space
-        self._hp = SAC.Hyperparams(q_lr=q_lr,
-                                   policy_lr = policy_lr,
-                                   gamma=gamma,
-                                   auto_entropy_temperature=auto_entropy_temperature,
-                                   constant_entropy_temperature=constant_entropy_temperature,
+        if init_hparams.action_reference_obs_key is not None:
+            action_init = 0.0
+        self._hp = SAC.Hyperparams(q_lr=init_hparams.q_lr,
+                                   policy_lr = init_hparams.policy_lr,
+                                   gamma=init_hparams.gamma,
+                                   auto_entropy_temperature=init_hparams.auto_entropy_temperature,
+                                   constant_entropy_temperature=init_hparams.constant_entropy_temperature,
                                    action_init=action_init,
                                    action_size=action_size,
                                    action_min = th.as_tensor(action_min),
                                    action_max = th.as_tensor(action_max),
-                                   target_tau = target_tau,
-                                   policy_update_freq=policy_update_freq,
-                                   targets_update_freq=target_update_freq,
-                                   q_network_arch = q_network_arch,
-                                   policy_arch = policy_arch,
-                                   torch_device = th.device(torch_device),
-                                   target_entropy_factor = target_entropy_factor,
+                                   target_tau = init_hparams.target_tau,
+                                   policy_update_freq=init_hparams.policy_update_freq,
+                                   targets_update_freq=init_hparams.target_update_freq,
+                                   q_network_arch = init_hparams.q_network_arch,
+                                   policy_arch = init_hparams.policy_arch,
+                                   torch_device = th.device(init_hparams.torch_device),
+                                   target_entropy_factor = init_hparams.target_entropy_factor,
                                    observation_space = observation_space,
-                                   feature_extractor_lr = feature_extractor_lr,
-                                   batch_size = batch_size,
-                                   max_grad_norm=max_grad_norm,
-                                   log_std_init = actor_log_std_init,
+                                   feature_extractor_lr = init_hparams.feature_extractor_lr,
+                                   batch_size = init_hparams.batch_size,
+                                   max_grad_norm=init_hparams.max_grad_norm,
+                                   log_std_init = init_hparams.actor_log_std_init,
                                    actor_observation_space = actor_observation_space,
                                    critic_observation_space = critic_observation_space,
-                                   actor_observation_filter = actor_observation_filter,
-                                   critic_observation_filter = critic_observation_filter,
-                                   target_entropy_annealing = target_entropy_factor_annealing)
+                                   actor_observation_filter = init_hparams.actor_observation_filter,
+                                   critic_observation_filter = init_hparams.critic_observation_filter,
+                                   target_entropy_annealing = init_hparams.target_entropy_factor_annealing,
+                                   action_reference_obs_key = init_hparams.action_reference_obs_key,
+                                   critic_weight_decay = init_hparams.critic_weight_decay,
+                                   actor_weight_decay = init_hparams.actor_weight_decay)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = self._hp.torch_device
         self._critic_updates = 0
         self._alpha_updates = 0
         self._policy_updates = 0
         self._share_actor_critic_feature_extractor = (actor_feature_extractor==critic_feature_extractor and
-                                                      actor_observation_filter==critic_observation_filter)
+                                                      init_hparams.actor_observation_filter==init_hparams.critic_observation_filter)
         if self._share_actor_critic_feature_extractor:
             if critic_feature_extractor is None or actor_feature_extractor is None: # second considition is just for typing
                 self._critic_feature_extractor = StackVectorsFeatureExtractor(observation_space=critic_observation_space,
@@ -307,17 +365,17 @@ class SAC(RLAgent):
                 self._actor_feature_extractor = actor_feature_extractor
         self._q_net = QNetwork( observation_size=self._critic_feature_extractor.encoding_size(),
                                 action_size=self._hp.action_size,
-                                q_network_arch=q_network_arch,
+                                q_network_arch=init_hparams.q_network_arch,
                                 torch_device=self._hp.torch_device,
                                 nets_num=2)
         self._q_net_target = QNetwork(  observation_size=self._critic_feature_extractor.encoding_size(),
                                         action_size=self._hp.action_size,
-                                        q_network_arch=q_network_arch,
+                                        q_network_arch=init_hparams.q_network_arch,
                                         torch_device=self._hp.torch_device,
                                         nets_num=2)
         self._q_net_target.load_state_dict(self._q_net.state_dict())
-        self._q_optimizer = optim.Adam(self._q_net.parameters(), lr=self._hp.q_lr)
-        self._actor = Actor(policy_arch=policy_arch,
+        self._q_optimizer = optim.Adam(split_params_for_weight_decay(self._q_net, self._hp.critic_weight_decay), lr=self._hp.q_lr)
+        self._actor = Actor(policy_arch=init_hparams.policy_arch,
                             observation_size=self._actor_feature_extractor.encoding_size(),
                             action_size = self._hp.action_size,
                             action_min = self._hp.action_min,
@@ -325,14 +383,15 @@ class SAC(RLAgent):
                             torch_device=self._hp.torch_device,
                             log_std_init=self._hp.log_std_init,
                             action_mean_init=self._hp.action_init)
-        self._actor_optimizer = optim.Adam(list(self._actor.parameters()), lr=self._hp.policy_lr)
+        self._actor_optimizer = optim.Adam(split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay),
+                                           lr=self._hp.policy_lr)
         self._base_target_entropy_factor = th.as_tensor(self._hp.target_entropy_factor, device=self._hp.torch_device, dtype=th.float32)
         self._target_entropy = self._base_target_entropy_factor*self._hp.action_size
-        if target_entropy_factor_annealing is None:
-            target_entropy_factor_annealing = ("constant", [self._base_target_entropy_factor])
-        self._target_entropy_factor_annealing : AnnealingFunction = annealings[target_entropy_factor_annealing[0]](*target_entropy_factor_annealing[1])
+        if init_hparams.target_entropy_factor_annealing is None:
+            init_hparams.target_entropy_factor_annealing = ("constant", [self._base_target_entropy_factor])
+        self._target_entropy_factor_annealing : AnnealingFunction = annealings[init_hparams.target_entropy_factor_annealing[0]](*init_hparams.target_entropy_factor_annealing[1])
         if self._hp.auto_entropy_temperature:
-            self._log_alpha = th.zeros(1, requires_grad=True, device=torch_device)
+            self._log_alpha = th.zeros(1, requires_grad=True, device=init_hparams.torch_device)
             self._alpha = self._log_alpha.exp().detach()
             self._alpha_optimizer = optim.Adam([self._log_alpha], lr=self._hp.q_lr)
         else:
@@ -496,8 +555,9 @@ class SAC(RLAgent):
 
         observation_batch = self.get_actor_subobservation(observation_batch)
         observation_batch = map_tensor_tree(observation_batch, lambda t: t.to(device = self.device, dtype = th.float32))
-        observation_batch = self._actor_feature_extractor.extract_features(observation_batch)
-        action, log_prob, mean, log_std = self._actor.sample_action(observation_batch)
+        observation_batch_enc = self._actor_feature_extractor.extract_features(observation_batch)
+        reference_action : th.Tensor = observation_batch[self._hp.action_reference_obs_key] if self._hp.action_reference_obs_key is not None else None
+        action, log_prob, mean, log_std = self._actor.sample_action(observation_batch_enc, reference_action=reference_action)
         if not is_batched:
             action = action.squeeze()
             mean = mean.squeeze()
@@ -527,12 +587,15 @@ class SAC(RLAgent):
             critic_next_obss = self.get_critic_subobservation(transitions.next_observations)
             crit_next_enc_obss = self._critic_feature_extractor.extract_features(critic_next_obss)   
             if self._share_actor_critic_feature_extractor:     
-                act_next_enc_obss = crit_next_enc_obss
+                actor_next_obss = critic_next_obss
+                actor_next_obss_enc = crit_next_enc_obss
             else:
                 actor_next_obss = self.get_actor_subobservation(transitions.next_observations)
-                act_next_enc_obss = self._actor_feature_extractor.extract_features(actor_next_obss)
+                actor_next_obss_enc = self._actor_feature_extractor.extract_features(actor_next_obss)
+            reference_action : th.Tensor = actor_next_obss[self._hp.action_reference_obs_key] if self._hp.action_reference_obs_key is not None else None
+            
             # Compute next-values for TD
-            next_state_actions, next_state_log_pi, _, _ = self._actor.sample_action(act_next_enc_obss)
+            next_state_actions, next_state_log_pi, _, _ = self._actor.sample_action(actor_next_obss_enc, reference_action = reference_action)
             q_next = self._q_net_target.get_min_qval(crit_next_enc_obss, next_state_actions)
             soft_q_next = q_next - self._alpha * next_state_log_pi
             td_q_values = transitions.rewards.flatten() + (1 - transitions.terminated.flatten()) * self._hp.gamma * (soft_q_next).view(-1)
@@ -559,7 +622,8 @@ class SAC(RLAgent):
     def _compute_actor_loss(self, transitions : TransitionBatch):
         actor_obss = self.get_actor_subobservation(transitions.observations)
         actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
-        act, act_log_prob, _, _ = self._actor.sample_action(actor_enc_obss)
+        reference_action : th.Tensor = actor_obss[self._hp.action_reference_obs_key] if self._hp.action_reference_obs_key is not None else None
+        act, act_log_prob, _, _ = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
         # with th.no_grad():
         if self._share_actor_critic_feature_extractor:
             critic_enc_obss = actor_enc_obss
@@ -584,7 +648,8 @@ class SAC(RLAgent):
         with th.no_grad():
             actor_obss = self.get_actor_subobservation(transitions.observations)
             actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
-            _, act_log_prob, _, _ = self._actor.sample_action(actor_enc_obss)
+            reference_action : th.Tensor = actor_obss[self._hp.action_reference_obs_key] if self._hp.action_reference_obs_key is not None else None
+            _, act_log_prob, _, _ = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
             self._stats["avg_log_prob"] = act_log_prob.mean()
             self._stats["min_log_prob"] = act_log_prob.min()
             self._stats["max_log_prob"] = act_log_prob.max()

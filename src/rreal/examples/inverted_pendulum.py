@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
-from rreal.algorithms.sac_helpers import sac_train, SAC_hyperparams, gym_builder
+from rreal.algorithms.sac_helpers import sac_train, SAC_init_hparams, gym_builder
 
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
     sac_train(seed, folderName, run_id, args,
               env_builder=gym_builder,
               env_builder_args = {  "env_name" : "InvertedPendulum-v4",
                                     "max_episode_steps" : 1000},
-              hyperparams=SAC_hyperparams(train_freq_vstep=1,
+              hyperparams=SAC_init_hparams(train_freq_vstep=1,
                                   grad_steps=1,
                                   q_lr=0.005,
                                   policy_lr=0.0005,
@@ -18,7 +18,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                   total_steps = 10_000_000,
                                   batch_size=16384,
                                   q_network_arch=[64,64],
-                                  policy_network_arch=[64,64],
+                                  policy_arch=[64,64],
                                   learning_starts=5000,
                                   parallel_envs = 1,
                                   log_freq_vstep = 1000,

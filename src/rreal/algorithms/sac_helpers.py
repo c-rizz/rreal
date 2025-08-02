@@ -15,7 +15,7 @@ from adarl.envs.vector_env_logger import VectorEnvLogger
 from adarl.utils.buffers import ThDReplayBuffer
 from adarl.utils.ThDictEpReplayBuffer import ThDictEpReplayBuffer
 import adarl.utils.sigint_handler
-from rreal.algorithms.sac import SAC, train_off_policy
+from rreal.algorithms.sac import SAC, train_off_policy, SAC_init_hparams
 from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector, SyncExperienceCollector
 import wandb 
 from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
@@ -34,6 +34,7 @@ from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
 from adarl.envs.vec.EnvRunnerInterface import EnvRunnerInterface
 from adarl.envs.vec.GymVecRunnerWrapper import GymVecRunnerWrapper
 import adarl.utils.spaces as spaces
+from typing import Literal
 
 class EnvBuilderProtocol(typing.Protocol):
     def __call__(self, seed : int, log_folder : str, is_eval : bool, env_builder_args : dict) -> tuple[gym.Env,float]:
@@ -186,30 +187,13 @@ def build_eval_callbacks(eval_configurations : list[dict],
 #     envs = VectorEnvLogger(env = envs)
 #     return envs
 
-def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams : SAC_hyperparams):
+def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams : SAC_init_hparams):
     agent = SAC(observation_space=obs_space,
                 action_size=int(np.prod(act_space.shape)),
-                q_network_arch=hyperparams.q_network_arch,
-                q_lr=hyperparams.q_lr,
-                policy_lr=hyperparams.policy_lr,
-                policy_arch=hyperparams.policy_network_arch,
                 action_min = act_space.low.tolist(),
                 action_max = act_space.high.tolist(),
-                torch_device=hyperparams.device,
-                auto_entropy_temperature=True,
-                constant_entropy_temperature=None,
-                gamma=hyperparams.gamma,
-                target_tau = hyperparams.target_tau,
-                policy_update_freq=2,
-                target_update_freq=1,
-                batch_size = hyperparams.batch_size,
-                reference_init_args = hyperparams.reference_init_args,
-                target_entropy_factor=hyperparams.target_entropy_factor,
-                actor_log_std_init = hyperparams.actor_log_std_init,
-                actor_observation_filter=hyperparams.actor_observation_filter,
-                critic_observation_filter=hyperparams.critic_observation_filter,
                 action_init=act_space.zero_action if isinstance(act_space,spaces.ThBox) else 0.0,
-                target_entropy_factor_annealing=hyperparams.target_entropy_factor_annealing)
+                init_hparams=hyperparams)
     agent = th.compile(agent, mode="max-autotune", fullgraph=True)
     return agent
 
@@ -260,50 +244,6 @@ def wrap_with_gym(vec_runner_builder : VecEnvRunnerBuilderProtocol) -> VecEnvBui
     return wrapped_builder
 
 from dataclasses import dataclass
-@dataclass
-class SAC_hyperparams:
-    q_network_arch : list[int]
-    """The architecture of the Q network, a list of hidden layer sizes"""
-    policy_network_arch : list[int]
-    """The architecture of the policy network, a list of hidden layer sizes"""
-    q_lr : float
-    """The learning rate for the Q network"""
-    policy_lr : float
-    """The learning rate for the policy network"""
-    device : str | th.device
-    """The torch device where the model will be located"""
-    gamma : float
-    """The discount factor for the Q-learning algorithm"""
-    target_tau : float
-    """The target update factor for the soft update of the target network"""
-    buffer_size : int
-    """The size of the replay buffer"""
-    total_steps : int
-    """The total number of steps to train the model for"""
-    train_freq_vstep : int
-    """The numer of vectorized experience collection steps (i.e. steps/parallel_envs) between training steps"""
-    learning_starts : int
-    """The number of steps to collect before starting training"""
-    grad_steps : int
-    """The number of gradient steps to take per training step"""
-    batch_size : int
-    """The batch size used for computing gradient updates"""
-    parallel_envs : int
-    """The number of parallel environments to use for experience collection"""
-    log_freq_vstep : int
-    """The frequency of logging, in number of vectorized steps (i.e. steps/parallel_envs)"""
-    reference_init_args : dict
-    """Additional arguments that will be saved together with the model, just for reference on how it was trained"""
-    target_entropy_factor : float | None
-    """The factor used to compute the target entropy as target_entropy_factor*action_size, by default it is -1.0"""
-    actor_log_std_init : float
-    """The initial value of the log standard deviation of the actor's policy, by default it is -3.0"""
-    actor_observation_filter : list[str] | None = None
-    """The list of observation keys to filter in the actor's policy, by default it is None (no filtering, all observation keys are used)"""
-    critic_observation_filter : list[str] | None = None
-    """The list of observation keys to filter in the critic's Q network, by default it is None (no filtering, all observation keys are used)"""
-    target_entropy_factor_annealing : tuple[str, list[th.Tensor | float]] | None = None
-    """The target entropy factor annealing function, by default it is None (no annealing), see predefined annealings in sac.py"""
 
 
 def sac_train(  seed : int,
@@ -312,7 +252,7 @@ def sac_train(  seed : int,
                 args,
                 vec_env_builder : VecEnvBuilderProtocol | None,
                 env_builder_args : dict,
-                hyperparams : SAC_hyperparams,
+                hyperparams : SAC_init_hparams,
                 max_episode_duration : int,
                 validation_buffer_size : int,
                 validation_holdout_ratio : float,

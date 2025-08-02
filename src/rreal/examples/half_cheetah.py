@@ -1,6 +1,6 @@
 #!/usr/bin/env python3  
 
-from rreal.algorithms.sac_helpers import sac_train, SAC_hyperparams, gym_builder
+from rreal.algorithms.sac_helpers import sac_train, SAC_init_hparams, gym_builder, env_builder2vec
 import copy
 
 
@@ -8,7 +8,7 @@ import copy
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
     import torch as th
     max_steps_per_episode = 1000
-    num_envs = 8
+    num_envs = 128
     env_builder_args = {"env_name" : "HalfCheetah-v4",
                         "gym_args" : {  "forward_reward_weight" : 1.0,
                                         "ctrl_cost_weight" : 0.1,
@@ -39,12 +39,15 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
     eval_configs = [eval_conf_video_stoch]
     train_device = th.device("cuda")
     collect_device = th.device("cpu")
+    vecenv_builder = env_builder2vec(gym_builder,
+                                     collector_device=th.device("cpu"),
+                                     env_action_device= th.device("cpu"),
+                                     purely_numpy=False)
     if args["algo"].lower() == "sac":
         sac_train(seed, folderName, run_id, args,
-                    env_builder=gym_builder,
                     env_builder_args = env_builder_args,
-                    vec_env_builder=None,
-                    hyperparams = SAC_hyperparams(  train_freq_vstep=16,
+                    vec_env_builder=vecenv_builder,
+                    hyperparams = SAC_init_hparams(  train_freq_vstep=16,
                                                     grad_steps=32,
                                                     parallel_envs = num_envs,
                                                     batch_size = 4096,
@@ -56,7 +59,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     buffer_size=1_000_000,
                                                     total_steps = 10_000_000,
                                                     q_network_arch=[256,256],
-                                                    policy_network_arch=[256,256],
+                                                    policy_arch=[256,256],
                                                     learning_starts=20*num_envs*max_steps_per_episode,
                                                     log_freq_vstep = 1000,
                                                     reference_init_args={},
@@ -112,7 +115,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     q_lr=0.001,
                                                     policy_lr=3e-4,
                                                     update_epochs=10,
-                                                    total_steps=1_000_000,
+                                                    total_steps=10_000_000,
                                                     num_envs=8,
                                                     num_steps=2048,
                                                     gamma=0.99,

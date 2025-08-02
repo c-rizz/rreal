@@ -1,6 +1,6 @@
 #!/usr/bin/env python3  
 from __future__ import annotations
-from rreal.algorithms.sac_helpers import sac_train, SAC_hyperparams, gym_builder, build_vec_env
+from rreal.algorithms.sac_helpers import sac_train, SAC_init_hparams, gym_builder, build_vec_env
 import copy
 from adarl.envs.examples.CartpoleContinuousVecEnv import CartpoleContinuousVecEnv
 from adarl.envs.vec.EnvRunner import EnvRunner
@@ -212,7 +212,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                     args, # Run arguments
                     vec_env_builder  = cartpole_venv_builder,
                     env_builder_args = env_builder_args, 
-                    hyperparams = SAC_hyperparams(  train_freq_vstep=16, # do 1 train step every 16 vsteps
+                    hyperparams = SAC_init_hparams(  train_freq_vstep=16, # do 1 train step every 16 vsteps
                                                     grad_steps=16, # do 16 grad steps per train step
                                                     parallel_envs = num_envs,
                                                     batch_size = 512, 
@@ -224,7 +224,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     buffer_size=1_000_000,
                                                     total_steps = num_envs*max_steps_per_episode*100, # Total training steps to do
                                                     q_network_arch=[64,64],
-                                                    policy_network_arch=[64,64],
+                                                    policy_arch=[64,64],
                                                     learning_starts=num_envs*max_steps_per_episode*50, # The training of the agent starts after these steps are collected
                                                     log_freq_vstep = 1000, # Print logs at this frequency
                                                     reference_init_args={"env_builder_args": env_builder_args}, # Save also these arguments when the policy gets saved
