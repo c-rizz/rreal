@@ -50,7 +50,7 @@ class SAC_init_hparams:
     gamma : float
     """The discount factor for the Q-learning algorithm"""
     target_tau : float
-    """The target update factor for the soft update of the target network"""
+    """The target update factor for the soft update of the target network, the smaller it is the more delayed the target is. Usually 0.005."""
     buffer_size : int
     """The size of the replay buffer"""
     total_steps : int
@@ -189,12 +189,13 @@ class Actor(nn.Module):
         self.action_scale : th.Tensor
         self.register_buffer("action_scale", th.as_tensor((action_max - action_min) / 2.0, dtype=th.float32, device=torch_device))
         self.register_buffer("action_bias",  th.as_tensor((action_max + action_min) / 2.0, dtype=th.float32, device=torch_device))
+        inner_activations = th.nn.LeakyReLU
         if len(policy_arch)<1:
             raise RuntimeError(f"Invalid policy arch {policy_arch}, must have at least 1 layer")
         else:
             self.act_fc = build_mlp_net(arch=policy_arch[:-1],input_size=observation_size, output_size=policy_arch[-1],
-                                    last_activation_class=th.nn.Tanh,
-                                    hidden_activations=th.nn.Tanh,
+                                    last_activation_class=inner_activations,
+                                    hidden_activations=inner_activations,
                                     use_weightnorm=self._use_weightnorm).to(device=torch_device)
         mean_init = th.atanh((action_mean_init-self.action_bias)/self.action_scale).to("cpu")
         self.act_fc_mean = build_mlp_net(arch=[],
@@ -202,13 +203,13 @@ class Actor(nn.Module):
                                          output_size=action_size,
                                          use_weightnorm=self._use_weightnorm,
                                          last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=mean_init),
-                                         hidden_activations=th.nn.Tanh).to(device=torch_device,)
+                                         hidden_activations=inner_activations).to(device=torch_device,)
         self.act_fc_logstd = build_mlp_net(arch=[],
                                          input_size=policy_arch[-1],
                                          output_size=action_size,
                                          use_weightnorm=self._use_weightnorm,
                                          last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=log_std_init),
-                                         hidden_activations=th.nn.Tanh).to(device=torch_device)        
+                                         hidden_activations=inner_activations).to(device=torch_device)        
 
     def forward(self, observation_batch):
         hidden_batch = self.act_fc(observation_batch)
