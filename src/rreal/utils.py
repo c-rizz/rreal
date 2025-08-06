@@ -24,12 +24,14 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     use_weightnorm : bool = False,
                     weight_init_multiplier = 1.0,
                     layer_init_func : Callable[[th.nn.Module],None] | None = None,
-                    last_layer_init_func : Callable[[th.nn.Module],None] | None = None):
+                    last_layer_init_func : Callable[[th.nn.Module],None] | None = None,
+                    use_jit_fork : bool = True):
         
     if arch == "identity":
         if input_size != output_size:
             raise AttributeError(f"Requested identity mlp, but input_size!=output_size: {input_size} != {output_size}")
-        net = Parallel([last_activation_class()], return_mean=return_ensemble_mean)
+        net = Parallel([last_activation_class()], return_mean=return_ensemble_mean,
+                       use_jit_fork=use_jit_fork)
     elif isinstance(arch, (list, tuple)):
         nets = []
         arch = [int(s) for s in arch]
@@ -52,7 +54,8 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     layers.append(hidden_activations())
             layers.append(last_activation_class())
             nets.append(th.nn.Sequential(*layers))
-        net = Parallel(nets, return_mean=return_ensemble_mean, return_std=return_ensemble_std)
+        net = Parallel(nets, return_mean=return_ensemble_mean, return_std=return_ensemble_std,
+                       use_jit_fork=use_jit_fork)
     else:
         raise AttributeError(f"Invalid arch {arch}")
     with th.no_grad():

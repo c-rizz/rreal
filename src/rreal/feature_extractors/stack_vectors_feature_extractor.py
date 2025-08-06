@@ -29,13 +29,16 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
             self._normalizer = RunningNormalizer(shape=(self._obs_converter.vector_part_size(),),
                                                 dtype = self._obs_converter.getVectorPartDtype(),
                                                 device=self._th_device)
+            self._normalizer = th.compile(self._normalizer, mode="max-autotune")
         if self._obs_converter.has_image_part():
             raise NotImplementedError(f"Input observations contain images.")
 
     def extract_features(self, observation_batch) -> th.Tensor:
         with th.no_grad():
+            th.cuda.nvtx.mark("get vec part")
             vec_part = self._obs_converter.getVectorPart(observation_batch)
-            return self._normalizer(vec_part)
+            th.cuda.nvtx.mark("normalize")
+            return self._normalizer(vec_part).clone()
     
     def encoding_size(self) -> int:
         return self._obs_converter.vector_part_size()

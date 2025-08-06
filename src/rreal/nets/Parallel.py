@@ -40,12 +40,14 @@ class Parallel(nn.ModuleList):
     Parallelly runs provided modules. Returns one batch containig an ensemble of outputs in each element.
     E.g.: You have 3 submodules, each returning an output of size (5,), you input a (1024,10) batch, you get a (1024,3,5) output
     """
-    def __init__(self, modules, return_mean : bool = False, return_std = False, return_concat : bool = False):
+    def __init__(self, modules, return_mean : bool = False, return_std = False, return_concat : bool = False,
+                        use_jit_fork : bool = False):
         super().__init__( modules )
         self._modules_num = len(modules)
         self._output_mean : Final[bool] = return_mean
         self._output_std : Final[bool] = return_std
         self._output_concat : Final[bool]  = return_concat
+        self._use_jit_fork : Final[bool] = use_jit_fork
         # self._streams = [th.cuda.Stream() for _ in range(len(modules))]
 
     def forward(self, x):
@@ -67,7 +69,7 @@ class Parallel(nn.ModuleList):
 
         # This gets parallelized if the moduled is compiled in torchscript
         # to compile you can do 'net = th.jit.script(Parallel(...))'
-        if self._modules_num > 1:
+        if self._modules_num > 1 and self._use_jit_fork:
             futures = [th.jit.fork(model, x) for model in self]
             results = [th.jit.wait(fut) for fut in futures]
         else:

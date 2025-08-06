@@ -8,7 +8,7 @@ import copy
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
     import torch as th
     max_steps_per_episode = 1000
-    num_envs = 128
+    num_envs = 1 
     env_builder_args = {"env_name" : "HalfCheetah-v4",
                         "gym_args" : {  "forward_reward_weight" : 1.0,
                                         "ctrl_cost_weight" : 0.1,
