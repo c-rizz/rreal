@@ -189,7 +189,7 @@ class Actor(nn.Module):
         self.action_scale : th.Tensor
         self.register_buffer("action_scale", th.as_tensor((action_max - action_min) / 2.0, dtype=th.float32, device=torch_device))
         self.register_buffer("action_bias",  th.as_tensor((action_max + action_min) / 2.0, dtype=th.float32, device=torch_device))
-        inner_activations = th.nn.LeakyReLU
+        inner_activations = th.nn.Tanh
         if len(policy_arch)<1:
             raise RuntimeError(f"Invalid policy arch {policy_arch}, must have at least 1 layer")
         else:
