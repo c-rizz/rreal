@@ -150,7 +150,7 @@ class QNetwork(nn.Module):
         qvals = self(observations, actions)
         # ggLog.info(f"qvals.size() = {qvals.size()}")
         # min_q = qvals[:,0]
-        min_q = th.min(qvals,dim=1).values # this causes a cuda sync on backward
+        min_q = th.amin(qvals,dim=1)
         # min_q = min_q.squeeze(1)
         # ggLog.info(f"min_q.size() = {min_q.size()}")
         return min_q
