@@ -260,6 +260,7 @@ def sac_train(  seed : int,
                 eval_configurations : list[dict] = [],
                 checkpoint_freq : int = 100,
                 collector_device : th.device | None = None,
+                buffer_device : th.device | str | None = None,
                 debug_level : int = 2,
                 no_wandb : bool = False,
                 log_weights_and_grads = False):
@@ -284,11 +285,15 @@ def sac_train(  seed : int,
         device = th.device(hyperparams.device)
     else:
         device = hyperparams.device
+    if isinstance(buffer_device, str):
+        buffer_device = th.device(buffer_device)
     if device.index is None:
         device = th.device(type=device.type, index=0)
     print(f"Device = {device}")
     if collector_device is None:
         collector_device = device
+    if buffer_device is None:
+        buffer_device = device
     if vec_env_builder is None:
         raise RuntimeError(f"You must specify either vec_env_builder or env_builder")
     vec_env_builder = wrap_with_logger(vec_env_builder)
@@ -318,7 +323,7 @@ def sac_train(  seed : int,
         observation_space=observation_space,
         action_space=action_space,
         device=device,
-        storage_torch_device=device,
+        storage_torch_device=buffer_device,
         handle_timeout_termination=True,
         n_envs=hyperparams.parallel_envs,
         random_add=True,
