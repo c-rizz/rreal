@@ -75,3 +75,18 @@ def split_params_for_weight_decay(model : th.nn.Module, weight_decay : float, de
             decay.append(param)
     return [{'params': decay,       'weight_decay': weight_decay},
             {'params': no_decay,    'weight_decay': 0.0}]
+
+
+def simplified_clip_grad_norm_(
+    parameters: list[th.Tensor],
+    max_norm: float,
+    norm_type: float = 2.0
+) -> th.Tensor:
+    r"""Simplified version of torch's clip_grad_norm_.
+    """
+    grads = [p.grad for p in parameters if p.grad is not None]
+    norms = th._foreach_norm(grads, norm_type)
+    total_norm = th.linalg.vector_norm(th.stack(norms), norm_type)
+    clip_coef_clamped = th.clamp(max_norm / (total_norm + 1e-6), max=1.0)
+    th._foreach_mul_(grads, clip_coef_clamped)
+    return total_norm
