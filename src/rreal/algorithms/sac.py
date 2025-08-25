@@ -921,6 +921,7 @@ def train_off_policy(collector : ExperienceCollector,
     step_counter = 0
     steps_sl = 0
     train_count = 0
+    grad_steps_done_sl = 0
     q_loss, actor_loss, alpha_loss = th.as_tensor(float("nan")),th.as_tensor(float("nan")),th.as_tensor(float("nan"))
     start_time = time.monotonic()
     last_log_steps = float("-inf")
@@ -943,10 +944,13 @@ def train_off_policy(collector : ExperienceCollector,
         # ------------------             Train             ------------------
         t_before_train = time.monotonic()
         trained = False
+        grad_steps_done = 0
         if global_step > learning_start_step:
+            iterations = grad_steps if grad_steps!="auto" else 10
             while (grad_steps != "auto" and not trained) or (grad_steps == "auto" and collector.is_collecting()):
                 trained = True
-                q_loss, actor_loss, alpha_loss = model.train_model(global_step, grad_steps if grad_steps!="auto" else 10, buffer)
+                q_loss, actor_loss, alpha_loss = model.train_model(global_step, iterations, buffer)
+                grad_steps_done += iterations
             train_count += 1
         t_after_train = time.monotonic()
         if trained and validation_freq>0 and train_count%validation_freq==0:
@@ -996,6 +1000,7 @@ def train_off_policy(collector : ExperienceCollector,
         t_buff_sl               += t_after_buff         - t_after_endcallback
         t_add_sl                += t_add
         t_tot_sl                += tf-t0
+        grad_steps_done_sl += grad_steps_done
         t = time.monotonic()
         # ggLog.info(f"global_steps = {global_step}")
         if global_step - last_log_steps > log_freq_vstep*num_envs:
@@ -1016,10 +1021,11 @@ def train_off_policy(collector : ExperienceCollector,
                        f" tadd={t_add_sl:.2f}"
                        f" tot={t_tot_sl:.2f}"
                        f" fps={steps_sl/t_tot_sl:.2f} collfps={steps_sl/t_coll_sl:.2f}"
+                       f" ips={grad_steps_done/t_train_sl:.2f}"
                        f" alltime_fps={global_step/(t-start_time):.2f} alltime_ips={model._tot_grad_steps_count/(t-start_time):.2f}")
             dictlist = [f"{k}:{v:.6g}" for k,v in collector.get_stats().items()]
             ggLog.info(f"Collection: {', '.join(dictlist)}")
-            t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl, t_buff_sl, t_add_sl, t_start_sl, t_end_callbacks_sl, t_wait_collect_sl = 0,0,0,0,0,0,0,0,0,0
+            t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl, t_buff_sl, t_add_sl, t_start_sl, t_end_callbacks_sl, t_wait_collect_sl, grad_steps_done_sl = 0,0,0,0,0,0,0,0,0,0,0
             free, total = th.cuda.mem_get_info(th.device('cuda:0'))
             mem_used_MB = (total - free) / 1024 ** 2
             # ggLog.info(f"{t}: cuda mem usage = {mem_used_MB}")
