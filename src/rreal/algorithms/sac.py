@@ -764,7 +764,7 @@ class SAC(RLAgent):
 
     @th.compile(mode="max-autotune", fullgraph=False)
     def _alpha_opt_step(self):
-        th.clip_(self._log_alpha.grad, min=-self._hp.max_grad_norm, max=-self._hp.max_grad_norm)
+        simplified_clip_grad_norm_([self._log_alpha], self._hp.max_grad_norm)
         self._alpha_optimizer.step()
 
     def _update_alpha(self, transitions : TransitionBatch):
