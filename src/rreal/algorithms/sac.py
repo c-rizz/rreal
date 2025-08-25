@@ -12,7 +12,7 @@ from rreal.algorithms.rl_agent import RLAgent
 from rreal.feature_extractors import get_feature_extractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
-from rreal.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay
+from rreal.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay, simplified_clip_grad_norm_
 from typing import List, Union, Literal
 import adarl.utils.callbacks
 import adarl.utils.dbg.ggLog as ggLog
@@ -34,7 +34,6 @@ from adarl.utils.async_cuda2cpu_queue import log_async
 import pprint
 import adarl.utils.spaces as spaces
 from typing import Protocol
-import torchviz
 
 th._dynamo.config.compiled_autograd = True
 
@@ -425,7 +424,7 @@ class SAC(RLAgent):
         self._last_actor_loss = th.as_tensor(float("nan"), device=self.device)
         self._last_alpha_loss = th.as_tensor(float("nan"), device=self.device)
         self._tot_grad_steps_count = 0
-        self._enable_nvtx = False
+        self._enable_nvtx = False 
         # This was optimized by improving GPU usage via cudagraphs, profiling with Nsight Systems
         # The profiling command was:
         #  sudo nsys profile -w true -t cuda,nvtx,osrt,cudnn,cublas --capture-range=cudaProfilerApi --capture-range-end=stop \
@@ -653,27 +652,32 @@ class SAC(RLAgent):
         # ggLog.info(f"td_q_values.size() = {td_q_values.size()}")
         return F.mse_loss(q_values, td_q_values)
 
+    @th.compile(mode="max-autotune", fullgraph=False)
+    def _critic_opt_step(self):
+        simplified_clip_grad_norm_(list(self._q_net.parameters()), self._hp.max_grad_norm)
+        self._q_optimizer.step()
+
     def _update_critic(self, transitions : TransitionBatch):
         th.compiler.cudagraph_mark_step_begin()
         # ggLog.info(f"critic update...")
         self._q_optimizer.zero_grad(set_to_none=True)
         
-        self._start_range_nvtx("_update_critic")
-        self._start_range_nvtx("critic forward")
+        # self._start_range_nvtx("_update_critic")
+        # self._start_range_nvtx("critic forward")
         # ggLog.info(f"compute_critic_loss...")
         q_loss = self._compute_critic_loss(transitions)
         # ggLog.info(f"compute_critic_loss done")
-        self._end_range_nvtx()
-        self._start_range_nvtx("critic backward")
+        # self._end_range_nvtx()
+        # self._start_range_nvtx("critic backward")
         q_loss.backward()
-        nn.utils.clip_grad_norm_(self._q_net.parameters(), self._hp.max_grad_norm)
-        self._end_range_nvtx()
-        self._start_range_nvtx("critic opt")
-        self._q_optimizer.step()
-        self._end_range_nvtx()
+        # self._end_range_nvtx()
+        # self._start_range_nvtx("critic opt")
+        with th.no_grad():
+            self._critic_opt_step()
+        # self._end_range_nvtx()
         self._critic_updates += 1
         self._last_q_loss = q_loss.detach()
-        self._end_range_nvtx()
+        # self._end_range_nvtx()
         # ggLog.info(f"critic update done")
 
 
@@ -701,35 +705,39 @@ class SAC(RLAgent):
         # ggLog.info(f"act_log_prob.size() = {act_log_prob.size()}")
         # self._mark_nvtx("ret_q")
         return ((self._alpha * act_log_prob) - min_q_pi).mean()
-
-    # @th.compile(mode="max-autotune")
+        
     def _compute_actor_grads(self, transitions : TransitionBatch):
-        self._start_range_nvtx("_compute_actor_loss()")
+        # self._start_range_nvtx("_compute_actor_loss()")
         actor_loss = self._compute_actor_loss(transitions)
         # torchviz.make_dot(actor_loss, params=dict(self._actor.named_parameters())).render("actor_loss_graph", format="pdf")
-        self._end_range_nvtx()
-        self._start_range_nvtx("actor backward")
+        # self._end_range_nvtx()
+        # self._start_range_nvtx("actor backward")
         # torch._dynamo.config.compiled_autograd = True
         # with th._dynamo.compiled_autograd.enable(th.compile(fullgraph=True)):
         actor_loss.backward()
-        nn.utils.clip_grad_norm_(self._actor.parameters(), self._hp.max_grad_norm)
-        self._end_range_nvtx()
+        # self._end_range_nvtx()
         return actor_loss
+    
+    @th.compile(mode="max-autotune", fullgraph=False)
+    def _actor_opt_step(self):
+        simplified_clip_grad_norm_(list(self._actor.parameters()), self._hp.max_grad_norm)
+        self._actor_optimizer.step()
 
     def _update_actor(self, transitions : TransitionBatch):
         self._actor_optimizer.zero_grad(set_to_none=True)
         # Without _q_optimizer.zero_grad autograd tries to backpropagate through these gradients and through the critic loss, which crashes due to cudatrees
         self._q_optimizer.zero_grad(set_to_none=True)
         # th.compiler.cudagraph_mark_step_begin()
-        self._start_range_nvtx("_update_actor")
+        # self._start_range_nvtx("_update_actor")
         # torch.compile, the missing manual says compiling forward+backward+step in one go is not supported
         actor_loss = self._compute_actor_grads(transitions)
-        self._start_range_nvtx("actor opt")
-        self._actor_optimizer.step()
-        self._end_range_nvtx()
+        # self._start_range_nvtx("actor opt")
+        with th.no_grad():
+            self._actor_opt_step()
+        # self._end_range_nvtx()
         self._last_actor_loss = actor_loss.detach().clone()
         self._actor_updates += 1
-        self._end_range_nvtx()
+        # self._end_range_nvtx()
 
     # @th.compile(mode="max-autotune", fullgraph=True)
     def _alpha_loss(self, act_log_prob : th.Tensor):
@@ -753,11 +761,17 @@ class SAC(RLAgent):
             stats = self._alpha_stats(act_log_prob)
         return self._alpha_loss(act_log_prob), stats
     
+
+    @th.compile(mode="max-autotune", fullgraph=False)
+    def _alpha_opt_step(self):
+        th.clip_(self._log_alpha.grad, min=-self._hp.max_grad_norm, max=-self._hp.max_grad_norm)
+        self._alpha_optimizer.step()
+
     def _update_alpha(self, transitions : TransitionBatch):
         th.compiler.cudagraph_mark_step_begin()
-        self._start_range_nvtx("_update_alpha")
+        # self._start_range_nvtx("_update_alpha")
         if self._hp.auto_entropy_temperature:
-            self._start_range_nvtx("alpha forward")
+            # self._start_range_nvtx("alpha forward")
             self._alpha_optimizer.zero_grad(set_to_none=True)
             self._actor_optimizer.zero_grad(set_to_none=True)
             alpha_loss, stats = self._compute_alpha_loss(transitions)
@@ -766,20 +780,20 @@ class SAC(RLAgent):
                                                     "max_log_prob",
                                                     "q95_log_prob",
                                                     "q05_log_prob"],stats)})            
-            self._end_range_nvtx()
-            self._start_range_nvtx("alpha backward")
+            # self._end_range_nvtx()
+            # self._start_range_nvtx("alpha backward")
             alpha_loss.backward()
-            nn.utils.clip_grad_norm_(self._log_alpha, self._hp.max_grad_norm)
-            self._end_range_nvtx()
-            self._start_range_nvtx("alpha opt")
-            self._alpha_optimizer.step()
-            self._end_range_nvtx()
+            # self._end_range_nvtx()
+            # self._start_range_nvtx("alpha opt")
+            with th.no_grad():
+                self._alpha_opt_step()
+            # self._end_range_nvtx()
             self._alpha.fill_(self._log_alpha.exp().detach().view(tuple())) # keep the same address to make cudagraphs happy
         else:
             alpha_loss = th.tensor(0.0, device=self.device)
         self._last_alpha_loss = alpha_loss.detach()
         self._alpha_updates += 1
-        self._end_range_nvtx()
+        # self._end_range_nvtx()
 
     @staticmethod
     def _target_update(param, target_param, tau):
@@ -789,11 +803,11 @@ class SAC(RLAgent):
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
         
     def _update_target_nets(self):
-        self._start_range_nvtx("_update_target_nets")
+        # self._start_range_nvtx("_update_target_nets")
         th.compiler.cudagraph_mark_step_begin()
         for param, target_param in zip(self._q_net.parameters(), self._q_net_target.parameters()):
             self._target_update(param, target_param, self._hp.target_tau)
-        self._end_range_nvtx()
+        # self._end_range_nvtx()
 
     def _update_feature_extractor(self):
         if self._share_actor_critic_feature_extractor:
@@ -822,8 +836,8 @@ class SAC(RLAgent):
             self._critic_feature_extractor_optimizer.zero_grad(set_to_none=True)
         if self._actor_feature_extractor_optimizer is not None:
             self._actor_feature_extractor_optimizer.zero_grad(set_to_none=True)
-        self._startup_nvtx()
-        self._start_range_nvtx(f"iteration{self._critic_updates}")
+        # self._startup_nvtx()
+        # self._start_range_nvtx(f"iteration{self._critic_updates}")
         self._update_critic(transitions = transitions)
         did_train_something = False
         if self._critic_updates % self._hp.policy_update_freq == 0:
@@ -835,15 +849,15 @@ class SAC(RLAgent):
                 # ggLog.info(f"alpha update done")
                 did_train_something = True
         if self._critic_updates % self._hp.targets_update_freq == 0:
-            self._start_range_nvtx("update target nets")
+            # self._start_range_nvtx("update target nets")
             self._update_target_nets()
-            self._end_range_nvtx()
+            # self._end_range_nvtx()
             did_train_something = True
         if did_train_something:
             self._update_feature_extractor()
-        self._end_range_nvtx()
+        # self._end_range_nvtx()
         self._agent_updates += 1
-        self._stop_nvtx()      
+        # self._stop_nvtx()      
         # th.cuda.set_sync_debug_mode(sync_dbg_mode)
         # ggLog.info(f"sac update done")
         return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
