@@ -47,7 +47,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
         sac_train(seed, folderName, run_id, args,
                     env_builder_args = env_builder_args,
                     vec_env_builder=vecenv_builder,
-                    hyperparams = SAC_init_hparams(  train_freq_vstep=16,
+                    hyperparams = SAC_init_hparams( train_freq_vstep=16,
                                                     grad_steps=32,
                                                     parallel_envs = num_envs,
                                                     batch_size = 4096,
