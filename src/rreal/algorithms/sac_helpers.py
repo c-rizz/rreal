@@ -205,7 +205,8 @@ def build_collector(use_processes : bool,
                     collector_device : th.device,
                     collector_buffer_size : int,
                     session : adarl.utils.session.Session,
-                    num_envs : int):
+                    num_envs : int,
+                    deterministic_action_ratio : float = 0.0):
     vec_env_builder_norags = lambda: vec_env_builder(env_builder_args=env_builder_args,
                                                     run_folder=run_folder,
                                                     seed=seed,
@@ -215,7 +216,8 @@ def build_collector(use_processes : bool,
                             vec_env_builder=vec_env_builder_norags,
                             storage_torch_device=collector_device,
                             buffer_size=collector_buffer_size,
-                            session=session)
+                            session=session,
+                            deterministic_action_ratio=deterministic_action_ratio)
     else:
         collector = AsyncThreadExperienceCollector( vec_env=vec_env_builder_norags(),
                                                     buffer_size=collector_buffer_size,

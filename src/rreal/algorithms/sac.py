@@ -93,6 +93,7 @@ class SAC_init_hparams:
     constant_entropy_temperature : float | None =None
     critic_weight_decay : float = 0.0
     actor_weight_decay : float = 0.0
+    deterministic_collection_ratio : float = 0.0
 
 
 class AnnealingFunction(Protocol):

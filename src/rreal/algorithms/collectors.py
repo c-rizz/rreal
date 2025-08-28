@@ -23,6 +23,7 @@ import threading
 import time
 import torch as th
 import torch.multiprocessing as mp
+from rreal.algorithms.rl_agent import RLAgent
 
 class ExperienceCollector(ABC):
     def __init__(self, vec_env : gym.vector.VectorEnv,
@@ -64,8 +65,8 @@ class ExperienceCollector(ABC):
     def action_space(self) -> gym.Space:
         raise NotImplementedError()
 
-    def collect_experience(self, policy, vsteps_to_collect, global_vstep_count, random_vsteps, policy_device,
-                           buffer : BasicStorage):
+    def collect_experience(self, policy : RLAgent, vsteps_to_collect, global_vstep_count, random_vsteps, policy_device,
+                           buffer : BasicStorage, deterministic_ratio = 0.0):
         t0 = time.monotonic()
         with th.no_grad(): #just to be sure
             if  self._current_obs is None:
@@ -84,7 +85,11 @@ class ExperienceCollector(ABC):
                 else:
                     th_obs = map_tensor_tree(self._current_obs, lambda a: th.as_tensor(a, device = policy_device))
                     # dbg_check_finite(th_obs)                    
-                    actions = policy.predict_action(th_obs)
+                    if deterministic_ratio>0:
+                        deterministic = (th.rand(1).item() < deterministic_ratio)
+                    else:
+                        deterministic = False
+                    actions = policy.predict_action(th_obs, deterministic=deterministic)
                     if not self._vecenv_is_torch:
                         actions = actions.detach().cpu().numpy()
                 t_post_act = time.monotonic()
@@ -289,7 +294,8 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
     def __init__(self, vec_env_builder : Callable[[],gym.vector.VectorEnv],
                  buffer_size, storage_torch_device, start_method : Literal['fork', 'spawn', 'forkserver']= "forkserver",
                  session : session.Session = None,
-                 seed : int = 0):
+                 seed : int = 0,
+                 deterministic_action_ratio : float = 0.0):
         super().__init__(vec_env=None)
 
         ctx = mp_helper.get_context(method=start_method)
@@ -299,6 +305,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         self._storage_torch_device = storage_torch_device
         self._vec_env_builder = CloudpickleWrapper(vec_env_builder)
         self._state_dict : dict[str,th.Tensor]
+        self._deterministic_action_ratio = deterministic_action_ratio
         
         self._commander = SimpleCommander(mp_context=ctx, n_envs=1, timeout_s=60)
         self._collect_args = ctx.Array(ctypes.c_uint64, 3, lock = False)
@@ -386,7 +393,8 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                                             global_vstep_count=global_vstep_count,
                                             random_vsteps=random_vsteps,
                                             policy_device=self._collector_model.device,
-                                            buffer = self._buffer)
+                                            buffer = self._buffer,
+                                            deterministic_ratio=self._deterministic_action_ratio)
                     self._last_collect_wall_duration.value = time.monotonic() - t0
                 elif cmd == b"close":
                     ggLog.warn(f"{type(self)}: closing")
