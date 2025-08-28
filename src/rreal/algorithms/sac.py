@@ -397,8 +397,8 @@ class SAC(RLAgent):
                             torch_device=self._hp.torch_device,
                             log_std_init=self._hp.log_std_init,
                             action_mean_init=self._hp.action_init)
-        self._actor_optimizer = optim.Adam(split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay),
-                                           lr=self._hp.policy_lr)
+        # self._actor_optimizer = optim.Adam(split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay),
+        #                                    lr=self._hp.policy_lr)
         self._base_target_entropy_factor = th.as_tensor(self._hp.target_entropy_factor, device=self._hp.torch_device, dtype=th.float32)
         self._target_entropy = self._base_target_entropy_factor*self._hp.action_size
         if init_hparams.target_entropy_factor_annealing is None:
@@ -407,9 +407,14 @@ class SAC(RLAgent):
         if self._hp.auto_entropy_temperature:
             self._log_alpha = th.zeros(1, requires_grad=True, device=init_hparams.torch_device)
             self._alpha = self._log_alpha.exp().detach()
-            self._alpha_optimizer = optim.Adam([self._log_alpha], lr=self._hp.q_lr)
+            # self._alpha_optimizer = optim.Adam([self._log_alpha], lr=self._hp.q_lr)
         else:
             self._alpha = th.as_tensor(constant_entropy_temperature).to(device=self._hp.torch_device, non_blocking=self._hp.torch_device.type=="cuda")
+            self._log_alpha = self._alpha.log().detach()
+
+        self._actor_and_alpha_optimizer = optim.Adam([{ "params":[self._log_alpha], "lr":self._hp.q_lr}]+
+                                                      split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay,
+                                                                                    extra_kwargs={"lr":self._hp.policy_lr}))
 
         if self._hp.feature_extractor_lr > 0:
             self._critic_feature_extractor_optimizer = optim.Adam(list(self._critic_feature_extractor.parameters()), lr=self._hp.feature_extractor_lr)
@@ -425,7 +430,7 @@ class SAC(RLAgent):
         self._last_actor_loss = th.as_tensor(float("nan"), device=self.device)
         self._last_alpha_loss = th.as_tensor(float("nan"), device=self.device)
         self._tot_grad_steps_count = 0
-        self._enable_nvtx = False 
+        self._enable_nvtx = False
         # This was optimized by improving GPU usage via cudagraphs, profiling with Nsight Systems
         # The profiling command was:
         #  sudo nsys profile -w true -t cuda,nvtx,osrt,cudnn,cublas --capture-range=cudaProfilerApi --capture-range-end=stop \
@@ -443,11 +448,11 @@ class SAC(RLAgent):
                         "val_alpha_loss":0.0,
                         "alpha":0.0}
         
-    def _startup_nvtx(self):
+    def _nvtx_startup(self):
         if self._enable_nvtx and self._critic_updates == 10:
             th.cuda.cudart().cudaProfilerStart()
 
-    def _stop_nvtx(self):
+    def _nvtx_stop(self):
         if self._enable_nvtx and self._critic_updates > 13:
             th.cuda.cudart().cudaProfilerStop()  
 
@@ -455,11 +460,11 @@ class SAC(RLAgent):
         if self._enable_nvtx and self._agent_updates >10:
             th.cuda.nvtx.mark(name)
 
-    def _start_range_nvtx(self, name : str):
+    def _nvtx_start_range(self, name : str):
         if self._enable_nvtx and self._agent_updates >10:
             th.cuda.nvtx.range_push(name)
 
-    def _end_range_nvtx(self):
+    def _nvtx_end_range(self):
         if self._enable_nvtx and self._agent_updates >10:
             th.cuda.nvtx.range_pop()
 
@@ -663,26 +668,26 @@ class SAC(RLAgent):
         # ggLog.info(f"critic update...")
         self._q_optimizer.zero_grad(set_to_none=True)
         
-        # self._start_range_nvtx("_update_critic")
-        # self._start_range_nvtx("critic forward")
+        # self._nvtx_start_range("_update_critic")
+        # self._nvtx_start_range("critic forward")
         # ggLog.info(f"compute_critic_loss...")
         q_loss = self._compute_critic_loss(transitions)
         # ggLog.info(f"compute_critic_loss done")
-        # self._end_range_nvtx()
-        # self._start_range_nvtx("critic backward")
+        # self._nvtx_end_range()
+        # self._nvtx_start_range("critic backward")
         q_loss.backward()
-        # self._end_range_nvtx()
-        # self._start_range_nvtx("critic opt")
+        # self._nvtx_end_range()
+        # self._nvtx_start_range("critic opt")
         with th.no_grad():
             self._critic_opt_step()
-        # self._end_range_nvtx()
+        # self._nvtx_end_range()
         self._critic_updates += 1
         self._last_q_loss = q_loss.detach()
-        # self._end_range_nvtx()
+        # self._nvtx_end_range()
         # ggLog.info(f"critic update done")
 
 
-    @th.compile(mode="max-autotune", fullgraph=True)
+    # @th.compile(mode="max-autotune", fullgraph=True)
     def _compute_actor_loss(self, transitions : TransitionBatch):
         # self._mark_nvtx("_compute_actor_loss")
         actor_obss = self.get_actor_subobservation(transitions.observations)
@@ -707,38 +712,39 @@ class SAC(RLAgent):
         # self._mark_nvtx("ret_q")
         return ((self._alpha * act_log_prob) - min_q_pi).mean()
         
-    def _compute_actor_grads(self, transitions : TransitionBatch):
-        # self._start_range_nvtx("_compute_actor_loss()")
-        actor_loss = self._compute_actor_loss(transitions)
-        # torchviz.make_dot(actor_loss, params=dict(self._actor.named_parameters())).render("actor_loss_graph", format="pdf")
-        # self._end_range_nvtx()
-        # self._start_range_nvtx("actor backward")
-        # torch._dynamo.config.compiled_autograd = True
-        # with th._dynamo.compiled_autograd.enable(th.compile(fullgraph=True)):
-        actor_loss.backward()
-        # self._end_range_nvtx()
-        return actor_loss
+    # def _compute_actor_grads(self, transitions : TransitionBatch):
+    #     # self._start_range_nvtx("_compute_actor_loss()")
+    #     actor_loss = self._compute_actor_loss(transitions)
+    #     # torchviz.make_dot(actor_loss, params=dict(self._actor.named_parameters())).render("actor_loss_graph", format="pdf")
+    #     # self._end_range_nvtx()
+    #     # self._start_range_nvtx("actor backward")
+    #     # torch._dynamo.config.compiled_autograd = True
+    #     # with th._dynamo.compiled_autograd.enable(th.compile(fullgraph=True)):
+    #     actor_loss.backward()
+    #     # self._end_range_nvtx()
+    #     return actor_loss
     
-    @th.compile(mode="max-autotune", fullgraph=False)
-    def _actor_opt_step(self):
-        simplified_clip_grad_norm_(list(self._actor.parameters()), self._hp.max_grad_norm)
-        self._actor_optimizer.step()
+    # @th.compile(mode="max-autotune", fullgraph=False)
+    # def _actor_opt_step(self):
+    #     simplified_clip_grad_norm_(list(self._actor.parameters()), self._hp.max_grad_norm)
+    #     self._actor_optimizer.step()
 
-    def _update_actor(self, transitions : TransitionBatch):
-        self._actor_optimizer.zero_grad(set_to_none=True)
-        # Without _q_optimizer.zero_grad autograd tries to backpropagate through these gradients and through the critic loss, which crashes due to cudatrees
-        self._q_optimizer.zero_grad(set_to_none=True)
-        # th.compiler.cudagraph_mark_step_begin()
-        # self._start_range_nvtx("_update_actor")
-        # torch.compile, the missing manual says compiling forward+backward+step in one go is not supported
-        actor_loss = self._compute_actor_grads(transitions)
-        # self._start_range_nvtx("actor opt")
-        with th.no_grad():
-            self._actor_opt_step()
-        # self._end_range_nvtx()
-        self._last_actor_loss = actor_loss.detach().clone()
-        self._actor_updates += 1
-        # self._end_range_nvtx()
+    # def _update_actor(self, transitions : TransitionBatch):
+    #     self._actor_optimizer.zero_grad(set_to_none=True)
+    #     # Without _q_optimizer.zero_grad autograd tries to backpropagate through these gradients and through the critic loss, which crashes due to cudatrees
+    #     self._q_optimizer.zero_grad(set_to_none=True)
+    #     # th.compiler.cudagraph_mark_step_begin()
+    #     # self._start_range_nvtx("_update_actor")
+    #     # torch.compile, the missing manual says compiling forward+backward+step in one go is not supported
+    #     actor_loss = self._compute_actor_grads(transitions)
+    #     # self._start_range_nvtx("actor opt")
+    #     with th.no_grad():
+    #         self._actor_opt_step()
+    #     # self._end_range_nvtx()
+    #     self._last_actor_loss = actor_loss.detach().clone()
+    #     self._actor_updates += 1
+    #     # self._end_range_nvtx()
+
 
     # @th.compile(mode="max-autotune", fullgraph=True)
     def _alpha_loss(self, act_log_prob : th.Tensor):
@@ -763,49 +769,101 @@ class SAC(RLAgent):
         return self._alpha_loss(act_log_prob), stats
     
 
-    @th.compile(mode="max-autotune", fullgraph=False)
-    def _alpha_opt_step(self):
-        simplified_clip_grad_norm_([self._log_alpha], self._hp.max_grad_norm)
-        self._alpha_optimizer.step()
+    # @th.compile(mode="max-autotune", fullgraph=False)
+    # def _alpha_opt_step(self):
+    #     simplified_clip_grad_norm_([self._log_alpha], self._hp.max_grad_norm)
+    #     self._alpha_optimizer.step()
 
-    def _update_alpha(self, transitions : TransitionBatch):
-        th.compiler.cudagraph_mark_step_begin()
+    # def _update_alpha(self, transitions : TransitionBatch):
+    #     th.compiler.cudagraph_mark_step_begin()
+    #     # self._start_range_nvtx("_update_alpha")
+    #     if self._hp.auto_entropy_temperature:
+    #         # self._start_range_nvtx("alpha forward")
+    #         self._alpha_optimizer.zero_grad(set_to_none=True)
+    #         self._actor_optimizer.zero_grad(set_to_none=True)
+    #         alpha_loss, stats = self._compute_alpha_loss(transitions)
+    #         self._stats.update({k:v for k,v in zip(["avg_log_prob",
+    #                                                 "min_log_prob",
+    #                                                 "max_log_prob",
+    #                                                 "q95_log_prob",
+    #                                                 "q05_log_prob"],stats)})            
+    #         # self._end_range_nvtx()
+    #         # self._start_range_nvtx("alpha backward")
+    #         alpha_loss.backward()
+    #         # self._end_range_nvtx()
+    #         # self._start_range_nvtx("alpha opt")
+    #         with th.no_grad():
+    #             self._alpha_opt_step()
+    #         # self._end_range_nvtx()
+    #         self._alpha.fill_(self._log_alpha.exp().detach().view(tuple())) # keep the same address to make cudagraphs happy
+    #     else:
+    #         alpha_loss = th.tensor(0.0, device=self.device)
+    #     self._last_alpha_loss = alpha_loss.detach()
+    #     self._alpha_updates += 1
+    #     # self._end_range_nvtx()
+
+    @th.compile(mode="max-autotune", fullgraph=False)
+    def _compute_actor_and_alpha_loss(self, transitions : TransitionBatch):
+        actor_loss = self._compute_actor_loss(transitions)
+        # self._start_range_nvtx("actor opt")
+        
         # self._start_range_nvtx("_update_alpha")
         if self._hp.auto_entropy_temperature:
-            # self._start_range_nvtx("alpha forward")
-            self._alpha_optimizer.zero_grad(set_to_none=True)
-            self._actor_optimizer.zero_grad(set_to_none=True)
-            alpha_loss, stats = self._compute_alpha_loss(transitions)
+            alpha_loss, alpha_stats = self._compute_alpha_loss(transitions)
+            loss = actor_loss + alpha_loss
+        else:
+            alpha_loss, alpha_stats = None, None
+            loss = actor_loss
+        
+        return loss, actor_loss, alpha_loss, alpha_stats
+    
+    @th.compile(mode="max-autotune", fullgraph=False)
+    def _actor_and_alpha_opt_step(self):
+        simplified_clip_grad_norm_(list(self._actor.parameters()), self._hp.max_grad_norm)
+        simplified_clip_grad_norm_([self._log_alpha], self._hp.max_grad_norm)
+        self._actor_and_alpha_optimizer.step()
+
+    def _update_actor_and_alpha(self, transitions : TransitionBatch):
+        # We aggregate actor and alpha to join the two compilation regions and cuda graphs, so to reduce overhead
+        # self._nvtx_start_range("_update_actor_and_alpha")
+        self._q_optimizer.zero_grad(set_to_none=True)
+        self._actor_and_alpha_optimizer.zero_grad(set_to_none=True)
+        # self._nvtx_start_range("_compute_actor_and_alpha_loss")
+        actor_alpha_loss, actor_loss, alpha_loss, alpha_stats = self._compute_actor_and_alpha_loss(transitions)
+        # self._nvtx_end_range()
+        # self._nvtx_start_range("actor_alpha backward")
+        actor_alpha_loss.backward()
+        # self._nvtx_end_range()
+        # self._nvtx_start_range("actor_alpha opt")
+        with th.no_grad():
+            self._actor_and_alpha_opt_step()
+        # self._nvtx_end_range()
+
+        self._alpha.fill_(self._log_alpha.exp().detach().view(tuple())) # keep the same address to make cudagraphs happy
+        if alpha_loss is not None:
+            self._last_alpha_loss = alpha_loss.detach().clone()
+        self._last_actor_loss = actor_loss.detach().clone()
+        if alpha_stats is not None:
             self._stats.update({k:v for k,v in zip(["avg_log_prob",
                                                     "min_log_prob",
                                                     "max_log_prob",
                                                     "q95_log_prob",
-                                                    "q05_log_prob"],stats)})            
-            # self._end_range_nvtx()
-            # self._start_range_nvtx("alpha backward")
-            alpha_loss.backward()
-            # self._end_range_nvtx()
-            # self._start_range_nvtx("alpha opt")
-            with th.no_grad():
-                self._alpha_opt_step()
-            # self._end_range_nvtx()
-            self._alpha.fill_(self._log_alpha.exp().detach().view(tuple())) # keep the same address to make cudagraphs happy
-        else:
-            alpha_loss = th.tensor(0.0, device=self.device)
-        self._last_alpha_loss = alpha_loss.detach()
+                                                    "q05_log_prob"],alpha_stats)})            
+        # self._nvtx_end_range()
         self._alpha_updates += 1
-        # self._end_range_nvtx()
+        self._actor_updates += 1
 
+        
     @staticmethod
     def _target_update(param, target_param, tau):
         if tau == 1:
             target_param.data.copy_(param.data)
         else:
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
-        
+
+    @th.compile(mode="max-autotune", fullgraph=True)        
     def _update_target_nets(self):
         # self._start_range_nvtx("_update_target_nets")
-        th.compiler.cudagraph_mark_step_begin()
         for param, target_param in zip(self._q_net.parameters(), self._q_net_target.parameters()):
             self._target_update(param, target_param, self._hp.target_tau)
         # self._end_range_nvtx()
@@ -837,16 +895,17 @@ class SAC(RLAgent):
             self._critic_feature_extractor_optimizer.zero_grad(set_to_none=True)
         if self._actor_feature_extractor_optimizer is not None:
             self._actor_feature_extractor_optimizer.zero_grad(set_to_none=True)
-        # self._startup_nvtx()
-        # self._start_range_nvtx(f"iteration{self._critic_updates}")
+        # self._nvtx_startup()
+        # self._nvtx_start_range(f"iteration{self._critic_updates}")
         self._update_critic(transitions = transitions)
         did_train_something = False
         if self._critic_updates % self._hp.policy_update_freq == 0:
             for _ in range(self._hp.policy_update_freq):
-                # ggLog.info(f"actor update...")
-                self._update_actor(transitions=transitions)
-                # ggLog.info(f"alpha update...")
-                self._update_alpha(transitions=transitions)
+                # # ggLog.info(f"actor update...")
+                # self._update_actor(transitions=transitions)
+                # # ggLog.info(f"alpha update...")
+                # self._update_alpha(transitions=transitions)
+                self._update_actor_and_alpha(transitions=transitions)
                 # ggLog.info(f"alpha update done")
                 did_train_something = True
         if self._critic_updates % self._hp.targets_update_freq == 0:
@@ -856,9 +915,9 @@ class SAC(RLAgent):
             did_train_something = True
         if did_train_something:
             self._update_feature_extractor()
-        # self._end_range_nvtx()
+        # self._nvtx_end_range()
         self._agent_updates += 1
-        # self._stop_nvtx()      
+        # self._nvtx_stop()      
         # th.cuda.set_sync_debug_mode(sync_dbg_mode)
         # ggLog.info(f"sac update done")
         return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
@@ -1020,7 +1079,7 @@ def train_off_policy(collector : ExperienceCollector,
         # ggLog.info(f"global_steps = {global_step}")
         if global_step - last_log_steps > log_freq_vstep*num_envs:
             last_log_steps = global_step
-            log_async(f"SAC: expsteps={global_step}"+" q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}",
+            log_async(f"SAC: expsteps={global_step} q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}",
                       tensors=dict(q_loss=q_loss,actor_loss=actor_loss,alpha_loss=alpha_loss))
             # ggLog.info(f"SAC: expsteps={global_step} q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}")
             ggLog.info(f"OFFTRAIN: expstps:{global_step}"
@@ -1036,7 +1095,7 @@ def train_off_policy(collector : ExperienceCollector,
                        f" tadd={t_add_sl:.2f}"
                        f" tot={t_tot_sl:.2f}"
                        f" fps={steps_sl/t_tot_sl:.2f} collfps={steps_sl/t_coll_sl:.2f}"
-                       f" ips={grad_steps_done/t_train_sl:.2f}"
+                       f" ips={grad_steps_done_sl/t_train_sl:.2f}"
                        f" alltime_fps={global_step/(t-start_time):.2f} alltime_ips={model._tot_grad_steps_count/(t-start_time):.2f}")
             dictlist = [f"{k}:{v:.6g}" for k,v in collector.get_stats().items()]
             ggLog.info(f"Collection: {', '.join(dictlist)}")
