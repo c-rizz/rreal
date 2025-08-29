@@ -6,22 +6,19 @@ import gymnasium as gym
 from adarl.utils.ObsConverter import ObsConverter
 import torch as th
 from rreal.feature_extractors import register_feature_extractor_class
-import inspect
 import yaml
 import adarl.utils.dbg.ggLog as ggLog
 from typing_extensions import override
 import zipfile
 from adarl.utils.running_mean_std import RunningNormalizer
+from adarl.utils.utils import get_func_input_args
 
 class StackVectorsFeatureExtractor(FeatureExtractor):
     def __init__(self,  observation_space : gym.spaces.Space,
                         device : th.device,
                         normalize_input_obs : bool = True):
         super().__init__()
-        _, _, _, values = inspect.getargvalues(inspect.currentframe())
-        self._init_args = values
-        self._init_args.pop("self")
-        self._init_args.pop("__class__")
+        self._init_args = get_func_input_args(exclude=["self", "__class__"])
         self._normalize_input_obs = normalize_input_obs
         self._th_device = device
         self._obs_converter = ObsConverter(observation_shape=observation_space)
