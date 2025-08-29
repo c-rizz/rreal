@@ -462,11 +462,11 @@ class SAC(RLAgent):
                         "alpha":0.0}
         
     def _nvtx_startup(self):
-        if self._enable_nvtx and self._critic_updates == 10:
+        if self._enable_nvtx and self._agent_updates == 10:
             th.cuda.cudart().cudaProfilerStart()
 
     def _nvtx_stop(self):
-        if self._enable_nvtx and self._critic_updates > 13:
+        if self._enable_nvtx and self._agent_updates > 13:
             th.cuda.cudart().cudaProfilerStop()  
 
     def _mark_nvtx(self, name : str):
@@ -681,7 +681,6 @@ class SAC(RLAgent):
         # ggLog.info(f"critic update...")
         
         # self._nvtx_start_range("_update_critic")
-        th.compiler.cudagraph_mark_step_begin()
         self._q_optimizer.zero_grad(set_to_none=True)
         # self._nvtx_start_range("critic forward")
         # ggLog.info(f"compute_critic_loss...")
@@ -764,6 +763,21 @@ class SAC(RLAgent):
         
         return loss, actor_loss, alpha_loss, alpha_stats
     
+    @th.compile(mode=compile_mode, fullgraph=True)
+    def _compute_all_losses(self, transitions):
+        q_loss = self._compute_critic_loss(transitions)
+        actor_loss = self._compute_actor_loss(transitions)
+        # self._start_range_nvtx("actor opt")
+        
+        # self._start_range_nvtx("_update_alpha")
+        if self._hp.auto_entropy_temperature:
+            alpha_loss, alpha_stats = self._compute_alpha_loss(transitions)
+            loss = actor_loss + alpha_loss + q_loss
+        else:
+            alpha_loss, alpha_stats = None, None
+            loss = actor_loss + q_loss
+        return loss, q_loss, actor_loss, alpha_loss, alpha_stats
+    
     @th.compile(mode=compile_mode, fullgraph=False)
     def _actor_and_alpha_opt_step(self):
         simplified_clip_grad_norm_(list(self._actor.parameters()), self._hp.max_grad_norm)
@@ -773,7 +787,6 @@ class SAC(RLAgent):
     def _update_actor_and_alpha(self, transitions : TransitionBatch):
         # We aggregate actor and alpha to join the two compilation regions and cuda graphs, so to reduce overhead
         # self._nvtx_start_range("_update_actor_and_alpha")
-        # self._q_optimizer.zero_grad(set_to_none=True) # IMPORTANT! Without this it will try to backward twice through the graph through the q_loss
         self._actor_and_alpha_optimizer.zero_grad(set_to_none=True)
         # self._nvtx_start_range("_compute_actor_and_alpha_loss")
         actor_alpha_loss, actor_loss, alpha_loss, alpha_stats = self._compute_actor_and_alpha_loss(transitions)
@@ -800,6 +813,40 @@ class SAC(RLAgent):
         self._actor_updates += 1
         # self._nvtx_end_range()
 
+    def _update_all(self, transitions):
+        # self._nvtx_start_range("_update_all")
+        self._actor_and_alpha_optimizer.zero_grad(set_to_none=True)
+        self._q_optimizer.zero_grad(set_to_none=True)
+
+        # self._nvtx_start_range("_compute_all_losses")
+        loss, q_loss, actor_loss, alpha_loss, alpha_stats = self._compute_all_losses(transitions)
+        # self._nvtx_end_range()
+        # self._nvtx_start_range("all backward")
+        loss.backward()
+        # self._nvtx_end_range()
+
+        # self._nvtx_start_range("all opt")
+        with th.no_grad():
+            #TODO: merge the optimizers?
+            self._critic_opt_step()
+            self._actor_and_alpha_opt_step()
+        # self._nvtx_end_range()
+
+        self._alpha.fill_(self._log_alpha.exp().detach().view(tuple())) # keep the same address to make cudagraphs happy
+        if alpha_loss is not None:
+            self._last_alpha_loss = alpha_loss.detach().clone()
+        self._last_q_loss = q_loss.detach().clone()
+        self._last_actor_loss = actor_loss.detach().clone()
+        if alpha_stats is not None:
+            self._stats.update({k:v for k,v in zip(["avg_log_prob",
+                                                    "min_log_prob",
+                                                    "max_log_prob",
+                                                    "q95_log_prob",
+                                                    "q05_log_prob"],alpha_stats)})            
+        self._critic_updates += 1
+        self._alpha_updates += 1
+        self._actor_updates += 1
+        # self._nvtx_end_range()
         
     @staticmethod
     def _target_update(param, target_param, tau):
@@ -823,8 +870,37 @@ class SAC(RLAgent):
             if self._actor_feature_extractor_optimizer is not None:
                 self._actor_feature_extractor_optimizer.step()
 
+    # def _update(self, transitions : TransitionBatch):
+    #     th.compiler.cudagraph_mark_step_begin()
+    #     # self._nvtx_startup()
+    #     # self._nvtx_start_range(f"iteration{self._critic_updates}")
+    #     if self._enable_feature_extractor_training:
+    #         if self._critic_feature_extractor_optimizer is not None:
+    #             self._critic_feature_extractor_optimizer.zero_grad(set_to_none=True)
+    #         if self._actor_feature_extractor_optimizer is not None:
+    #             self._actor_feature_extractor_optimizer.zero_grad(set_to_none=True)
+    #     update_actor_and_alpha = self._critic_updates % self._hp.policy_update_freq == 0
+    #     if update_actor_and_alpha:
+    #         self._update_all(transitions)
+    #         for _ in range(self._hp.policy_update_freq-1): # do the remaining updates
+    #             self._update_actor_and_alpha(transitions=transitions)
+    #     else:
+    #         self._update_critic(transitions)
+
+    #     if self._critic_updates % self._hp.targets_update_freq == 0:
+    #         # self._nvtx_start_range("_update_target_nets")
+    #         self._update_target_nets()
+    #         # self._nvtx_end_range()
+    #     if self._enable_feature_extractor_training:
+    #         self._update_feature_extractor()
+    #     self._agent_updates += 1
+    #     # self._nvtx_end_range()
+    #     # self._nvtx_stop()
+    #     return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
+
     def _update(self, transitions : TransitionBatch):
         # ggLog.info(f" ----------- SAC update {self._agent_updates}...")
+        th.compiler.cudagraph_mark_step_begin()
         # sync_dbg_mode = th.cuda.get_sync_debug_mode()
         # th.cuda.set_sync_debug_mode("error")
         # Mark the beginning of cuda graphs to help the compile.Docs say "CUDA Graphs will free tensors of
@@ -832,10 +908,6 @@ class SAC(RLAgent):
         # there is not a pending backward that has not been called.". Not sure what it means, but marking these
         # should be helpful
         # th.compiler.cudagraph_mark_step_begin()
-    #     self._update_optimized(transitions)
-
-    # @th.compile(mode=compile_mode, fullgraph=True)
-    # def _update_optimized(self, transitions : TransitionBatch):
         # self._nvtx_startup()
         # self._nvtx_start_range(f"iteration{self._critic_updates}")
 
@@ -848,7 +920,7 @@ class SAC(RLAgent):
         self._update_critic(transitions = transitions)
         if self._critic_updates % self._hp.policy_update_freq == 0:
             for _ in range(self._hp.policy_update_freq):
-                self._update_actor_and_alpha(transitions=transitions)
+                self._update_actor_and_alpha(transitions=transitions) # TODO: is it good to update twice with the same batch
         if self._critic_updates % self._hp.targets_update_freq == 0:
             # self._nvtx_start_range("_update_target_nets")
             self._update_target_nets()
