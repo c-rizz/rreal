@@ -296,7 +296,7 @@ class SAC(RLAgent):
                  action_min : Union[float, List[float]] = -1.0,
                  actor_feature_extractor : FeatureExtractor | None = None,
                  critic_feature_extractor : FeatureExtractor | None = None,
-                 merge_actor_and_critic_updates : bool = False
+                 merge_actor_and_critic_updates : bool = True
                  ):
         super().__init__()
         self._init_args = get_func_input_args(exclude=[ "self",
@@ -712,27 +712,27 @@ class SAC(RLAgent):
         # self._mark_nvtx("_compute_actor_loss")
         actor_obss = self.get_actor_subobservation(transitions.observations)
         # self._mark_nvtx("actor_enc")
-        actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss).clone()
+        actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
         # self._mark_nvtx("get ref")
         reference_action : th.Tensor = actor_obss[self._hp.action_reference_obs_key] if self._hp.action_reference_obs_key is not None else None
         # self._mark_nvtx("sample")
         act, act_log_prob, _, _ = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
-        act, act_log_prob = act.clone(), act_log_prob.clone() # prevent issues with cuda graphs
+        # act, act_log_prob = act.clone(), act_log_prob.clone() # prevent issues with cuda graphs
         # with th.no_grad():
         # self._mark_nvtx("crit_enc")
         if self._share_actor_critic_feature_extractor:
             critic_enc_obss = actor_enc_obss
         else:
             critic_obss = self.get_critic_subobservation(transitions.observations)
-            critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss).clone()
+            critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
         # self._mark_nvtx("get_q")
-        if freeze_critic: # Needed if we are updating actor and critic together, if done separately we just ignore these grads at optimizer time
-            for param in self._q_net.parameters():
-                param.requires_grad_(False)
-        min_q_pi = self._q_net.get_min_qval(critic_enc_obss, act) # cannot reuse those from _update_value_func, the value function has changed
-        if freeze_critic:
-            for param in self._q_net.parameters():
-                param.requires_grad_(True)
+        if freeze_critic: 
+            # Needed if we are updating actor and critic together, if done separately we just ignore these grads at optimizer time
+            # In torch compile we cannot change requires grad, so we detach the weights, using this functional thing
+            min_q_pi = th.amin(th.func.functional_call(self._q_net, {k:t.detach() for k,t in dict(self._q_net.named_parameters()).items()}, (critic_enc_obss, act)), dim = 1) 
+        else:    
+            min_q_pi = self._q_net.get_min_qval(critic_enc_obss, act)
+        
         # ggLog.info(f"min_q_pi.size() = {min_q_pi.size()}")
         # ggLog.info(f"act_log_prob.size() = {act_log_prob.size()}")
         # self._mark_nvtx("ret_q")
