@@ -674,9 +674,10 @@ class SAC(RLAgent):
         return F.mse_loss(q_values, td_q_values)
 
     @th.compile(mode=compile_mode, fullgraph=False)
-    def _critic_opt_step(self):
+    def _critic_opt_step(self, q_loss : th.Tensor):
         simplified_clip_grad_norm_(list(self._q_net.parameters()), self._hp.max_grad_norm)
         self._q_optimizer.step()
+        self._last_q_loss.copy_(q_loss.detach())
 
     def _update_critic(self, transitions : TransitionBatch):
         # ggLog.info(f"critic update...")
@@ -693,10 +694,9 @@ class SAC(RLAgent):
         # self._nvtx_end_range()
         # self._nvtx_start_range("critic opt")
         with th.no_grad():
-            self._critic_opt_step()
+            self._critic_opt_step(q_loss)
         # self._nvtx_end_range()
         self._critic_updates += 1
-        self._last_q_loss = q_loss.detach()
         # self._nvtx_end_range()
         # ggLog.info(f"critic update done")
 
@@ -780,12 +780,16 @@ class SAC(RLAgent):
         return loss, q_loss, actor_loss, alpha_loss, alpha_stats
     
     @th.compile(mode=compile_mode, fullgraph=False)
-    def _actor_and_alpha_opt_step(self):
+    def _actor_and_alpha_opt_step(self, actor_loss : th.Tensor, alpha_loss : th.Tensor | None):
         simplified_clip_grad_norm_(list(self._actor.parameters()), self._hp.max_grad_norm)
         simplified_clip_grad_norm_([self._log_alpha], self._hp.max_grad_norm)
         self._actor_and_alpha_optimizer.step()
+        self._alpha.fill_(self._log_alpha.exp().detach().view(tuple())) # keep the same address to make cudagraphs happy
+        self._last_actor_loss.copy_(actor_loss.detach())
+        if alpha_loss is not None:
+            self._last_alpha_loss.copy_(alpha_loss.detach())
 
-    def _update_actor_and_alpha(self, transitions : TransitionBatch):
+    def _update_actor_and_alpha(self, transitions : TransitionBatch) -> tuple[th.Tensor, th.Tensor | None]:
         # We aggregate actor and alpha to join the two compilation regions and cuda graphs, so to reduce overhead
         # self._nvtx_start_range("_update_actor_and_alpha")
         self._actor_and_alpha_optimizer.zero_grad(set_to_none=True)
@@ -797,13 +801,9 @@ class SAC(RLAgent):
         # self._nvtx_end_range()
         # self._nvtx_start_range("actor_alpha opt")
         with th.no_grad():
-            self._actor_and_alpha_opt_step()
+            self._actor_and_alpha_opt_step(actor_loss, alpha_loss)
         # self._nvtx_end_range()
 
-        self._alpha.fill_(self._log_alpha.exp().detach().view(tuple())) # keep the same address to make cudagraphs happy
-        if alpha_loss is not None:
-            self._last_alpha_loss = alpha_loss.detach().clone()
-        self._last_actor_loss = actor_loss.detach().clone()
         if alpha_stats is not None:
             self._stats.update({k:v for k,v in zip(["avg_log_prob",
                                                     "min_log_prob",
@@ -816,6 +816,7 @@ class SAC(RLAgent):
 
     def _update_all(self, transitions):
         # self._nvtx_start_range("_update_all")
+        raise NotImplementedError("This does not work for some reason")
         self._actor_and_alpha_optimizer.zero_grad(set_to_none=True)
         self._q_optimizer.zero_grad(set_to_none=True)
 
@@ -829,15 +830,10 @@ class SAC(RLAgent):
         # self._nvtx_start_range("all opt")
         with th.no_grad():
             #TODO: merge the optimizers?
-            self._critic_opt_step()
-            self._actor_and_alpha_opt_step()
+            self._critic_opt_step(q_loss)
+            self._actor_and_alpha_opt_step(actor_loss, alpha_loss)
         # self._nvtx_end_range()
 
-        self._alpha.fill_(self._log_alpha.exp().detach().view(tuple())) # keep the same address to make cudagraphs happy
-        if alpha_loss is not None:
-            self._last_alpha_loss = alpha_loss.detach().clone()
-        self._last_q_loss = q_loss.detach().clone()
-        self._last_actor_loss = actor_loss.detach().clone()
         if alpha_stats is not None:
             self._stats.update({k:v for k,v in zip(["avg_log_prob",
                                                     "min_log_prob",
