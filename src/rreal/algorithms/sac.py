@@ -1,5 +1,6 @@
 
 from __future__ import annotations
+from gc import freeze
 
 from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch, BaseBuffer, BaseValidatingBuffer
 from adarl.utils.callbacks import TrainingCallback, CallbackList
@@ -702,7 +703,7 @@ class SAC(RLAgent):
 
 
     # @th.compile(mode=compile_mode, fullgraph=True)
-    def _compute_actor_loss(self, transitions : TransitionBatch):
+    def _compute_actor_loss(self, transitions : TransitionBatch, freeze_critic : bool = False):
         # self._mark_nvtx("_compute_actor_loss")
         actor_obss = self.get_actor_subobservation(transitions.observations)
         # self._mark_nvtx("actor_enc")
@@ -720,7 +721,11 @@ class SAC(RLAgent):
             critic_obss = self.get_critic_subobservation(transitions.observations)
             critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss).clone()
         # self._mark_nvtx("get_q")
+        if freeze_critic: # Needed if we are updating actor and critic together, if done separately we just ignore these grads at optimizer time
+            self._q_net.requires_grad_(False)
         min_q_pi = self._q_net.get_min_qval(critic_enc_obss, act) # cannot reuse those from _update_value_func, the value function has changed
+        if freeze_critic:
+            self._q_net.requires_grad_(True)
         # ggLog.info(f"min_q_pi.size() = {min_q_pi.size()}")
         # ggLog.info(f"act_log_prob.size() = {act_log_prob.size()}")
         # self._mark_nvtx("ret_q")
@@ -767,7 +772,7 @@ class SAC(RLAgent):
     @th.compile(mode=compile_mode, fullgraph=True)
     def _compute_all_losses(self, transitions):
         q_loss = self._compute_critic_loss(transitions)
-        actor_loss = self._compute_actor_loss(transitions)
+        actor_loss = self._compute_actor_loss(transitions, freeze_critic=True)
         # self._start_range_nvtx("actor opt")
         
         # self._start_range_nvtx("_update_alpha")
@@ -816,7 +821,7 @@ class SAC(RLAgent):
 
     def _update_all(self, transitions):
         # self._nvtx_start_range("_update_all")
-        raise NotImplementedError("This does not work for some reason")
+        # raise NotImplementedError("This does not work for some reason")
         self._actor_and_alpha_optimizer.zero_grad(set_to_none=True)
         self._q_optimizer.zero_grad(set_to_none=True)
 
@@ -867,69 +872,69 @@ class SAC(RLAgent):
             if self._actor_feature_extractor_optimizer is not None:
                 self._actor_feature_extractor_optimizer.step()
 
-    # def _update(self, transitions : TransitionBatch):
-    #     th.compiler.cudagraph_mark_step_begin()
-    #     # self._nvtx_startup()
-    #     # self._nvtx_start_range(f"iteration{self._critic_updates}")
-    #     if self._enable_feature_extractor_training:
-    #         if self._critic_feature_extractor_optimizer is not None:
-    #             self._critic_feature_extractor_optimizer.zero_grad(set_to_none=True)
-    #         if self._actor_feature_extractor_optimizer is not None:
-    #             self._actor_feature_extractor_optimizer.zero_grad(set_to_none=True)
-    #     update_actor_and_alpha = self._critic_updates % self._hp.policy_update_freq == 0
-    #     if update_actor_and_alpha:
-    #         self._update_all(transitions)
-    #         for _ in range(self._hp.policy_update_freq-1): # do the remaining updates
-    #             self._update_actor_and_alpha(transitions=transitions)
-    #     else:
-    #         self._update_critic(transitions)
-
-    #     if self._critic_updates % self._hp.targets_update_freq == 0:
-    #         # self._nvtx_start_range("_update_target_nets")
-    #         self._update_target_nets()
-    #         # self._nvtx_end_range()
-    #     if self._enable_feature_extractor_training:
-    #         self._update_feature_extractor()
-    #     self._agent_updates += 1
-    #     # self._nvtx_end_range()
-    #     # self._nvtx_stop()
-    #     return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
-
     def _update(self, transitions : TransitionBatch):
-        # ggLog.info(f" ----------- SAC update {self._agent_updates}...")
         th.compiler.cudagraph_mark_step_begin()
-        # sync_dbg_mode = th.cuda.get_sync_debug_mode()
-        # th.cuda.set_sync_debug_mode("error")
-        # Mark the beginning of cuda graphs to help the compile.Docs say "CUDA Graphs will free tensors of
-        #  a prior iteration. A new iteration is started on each invocation of torch.compile, so long as 
-        # there is not a pending backward that has not been called.". Not sure what it means, but marking these
-        # should be helpful
-        # th.compiler.cudagraph_mark_step_begin()
         # self._nvtx_startup()
         # self._nvtx_start_range(f"iteration{self._critic_updates}")
-
         if self._enable_feature_extractor_training:
             if self._critic_feature_extractor_optimizer is not None:
                 self._critic_feature_extractor_optimizer.zero_grad(set_to_none=True)
             if self._actor_feature_extractor_optimizer is not None:
                 self._actor_feature_extractor_optimizer.zero_grad(set_to_none=True)
+        update_actor_and_alpha = self._critic_updates % self._hp.policy_update_freq == 0
+        if update_actor_and_alpha:
+            self._update_all(transitions)
+            for _ in range(self._hp.policy_update_freq-1): # do the remaining updates
+                self._update_actor_and_alpha(transitions=transitions)
+        else:
+            self._update_critic(transitions)
 
-        self._update_critic(transitions = transitions)
-        if self._critic_updates % self._hp.policy_update_freq == 0:
-            for _ in range(self._hp.policy_update_freq):
-                self._update_actor_and_alpha(transitions=transitions) # TODO: is it good to update twice with the same batch
         if self._critic_updates % self._hp.targets_update_freq == 0:
             # self._nvtx_start_range("_update_target_nets")
             self._update_target_nets()
             # self._nvtx_end_range()
         if self._enable_feature_extractor_training:
             self._update_feature_extractor()
-        # self._nvtx_end_range()
         self._agent_updates += 1
-        # self._nvtx_stop()      
-        # th.cuda.set_sync_debug_mode(sync_dbg_mode)
-        # ggLog.info(f"sac update done")
+        # self._nvtx_end_range()
+        # self._nvtx_stop()
         return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
+
+    # def _update(self, transitions : TransitionBatch):
+    #     # ggLog.info(f" ----------- SAC update {self._agent_updates}...")
+    #     th.compiler.cudagraph_mark_step_begin()
+    #     # sync_dbg_mode = th.cuda.get_sync_debug_mode()
+    #     # th.cuda.set_sync_debug_mode("error")
+    #     # Mark the beginning of cuda graphs to help the compile.Docs say "CUDA Graphs will free tensors of
+    #     #  a prior iteration. A new iteration is started on each invocation of torch.compile, so long as 
+    #     # there is not a pending backward that has not been called.". Not sure what it means, but marking these
+    #     # should be helpful
+    #     # th.compiler.cudagraph_mark_step_begin()
+    #     # self._nvtx_startup()
+    #     # self._nvtx_start_range(f"iteration{self._critic_updates}")
+
+    #     if self._enable_feature_extractor_training:
+    #         if self._critic_feature_extractor_optimizer is not None:
+    #             self._critic_feature_extractor_optimizer.zero_grad(set_to_none=True)
+    #         if self._actor_feature_extractor_optimizer is not None:
+    #             self._actor_feature_extractor_optimizer.zero_grad(set_to_none=True)
+
+    #     self._update_critic(transitions = transitions)
+    #     if self._critic_updates % self._hp.policy_update_freq == 0:
+    #         for _ in range(self._hp.policy_update_freq):
+    #             self._update_actor_and_alpha(transitions=transitions) # TODO: is it good to update twice with the same batch
+    #     if self._critic_updates % self._hp.targets_update_freq == 0:
+    #         # self._nvtx_start_range("_update_target_nets")
+    #         self._update_target_nets()
+    #         # self._nvtx_end_range()
+    #     if self._enable_feature_extractor_training:
+    #         self._update_feature_extractor()
+    #     # self._nvtx_end_range()
+    #     self._agent_updates += 1
+    #     # self._nvtx_stop()      
+    #     # th.cuda.set_sync_debug_mode(sync_dbg_mode)
+    #     # ggLog.info(f"sac update done")
+    #     return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
     
     def validate(self, buffer : BaseValidatingBuffer, batch_size : int):
         with th.no_grad():
