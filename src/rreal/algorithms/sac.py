@@ -56,7 +56,7 @@ class SAC_init_hparams:
     """The learning rate for the Q network"""
     policy_lr : float
     """The learning rate for the policy network"""
-    device : str | th.device
+    model_th_device : str | th.device
     """The torch device where the model will be located"""
     gamma : float
     """The discount factor for the Q-learning algorithm"""
@@ -95,7 +95,6 @@ class SAC_init_hparams:
       by default it is None (no reference, the mean is produced from the network directly)"""
     max_grad_norm : float = 0.5
     feature_extractor_lr : float = 0.0
-    torch_device : Union[str,th.device] = "cuda"
     policy_update_freq : int = 2
     target_update_freq : int = 1
     auto_entropy_temperature : bool =True
@@ -339,7 +338,7 @@ class SAC(RLAgent):
                                    targets_update_freq=init_hparams.target_update_freq,
                                    q_network_arch = init_hparams.q_network_arch,
                                    policy_arch = init_hparams.policy_arch,
-                                   torch_device = th.device(init_hparams.torch_device),
+                                   torch_device = th.device(init_hparams.model_th_device),
                                    target_entropy_factor = init_hparams.target_entropy_factor,
                                    observation_space = observation_space,
                                    feature_extractor_lr = init_hparams.feature_extractor_lr,
@@ -409,7 +408,7 @@ class SAC(RLAgent):
             init_hparams.target_entropy_factor_annealing = ("constant", [self._base_target_entropy_factor])
         self._target_entropy_factor_annealing : AnnealingFunction = annealings[init_hparams.target_entropy_factor_annealing[0]](*init_hparams.target_entropy_factor_annealing[1])
         if self._hp.auto_entropy_temperature:
-            self._log_alpha = th.zeros(1, requires_grad=True, device=init_hparams.torch_device)
+            self._log_alpha = th.zeros(1, requires_grad=True, device=init_hparams.model_th_device)
             self._alpha = self._log_alpha.exp().detach()
             # self._alpha_optimizer = optim.Adam([self._log_alpha], lr=self._hp.q_lr)
         else:
@@ -473,7 +472,7 @@ class SAC(RLAgent):
             th.cuda.cudart().cudaProfilerStart()
 
     def _nvtx_stop(self):
-        if self._enable_nvtx and self._agent_updates > 13:
+        if self._enable_nvtx and self._agent_updates > 100:
             th.cuda.cudart().cudaProfilerStop()  
 
     def _mark_nvtx(self, name : str):
@@ -960,12 +959,16 @@ class SAC(RLAgent):
         q_act_alpha_losses = [None]*iterations
         target_entropy_cpu = self._target_entropy_factor_annealing(global_step, iterations)*self._hp.action_size
         self._target_entropy.copy_(th.as_tensor(target_entropy_cpu).to(device=self.device, dtype=th.float32, non_blocking=self.device.type=="cuda"))
+        t0 = time.monotonic()
         for i in range(iterations):
+            # self._nvtx_start_range("sample")
             transitions = buffer.sample(self._hp.batch_size)
-            transitions = map_tensor_tree(transitions, lambda t : t.to(device=self.device, non_blocking=self.device.type=="cuda"))
+            # self._nvtx_end_range()
+            # transitions = map_tensor_tree(transitions, lambda t : t.to(device=self.device, non_blocking=self.device.type=="cuda"))
             # th.cuda.synchronize(self.device)
             q_act_alpha_losses[i] = self._update(transitions = transitions)
             self._tot_grad_steps_count += 1
+        t1 = time.monotonic()
         # q_loss, actor_loss, alpha_loss = th.as_tensor(q_act_alpha_losses).mean(dim = 0).cpu().numpy()
         q_loss, actor_loss, alpha_loss = q_act_alpha_losses[-1]
         adarl.utils.session.default_session.run_info["train_iterations"].value = self._tot_grad_steps_count
@@ -974,7 +977,8 @@ class SAC(RLAgent):
                             "actor_loss":actor_loss,
                             "alpha_loss":alpha_loss,
                             "alpha":self._alpha.clone(),
-                            "target_entropy":target_entropy_cpu})
+                            "target_entropy":target_entropy_cpu,
+                            "iterations_per_second":iterations/(t1-t0)})
         return q_loss, actor_loss, alpha_loss
 
     @override
@@ -1100,7 +1104,8 @@ def train_off_policy(collector : ExperienceCollector,
         # ggLog.info(f"global_steps = {global_step}")
         if global_step - last_log_steps > log_freq_vstep*num_envs:
             last_log_steps = global_step
-            log_async(f"SAC: expsteps={global_step} q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}",
+            ips = model.get_stats().get('iterations_per_second',float("nan"))
+            log_async(f"SAC: expsteps={global_step}"+" q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}"+f" ips={ips:.2f}",
                       tensors=dict(q_loss=q_loss,actor_loss=actor_loss,alpha_loss=alpha_loss))
             # ggLog.info(f"SAC: expsteps={global_step} q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}")
             ggLog.info(f"OFFTRAIN: expstps:{global_step}"

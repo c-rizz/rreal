@@ -283,10 +283,10 @@ def sac_train(  seed : int,
     torch.backends.cudnn.deterministic = True
 
     # if hyperparams.device == "cuda": hyperparams.device = "cuda:0"
-    if isinstance(hyperparams.device, str):
-        device = th.device(hyperparams.device)
+    if isinstance(hyperparams.model_th_device, str):
+        device = th.device(hyperparams.model_th_device)
     else:
-        device = hyperparams.device
+        device = hyperparams.model_th_device
     if isinstance(buffer_device, str):
         buffer_device = th.device(buffer_device)
     if device.index is None:
@@ -324,7 +324,7 @@ def sac_train(  seed : int,
         buffer_size=hyperparams.buffer_size,
         observation_space=observation_space,
         action_space=action_space,
-        device=device,
+        out_device=device,
         storage_torch_device=buffer_device,
         handle_timeout_termination=True,
         n_envs=hyperparams.parallel_envs,
