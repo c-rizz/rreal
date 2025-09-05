@@ -76,8 +76,11 @@ def split_params_for_weight_decay(model : th.nn.Module,
             no_decay.append(param)
         else:
             decay.append(param)
-    return [{'params': decay,       'weight_decay': weight_decay} | extra_kwargs,
-            {'params': no_decay,    'weight_decay': 0.0} | extra_kwargs]
+    decay_group = {'params': decay,       'weight_decay': weight_decay}
+    decay_group.update(extra_kwargs)
+    no_decay_group = {'params': no_decay, 'weight_decay': 0.0}
+    no_decay_group.update(extra_kwargs)
+    return [decay_group, no_decay_group]
 
 
 def simplified_clip_grad_norm_(
