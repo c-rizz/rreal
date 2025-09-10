@@ -391,7 +391,7 @@ class SAC(RLAgent):
                                         torch_device=self._hp.torch_device,
                                         nets_num=2)
         self._q_net_target.load_state_dict(self._q_net.state_dict())
-        self._q_optimizer = optim.Adam(split_params_for_weight_decay(self._q_net, self._hp.critic_weight_decay), lr=self._hp.q_lr)
+        self._q_optimizer = optim.AdamW(split_params_for_weight_decay(self._q_net, self._hp.critic_weight_decay), lr=self._hp.q_lr)
         self._actor = Actor(policy_arch=init_hparams.policy_arch,
                             observation_size=self._actor_feature_extractor.encoding_size(),
                             action_size = self._hp.action_size,
@@ -415,14 +415,14 @@ class SAC(RLAgent):
             self._alpha = th.as_tensor(constant_entropy_temperature).to(device=self._hp.torch_device, non_blocking=self._hp.torch_device.type=="cuda")
             self._log_alpha = self._alpha.log().detach()
 
-        self._actor_and_alpha_optimizer = optim.Adam([{ "params":[self._log_alpha], "lr":self._hp.q_lr}]+
+        self._actor_and_alpha_optimizer = optim.AdamW([{ "params":[self._log_alpha], "lr":self._hp.q_lr}]+
                                                       split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay,
                                                                                     extra_kwargs={"lr":self._hp.policy_lr}))
 
         if self._hp.feature_extractor_lr > 0:
             critic_extractor_params = list(self._critic_feature_extractor.parameters())
             if len(critic_extractor_params) > 0:
-                self._critic_feature_extractor_optimizer = optim.Adam(critic_extractor_params, lr=self._hp.feature_extractor_lr)
+                self._critic_feature_extractor_optimizer = optim.AdamW(critic_extractor_params, lr=self._hp.feature_extractor_lr)
             else:
                 self._critic_feature_extractor_optimizer = None
 
