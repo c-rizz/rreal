@@ -44,6 +44,19 @@ th._dynamo.config.compiled_autograd = True
 # calling a compiled function, but its deeeeeeeep
 compile_mode="max-autotune" # reduce overhead doesn't seem to reduce overhead more than max-autotune
 
+def compare_dicts(d1 : dict, d2 : dict) -> tuple[bool, str]:
+    all_keys = set(d1.keys()).union(set(d2.keys()))
+    diffs = ""
+    equal = True
+    for k in all_keys:
+        e1 = d1.get(k,None)
+        e2 = d2.get(k,None)
+        d = th.as_tensor(e1 != e2)
+        if th.any(d):
+            equal = False
+            diffs += f"{k}: {e1} != {e2}\n"
+    return equal, diffs
+
 def nop_func(arg1):
     pass
 @dataclass
@@ -303,7 +316,7 @@ class SAC(RLAgent):
                                                         "__class__",
                                                         "critic_feature_extractor",
                                                         "actor_feature_extractor"])
-        ggLog.info(f"self._init_args = \n"+pprint.pformat(self._init_args))
+        # ggLog.info(f"self._init_args = \n"+pprint.pformat(self._init_args))
         self._init_args = copy.deepcopy(self._init_args)
         init_hparams = copy.deepcopy(init_hparams)
         if init_hparams.target_entropy_factor is None:
@@ -380,12 +393,15 @@ class SAC(RLAgent):
                                                                     device=self._hp.torch_device)
             else:
                 self._actor_feature_extractor = actor_feature_extractor
-        self._q_net = QNetwork( observation_size=self._critic_feature_extractor.encoding_size(),
+        critic_input_size = self._critic_feature_extractor.encoding_size()
+        actor_input_size = self._actor_feature_extractor.encoding_size()
+        # ggLog.info(f"SAC: inner critic_input_size = {critic_input_size}, inner actor_input_size = {actor_input_size}")
+        self._q_net = QNetwork( observation_size=critic_input_size,
                                 action_size=self._hp.action_size,
                                 q_network_arch=init_hparams.q_network_arch,
                                 torch_device=self._hp.torch_device,
                                 nets_num=2)
-        self._q_net_target = QNetwork(  observation_size=self._critic_feature_extractor.encoding_size(),
+        self._q_net_target = QNetwork(  observation_size=critic_input_size,
                                         action_size=self._hp.action_size,
                                         q_network_arch=init_hparams.q_network_arch,
                                         torch_device=self._hp.torch_device,
@@ -393,7 +409,7 @@ class SAC(RLAgent):
         self._q_net_target.load_state_dict(self._q_net.state_dict())
         self._q_optimizer = optim.Adam(split_params_for_weight_decay(self._q_net, self._hp.critic_weight_decay), lr=self._hp.q_lr)
         self._actor = Actor(policy_arch=init_hparams.policy_arch,
-                            observation_size=self._actor_feature_extractor.encoding_size(),
+                            observation_size=actor_input_size,
                             action_size = self._hp.action_size,
                             action_min = self._hp.action_min,
                             action_max = self._hp.action_max,
@@ -554,26 +570,15 @@ class SAC(RLAgent):
                 extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
         if "class_name" in extra and extra["class_name"] != self.__class__.__name__:
             raise RuntimeError(f"File was not saved by this class")
-        flat_self = flatten_tensor_tree(self._init_args)
-        flat_load = flatten_tensor_tree(extra["init_args"])
-        equal_fields = map2_tensor_tree(flat_self, flat_load, lambda a,b: th.all(a==b) if isinstance(a,th.Tensor) else a==b)
-        if not all(equal_fields):
+        equal, reasons = compare_dicts(self._init_args, extra["init_args"])
+        if not equal:
             ggLog.warn("init args of loaded model differ from those of self.")
             load_yaml_args = yaml.dump(extra['init_args'])
             original_yaml_args = yaml.dump(self._init_args)
             ggLog.warn(f"self._init_args = \n{original_yaml_args}")
             ggLog.warn(f"load init_args  = \n{load_yaml_args}")
-            differing_fields = [k for k,v in equal_fields.items() if v==False]
-            ggLog.warn(f"Differing fields:")
-            for k in differing_fields:
-                ggLog.warn(f"k:\n"
-                           f"    self={flat_self[k]}\n"
-                           f"    load={flat_load[k]}")
-            # diffs = ndiff(   original_yaml_args.splitlines(keepends=True),
-            #                 load_yaml_args.splitlines(keepends=True))
-            # diffs = [l for l in diffs if len(l)>0 and l[0] != ' ']
-            # ggLog.warn(f"Args comparison with loaded model:\n{''.join(diffs)}")
-            # raise RuntimeError("Unmatched init_args")
+            ggLog.warn(f"Differing fields: \n{reasons}")
+
         self._check_feature_extractor(self._critic_feature_extractor,
                                       extra["critic_feature_extractor_class_name"],
                                       extra["critic_feature_extractor_init_args"])
@@ -600,7 +605,7 @@ class SAC(RLAgent):
             else:
                 actor_feature_extractor_class = get_feature_extractor(extra["actor_feature_extractor_class_name"])
                 sac_init_args["actor_feature_extractor"] = actor_feature_extractor_class.load(archive, name="actor_feature_extractor")
-        ggLog.info(f"load(): building model with args: \n"+pprint.pformat(sac_init_args))
+        ggLog.info(f"SAC.load(): building model with args: \n"+pprint.pformat(sac_init_args))
         model = SAC(**sac_init_args)
         # At this point we should have a model that is initialized exactly like the one that was saved
         # So we can load into it the state from the checkpoint

@@ -25,7 +25,7 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     weight_init_multiplier = 1.0,
                     layer_init_func : Callable[[th.nn.Module],None] | None = None,
                     last_layer_init_func : Callable[[th.nn.Module],None] | None = None,
-                    use_jit_fork : bool = True):
+                    use_jit_fork : bool = True) -> Parallel:
         
     if arch == "identity":
         if input_size != output_size:
@@ -62,7 +62,7 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
         if weight_init_multiplier != 1:
             net.apply(lambda m: scale_layer_weights(m,weight_init_multiplier))
     if use_torchscript:
-        net = th.compile(net)
+        net : Parallel = th.compile(net)
     return net
 
 def split_params_for_weight_decay(model : th.nn.Module,
