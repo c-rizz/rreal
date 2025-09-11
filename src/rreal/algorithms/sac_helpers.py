@@ -174,7 +174,8 @@ def build_eval_callbacks(eval_configurations : list[dict],
                                     n_eval_episodes=eval_conf["eval_eps"],
                                     eval_freq_ep=eval_conf["eval_freq_ep"],
                                     deterministic=eval_conf["deterministic"],
-                                    eval_name=eval_conf["name"]))
+                                    eval_name=eval_conf["name"],
+                                    output_folder=run_folder+f"/eval_"+eval_conf["name"]+"/results"))
         ggLog.info(f"Built eval config '{eval_conf['name']}'")
     return callbacks
 
