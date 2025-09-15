@@ -84,6 +84,8 @@ class SAC_init_hparams:
     """The factor used to compute the target entropy as target_entropy_factor*action_size, by default it is -1.0"""
     actor_log_std_init : float
     """The initial value of the log standard deviation of the actor's policy, by default it is -3.0"""
+    actor_mean_bounds_ratio : float
+    """The ratio of the action bounds that the actor's mean can reach, by default it is 1.0 (the mean can reach the action bounds). Reducing this can prevent boundary effects that reduce noise on the edges, biasing the actor toward them."""
     actor_observation_filter : list[str] | None = None
     """The list of observation keys to filter in the actor's policy, by default it is None (no filtering, all observation keys are used)"""
     critic_observation_filter : list[str] | None = None
@@ -187,13 +189,15 @@ class Actor(nn.Module):
                         init_noise = 0.001,
                         torch_device : Union[str,th.device] = "cuda",
                         action_mean_init = 0.0,
-                        use_weightnorm : bool = True):
+                        use_weightnorm : bool = True,
+                        mean_bounds_ratio : float | None = None):
         super().__init__()
         self._log_std_max = log_std_max
         self._log_std_min = log_std_min
         self.device = torch_device
         self._obs_size = observation_size
         self._use_weightnorm = use_weightnorm
+        self._mean_bounds_ratio = mean_bounds_ratio if mean_bounds_ratio is not None else 1.0
         # save action scaling factors as non-trained parameters
         if isinstance(action_max, int): action_max = float(action_max)
         if isinstance(action_min, int): action_min = float(action_min)
@@ -229,8 +233,15 @@ class Actor(nn.Module):
         hidden_batch = self.act_fc(observation_batch)
         # dbg_check_finite(hidden_batch)
         mean = self.act_fc_mean(hidden_batch)
+        # The mean squashing does not alter the action probability, so no change should be necessary on
+        # the logprob correction done in sample_action, I think
+        # Still, it helps to avoid boudary issues with the noise being reduced on the edges of the action space
+        mean_scales = self._mean_bounds_ratio*self.action_scale
+        mean_biases = self._mean_bounds_ratio*self.action_bias
+        mean = (th.tanh(mean)+1)/2 * (mean_scales) + mean_biases
+
         log_std = self.act_fc_logstd(hidden_batch)
-        log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min # clamp the log_std network output
+        log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min # squash the log_std network output
         return mean, log_std
 
     @th_compile_ext(mode=compile_mode, fullgraph=True, copy_outs=True)
@@ -285,6 +296,7 @@ class SAC(RLAgent):
         torch_device : th.device
         critic_weight_decay : float
         actor_weight_decay : float
+        actor_mean_bounds_ratio : float
 
     def __init__(self,
                  action_size : int,
@@ -352,7 +364,8 @@ class SAC(RLAgent):
                                    target_entropy_annealing = init_hparams.target_entropy_factor_annealing,
                                    action_reference_obs_key = init_hparams.action_reference_obs_key,
                                    critic_weight_decay = init_hparams.critic_weight_decay,
-                                   actor_weight_decay = init_hparams.actor_weight_decay)
+                                   actor_weight_decay = init_hparams.actor_weight_decay,
+                                   actor_mean_bounds_ratio = init_hparams.actor_mean_bounds_ratio)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = self._hp.torch_device
         self._critic_updates = 0
@@ -399,7 +412,8 @@ class SAC(RLAgent):
                             action_max = self._hp.action_max,
                             torch_device=self._hp.torch_device,
                             log_std_init=self._hp.log_std_init,
-                            action_mean_init=self._hp.action_init)
+                            action_mean_init=self._hp.action_init,
+                            mean_bounds_ratio=self._hp.actor_mean_bounds_ratio)
         # self._actor_optimizer = optim.Adam(split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay),
         #                                    lr=self._hp.policy_lr)
         self._base_target_entropy_factor = th.as_tensor(self._hp.target_entropy_factor, device=self._hp.torch_device, dtype=th.float32)
