@@ -107,7 +107,7 @@ class SAC_init_hparams:
 
 
 class AnnealingFunction(Protocol):
-        def __call__(self,  global_step : int, iterations : int) -> float:
+        def __call__(self,  global_exp_step : int, train_iterations : int) -> float:
             ...
 def get_constant_annealing(value : float) -> AnnealingFunction:
     """
@@ -122,13 +122,13 @@ def get_ramp_annealing(ramp_start_step : int, ramp_end_step : int, start_value :
     """
     Returns a function that ramps from start_value to end_value between ramp_start_step and ramp_end_step.
     """
-    def ramp_annealing(global_step : int, iterations : int) -> float:
-        if global_step < ramp_start_step:
+    def ramp_annealing(global_exp_step : int, train_iterations : int) -> float:
+        if train_iterations < ramp_start_step:
             return start_value
-        elif global_step > ramp_end_step:
+        elif train_iterations > ramp_end_step:
             return end_value
         else:
-            progress = (global_step - ramp_start_step) / (ramp_end_step - ramp_start_step)
+            progress = (train_iterations - ramp_start_step) / (ramp_end_step - ramp_start_step)
             return start_value + progress * (end_value - start_value)
     return ramp_annealing
 
@@ -238,7 +238,7 @@ class Actor(nn.Module):
         # Still, it helps to avoid boudary issues with the noise being reduced on the edges of the action space
         mean_scales = self._mean_bounds_ratio*self.action_scale
         mean_biases = self._mean_bounds_ratio*self.action_bias
-        mean = (th.tanh(mean)+1)/2 * (mean_scales) + mean_biases
+        mean = th.tanh(mean/mean_scales)*mean_scales + mean_biases
 
         log_std = self.act_fc_logstd(hidden_batch)
         log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min # squash the log_std network output
@@ -971,7 +971,7 @@ class SAC(RLAgent):
     def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[th.Tensor,th.Tensor,th.Tensor]:
         # ggLog.info(f":::::::::::::::::::::::: train_model: global_step={global_step}")
         q_act_alpha_losses = [None]*iterations
-        target_entropy_cpu = self._target_entropy_factor_annealing(global_step, iterations)*self._hp.action_size
+        target_entropy_cpu = self._target_entropy_factor_annealing(global_step, self._tot_grad_steps_count)*self._hp.action_size
         self._target_entropy.copy_(th.as_tensor(target_entropy_cpu).to(device=self.device, dtype=th.float32, non_blocking=self.device.type=="cuda"))
         t0 = time.monotonic()
         for i in range(iterations):
@@ -1019,7 +1019,7 @@ def train_off_policy(collector : ExperienceCollector,
     num_envs = collector.num_envs()
 
     collector.reset()
-    global_step = 0
+    global_exp_step = 0
     t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl, t_buff_sl, t_add_sl, t_start_sl, t_end_callbacks_sl,t_wait_collect_sl = 0,0,0,0,0,0,0,0,0,0
     
     if callbacks is None:
@@ -1041,7 +1041,7 @@ def train_off_policy(collector : ExperienceCollector,
 
 
     # th.cuda.memory._record_memory_history(max_entries=100_000)
-    while global_step < total_timesteps and not adarl.utils.session.default_session.is_shutting_down():
+    while global_exp_step < total_timesteps and not adarl.utils.session.default_session.is_shutting_down():
         s0b = buffer.collected_frames()
         t0 = time.monotonic()
 
@@ -1051,18 +1051,18 @@ def train_off_policy(collector : ExperienceCollector,
         callbacks.on_collection_start()
         collector.start_collection(model_state_dict=model.state_dict(),
                                             vsteps_to_collect=vsteps_to_collect,
-                                            global_vstep_count=global_step//num_envs,
+                                            global_vstep_count=global_exp_step//num_envs,
                                             random_vsteps=learning_start_step//num_envs)
 
         # ------------------             Train             ------------------
         t_before_train = time.monotonic()
         trained = False
         grad_steps_done = 0
-        if global_step > learning_start_step:
+        if global_exp_step > learning_start_step:
             iterations = grad_steps if grad_steps!="auto" else 10
             while (grad_steps != "auto" and not trained) or (grad_steps == "auto" and collector.is_collecting()):
                 trained = True
-                q_loss, actor_loss, alpha_loss = model.train_model(global_step, iterations, buffer)
+                q_loss, actor_loss, alpha_loss = model.train_model(global_exp_step, iterations, buffer)
                 grad_steps_done += iterations
             train_count += 1
         t_after_train = time.monotonic()
@@ -1101,7 +1101,7 @@ def train_off_policy(collector : ExperienceCollector,
         # ------------------      Wrap up and restart      ------------------
         if buffer.collected_frames()-s0b != steps_to_collect:
             raise RuntimeError(f"Expected to collect {steps_to_collect} but got {buffer.stored_frames()-s0b}")
-        global_step += steps_to_collect
+        global_exp_step += steps_to_collect
         steps_sl += steps_to_collect
         tf = time.monotonic()
         t_start_sl              += t_before_train       - t0
@@ -1115,13 +1115,13 @@ def train_off_policy(collector : ExperienceCollector,
         grad_steps_done_sl += grad_steps_done
         t = time.monotonic()
         # ggLog.info(f"global_steps = {global_step}")
-        if global_step - last_log_steps > log_freq_vstep*num_envs:
-            last_log_steps = global_step
+        if global_exp_step - last_log_steps > log_freq_vstep*num_envs:
+            last_log_steps = global_exp_step
             ips = model.get_stats().get('iterations_per_second',float("nan"))
-            log_async(f"SAC: expsteps={global_step}"+" q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}"+f" ips={ips:.2f}",
+            log_async(f"SAC: expsteps={global_exp_step}"+" q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}"+f" ips={ips:.2f}",
                       tensors=dict(q_loss=q_loss,actor_loss=actor_loss,alpha_loss=alpha_loss))
             # ggLog.info(f"SAC: expsteps={global_step} q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}")
-            ggLog.info(f"OFFTRAIN: expstps:{global_step}"
+            ggLog.info(f"OFFTRAIN: expstps:{global_exp_step}"
                        f" trainstps={model._tot_grad_steps_count}"
                     #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"
                        f" tcoll={t_coll_sl:.2f}"
@@ -1135,7 +1135,7 @@ def train_off_policy(collector : ExperienceCollector,
                        f" tot={t_tot_sl:.2f}"
                        f" fps={steps_sl/t_tot_sl:.2f} collfps={steps_sl/t_coll_sl:.2f}"
                        f" ips={grad_steps_done_sl/t_train_sl:.2f}"
-                       f" alltime_fps={global_step/(t-start_time):.2f} alltime_ips={model._tot_grad_steps_count/(t-start_time):.2f}")
+                       f" alltime_fps={global_exp_step/(t-start_time):.2f} alltime_ips={model._tot_grad_steps_count/(t-start_time):.2f}")
             dictlist = [f"{k}:{v:.6g}" for k,v in collector.get_stats().items()]
             ggLog.info(f"Collection: {', '.join(dictlist)}")
             t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl, t_buff_sl, t_add_sl, t_start_sl, t_end_callbacks_sl, t_wait_collect_sl, grad_steps_done_sl = 0,0,0,0,0,0,0,0,0,0,0
