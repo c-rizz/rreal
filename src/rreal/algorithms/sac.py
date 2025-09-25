@@ -97,8 +97,6 @@ class SAC_init_hparams:
     """The factor used to compute the target entropy as target_entropy_factor*action_size, by default it is -1.0"""
     actor_log_std_init : float
     """The initial value of the log standard deviation of the actor's policy, by default it is -3.0"""
-    actor_mean_bounds_ratio : float
-    """The ratio of the action bounds that the actor's mean can reach, by default it is 1.0 (the mean can reach the action bounds). Reducing this can prevent boundary effects that reduce noise on the edges, biasing the actor toward them."""
     actor_observation_filter : list[str] | None = None
     """The list of observation keys to filter in the actor's policy, by default it is None (no filtering, all observation keys are used)"""
     critic_observation_filter : list[str] | None = None
@@ -108,6 +106,8 @@ class SAC_init_hparams:
     action_reference_obs_key : str | None = None
     """The observation key that will be used as a reference for the action, meaning the actor distribution is computed as `mean = NN(obs) + act_ref` 
       by default it is None (no reference, the mean is produced from the network directly)"""
+    actor_mean_bounds_ratio : float = 1.0
+    """The ratio of the action bounds that the actor's mean can reach, by default it is 1.0 (the mean can reach the action bounds). Reducing this can prevent boundary effects that reduce noise on the edges, biasing the actor toward them."""
     max_grad_norm : float = 0.5
     feature_extractor_lr : float = 0.0
     policy_update_freq : int = 2
