@@ -97,6 +97,8 @@ class SAC_init_hparams:
     """The factor used to compute the target entropy as target_entropy_factor*action_size, by default it is -1.0"""
     actor_log_std_init : float
     """The initial value of the log standard deviation of the actor's policy, by default it is -3.0"""
+    actor_mean_bounds_ratio : float
+    """The ratio of the action bounds that the actor's mean can reach, by default it is 1.0 (the mean can reach the action bounds). Reducing this can prevent boundary effects that reduce noise on the edges, biasing the actor toward them."""
     actor_observation_filter : list[str] | None = None
     """The list of observation keys to filter in the actor's policy, by default it is None (no filtering, all observation keys are used)"""
     critic_observation_filter : list[str] | None = None
@@ -118,7 +120,7 @@ class SAC_init_hparams:
 
 
 class AnnealingFunction(Protocol):
-        def __call__(self,  global_step : int, iterations : int) -> float:
+        def __call__(self,  global_exp_step : int, train_iterations : int) -> float:
             ...
 def get_constant_annealing(value : float) -> AnnealingFunction:
     """
@@ -133,13 +135,13 @@ def get_ramp_annealing(ramp_start_step : int, ramp_end_step : int, start_value :
     """
     Returns a function that ramps from start_value to end_value between ramp_start_step and ramp_end_step.
     """
-    def ramp_annealing(global_step : int, iterations : int) -> float:
-        if global_step < ramp_start_step:
+    def ramp_annealing(global_exp_step : int, train_iterations : int) -> float:
+        if train_iterations < ramp_start_step:
             return start_value
-        elif global_step > ramp_end_step:
+        elif train_iterations > ramp_end_step:
             return end_value
         else:
-            progress = (global_step - ramp_start_step) / (ramp_end_step - ramp_start_step)
+            progress = (train_iterations - ramp_start_step) / (ramp_end_step - ramp_start_step)
             return start_value + progress * (end_value - start_value)
     return ramp_annealing
 
@@ -200,13 +202,15 @@ class Actor(nn.Module):
                         init_noise = 0.001,
                         torch_device : Union[str,th.device] = "cuda",
                         action_mean_init = 0.0,
-                        use_weightnorm : bool = True):
+                        use_weightnorm : bool = True,
+                        mean_bounds_ratio : float | None = None):
         super().__init__()
         self._log_std_max = log_std_max
         self._log_std_min = log_std_min
         self.device = torch_device
         self._obs_size = observation_size
         self._use_weightnorm = use_weightnorm
+        self._mean_bounds_ratio = mean_bounds_ratio if mean_bounds_ratio is not None else 1.0
         # save action scaling factors as non-trained parameters
         if isinstance(action_max, int): action_max = float(action_max)
         if isinstance(action_min, int): action_min = float(action_min)
@@ -242,8 +246,15 @@ class Actor(nn.Module):
         hidden_batch = self.act_fc(observation_batch)
         # dbg_check_finite(hidden_batch)
         mean = self.act_fc_mean(hidden_batch)
+        # The mean squashing does not alter the action probability, so no change should be necessary on
+        # the logprob correction done in sample_action, I think
+        # Still, it helps to avoid boudary issues with the noise being reduced on the edges of the action space
+        mean_scales = self._mean_bounds_ratio*self.action_scale
+        mean_biases = self._mean_bounds_ratio*self.action_bias
+        mean = th.tanh(mean/mean_scales)*mean_scales + mean_biases
+
         log_std = self.act_fc_logstd(hidden_batch)
-        log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min # clamp the log_std network output
+        log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min # squash the log_std network output
         return mean, log_std
 
     @th_compile_ext(mode=compile_mode, fullgraph=True, copy_outs=True)
@@ -298,6 +309,7 @@ class SAC(RLAgent):
         torch_device : th.device
         critic_weight_decay : float
         actor_weight_decay : float
+        actor_mean_bounds_ratio : float
 
     def __init__(self,
                  action_size : int,
@@ -365,7 +377,8 @@ class SAC(RLAgent):
                                    target_entropy_annealing = init_hparams.target_entropy_factor_annealing,
                                    action_reference_obs_key = init_hparams.action_reference_obs_key,
                                    critic_weight_decay = init_hparams.critic_weight_decay,
-                                   actor_weight_decay = init_hparams.actor_weight_decay)
+                                   actor_weight_decay = init_hparams.actor_weight_decay,
+                                   actor_mean_bounds_ratio = init_hparams.actor_mean_bounds_ratio)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = self._hp.torch_device
         self._critic_updates = 0
@@ -407,7 +420,7 @@ class SAC(RLAgent):
                                         torch_device=self._hp.torch_device,
                                         nets_num=2)
         self._q_net_target.load_state_dict(self._q_net.state_dict())
-        self._q_optimizer = optim.Adam(split_params_for_weight_decay(self._q_net, self._hp.critic_weight_decay), lr=self._hp.q_lr)
+        self._q_optimizer = optim.AdamW(split_params_for_weight_decay(self._q_net, self._hp.critic_weight_decay), lr=self._hp.q_lr)
         self._actor = Actor(policy_arch=init_hparams.policy_arch,
                             observation_size=actor_input_size,
                             action_size = self._hp.action_size,
@@ -415,7 +428,8 @@ class SAC(RLAgent):
                             action_max = self._hp.action_max,
                             torch_device=self._hp.torch_device,
                             log_std_init=self._hp.log_std_init,
-                            action_mean_init=self._hp.action_init)
+                            action_mean_init=self._hp.action_init,
+                            mean_bounds_ratio=self._hp.actor_mean_bounds_ratio)
         # self._actor_optimizer = optim.Adam(split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay),
         #                                    lr=self._hp.policy_lr)
         self._base_target_entropy_factor = th.as_tensor(self._hp.target_entropy_factor, device=self._hp.torch_device, dtype=th.float32)
@@ -431,14 +445,14 @@ class SAC(RLAgent):
             self._alpha = th.as_tensor(constant_entropy_temperature).to(device=self._hp.torch_device, non_blocking=self._hp.torch_device.type=="cuda")
             self._log_alpha = self._alpha.log().detach()
 
-        self._actor_and_alpha_optimizer = optim.Adam([{ "params":[self._log_alpha], "lr":self._hp.q_lr}]+
+        self._actor_and_alpha_optimizer = optim.AdamW([{ "params":[self._log_alpha], "lr":self._hp.q_lr}]+
                                                       split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay,
                                                                                     extra_kwargs={"lr":self._hp.policy_lr}))
 
         if self._hp.feature_extractor_lr > 0:
             critic_extractor_params = list(self._critic_feature_extractor.parameters())
             if len(critic_extractor_params) > 0:
-                self._critic_feature_extractor_optimizer = optim.Adam(critic_extractor_params, lr=self._hp.feature_extractor_lr)
+                self._critic_feature_extractor_optimizer = optim.AdamW(critic_extractor_params, lr=self._hp.feature_extractor_lr)
             else:
                 self._critic_feature_extractor_optimizer = None
 
@@ -962,7 +976,7 @@ class SAC(RLAgent):
     def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[th.Tensor,th.Tensor,th.Tensor]:
         # ggLog.info(f":::::::::::::::::::::::: train_model: global_step={global_step}")
         q_act_alpha_losses = [None]*iterations
-        target_entropy_cpu = self._target_entropy_factor_annealing(global_step, iterations)*self._hp.action_size
+        target_entropy_cpu = self._target_entropy_factor_annealing(global_step, self._tot_grad_steps_count)*self._hp.action_size
         self._target_entropy.copy_(th.as_tensor(target_entropy_cpu).to(device=self.device, dtype=th.float32, non_blocking=self.device.type=="cuda"))
         t0 = time.monotonic()
         for i in range(iterations):
@@ -1010,7 +1024,7 @@ def train_off_policy(collector : ExperienceCollector,
     num_envs = collector.num_envs()
 
     collector.reset()
-    global_step = 0
+    global_exp_step = 0
     t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl, t_buff_sl, t_add_sl, t_start_sl, t_end_callbacks_sl,t_wait_collect_sl = 0,0,0,0,0,0,0,0,0,0
     
     if callbacks is None:
@@ -1032,7 +1046,7 @@ def train_off_policy(collector : ExperienceCollector,
 
 
     # th.cuda.memory._record_memory_history(max_entries=100_000)
-    while global_step < total_timesteps and not adarl.utils.session.default_session.is_shutting_down():
+    while global_exp_step < total_timesteps and not adarl.utils.session.default_session.is_shutting_down():
         s0b = buffer.collected_frames()
         t0 = time.monotonic()
 
@@ -1042,18 +1056,18 @@ def train_off_policy(collector : ExperienceCollector,
         callbacks.on_collection_start()
         collector.start_collection(model_state_dict=model.state_dict(),
                                             vsteps_to_collect=vsteps_to_collect,
-                                            global_vstep_count=global_step//num_envs,
+                                            global_vstep_count=global_exp_step//num_envs,
                                             random_vsteps=learning_start_step//num_envs)
 
         # ------------------             Train             ------------------
         t_before_train = time.monotonic()
         trained = False
         grad_steps_done = 0
-        if global_step > learning_start_step:
+        if global_exp_step > learning_start_step:
             iterations = grad_steps if grad_steps!="auto" else 10
             while (grad_steps != "auto" and not trained) or (grad_steps == "auto" and collector.is_collecting()):
                 trained = True
-                q_loss, actor_loss, alpha_loss = model.train_model(global_step, iterations, buffer)
+                q_loss, actor_loss, alpha_loss = model.train_model(global_exp_step, iterations, buffer)
                 grad_steps_done += iterations
             train_count += 1
         t_after_train = time.monotonic()
@@ -1066,7 +1080,6 @@ def train_off_policy(collector : ExperienceCollector,
             wlogs["sac/buffer_frames"] = buffer.stored_frames()
             wlogs["sac/val_buffer_frames"] = buffer.stored_validation_frames() if isinstance(buffer,BaseValidatingBuffer) else 0
             wandb_log(wlogs,throttle_period=2, silent_throttling=True)
-        adarl.utils.session.default_session.run_info["train_iterations"].value = model._tot_grad_steps_count
         
         # ------------------   Store collected experience  ------------------
         tmp_buff = collector.wait_collection(timeout = 300.0)
@@ -1093,7 +1106,7 @@ def train_off_policy(collector : ExperienceCollector,
         # ------------------      Wrap up and restart      ------------------
         if buffer.collected_frames()-s0b != steps_to_collect:
             raise RuntimeError(f"Expected to collect {steps_to_collect} but got {buffer.stored_frames()-s0b}")
-        global_step += steps_to_collect
+        global_exp_step += steps_to_collect
         steps_sl += steps_to_collect
         tf = time.monotonic()
         t_start_sl              += t_before_train       - t0
@@ -1107,13 +1120,13 @@ def train_off_policy(collector : ExperienceCollector,
         grad_steps_done_sl += grad_steps_done
         t = time.monotonic()
         # ggLog.info(f"global_steps = {global_step}")
-        if global_step - last_log_steps > log_freq_vstep*num_envs:
-            last_log_steps = global_step
+        if global_exp_step - last_log_steps > log_freq_vstep*num_envs:
+            last_log_steps = global_exp_step
             ips = model.get_stats().get('iterations_per_second',float("nan"))
-            log_async(f"SAC: expsteps={global_step}"+" q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}"+f" ips={ips:.2f}",
+            log_async(f"SAC: expsteps={global_exp_step}"+" q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}"+f" ips={ips:.2f}",
                       tensors=dict(q_loss=q_loss,actor_loss=actor_loss,alpha_loss=alpha_loss))
             # ggLog.info(f"SAC: expsteps={global_step} q_loss={q_loss:5g} actor_loss={actor_loss:5g} alpha_loss={alpha_loss:5g}")
-            ggLog.info(f"OFFTRAIN: expstps:{global_step}"
+            ggLog.info(f"OFFTRAIN: expstps:{global_exp_step}"
                        f" trainstps={model._tot_grad_steps_count}"
                     #    f" exp_reuse={model._tot_grad_steps_count*batch_size/global_step:.2f}"
                        f" tcoll={t_coll_sl:.2f}"
@@ -1127,7 +1140,7 @@ def train_off_policy(collector : ExperienceCollector,
                        f" tot={t_tot_sl:.2f}"
                        f" fps={steps_sl/t_tot_sl:.2f} collfps={steps_sl/t_coll_sl:.2f}"
                        f" ips={grad_steps_done_sl/t_train_sl:.2f}"
-                       f" alltime_fps={global_step/(t-start_time):.2f} alltime_ips={model._tot_grad_steps_count/(t-start_time):.2f}")
+                       f" alltime_fps={global_exp_step/(t-start_time):.2f} alltime_ips={model._tot_grad_steps_count/(t-start_time):.2f}")
             dictlist = [f"{k}:{v:.6g}" for k,v in collector.get_stats().items()]
             ggLog.info(f"Collection: {', '.join(dictlist)}")
             t_train_sl, t_coll_sl, t_tot_sl, steps_sl, t_val_sl, t_buff_sl, t_add_sl, t_start_sl, t_end_callbacks_sl, t_wait_collect_sl, grad_steps_done_sl = 0,0,0,0,0,0,0,0,0,0,0
