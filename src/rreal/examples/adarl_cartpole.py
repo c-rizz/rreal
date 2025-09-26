@@ -81,8 +81,7 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                             add_ground=False,
                                             add_sky=False)
     else:
-        print(f"Requested unknown adapter '{mode}'")
-        exit(0)
+        raise NotImplementedError(f"Requested unknown adapter '{mode}'")
     env = CartpoleContinuousVecEnv(adapter=adapter,
                                    max_episode_steps=max_steps,
                                    render=True,
@@ -218,7 +217,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     batch_size = 512, 
                                                     q_lr=1e-3,
                                                     policy_lr=3e-4,
-                                                    device = train_device,
+                                                    model_th_device = train_device,
                                                     gamma = 0.99,
                                                     target_tau=0.005,
                                                     buffer_size=1_000_000,

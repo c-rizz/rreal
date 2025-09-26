@@ -24,12 +24,14 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     use_weightnorm : bool = False,
                     weight_init_multiplier = 1.0,
                     layer_init_func : Callable[[th.nn.Module],None] | None = None,
-                    last_layer_init_func : Callable[[th.nn.Module],None] | None = None):
+                    last_layer_init_func : Callable[[th.nn.Module],None] | None = None,
+                    use_jit_fork : bool = True) -> Parallel:
         
     if arch == "identity":
         if input_size != output_size:
             raise AttributeError(f"Requested identity mlp, but input_size!=output_size: {input_size} != {output_size}")
-        net = Parallel([last_activation_class()], return_mean=return_ensemble_mean)
+        net = Parallel([last_activation_class()], return_mean=return_ensemble_mean,
+                       use_jit_fork=use_jit_fork)
     elif isinstance(arch, (list, tuple)):
         nets = []
         arch = [int(s) for s in arch]
@@ -52,23 +54,45 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     layers.append(hidden_activations())
             layers.append(last_activation_class())
             nets.append(th.nn.Sequential(*layers))
-        net = Parallel(nets, return_mean=return_ensemble_mean, return_std=return_ensemble_std)
+        net = Parallel(nets, return_mean=return_ensemble_mean, return_std=return_ensemble_std,
+                       use_jit_fork=use_jit_fork)
     else:
         raise AttributeError(f"Invalid arch {arch}")
     with th.no_grad():
         if weight_init_multiplier != 1:
             net.apply(lambda m: scale_layer_weights(m,weight_init_multiplier))
     if use_torchscript:
-        net = th.compile(net)
+        net : Parallel = th.compile(net)
     return net
 
-def split_params_for_weight_decay(model : th.nn.Module, weight_decay : float, decay_bias : bool = False):
-    decay = []
-    no_decay = []
+def split_params_for_weight_decay(model : th.nn.Module,
+                                  weight_decay : float,
+                                  decay_bias : bool = False,
+                                  extra_kwargs : dict[str, th.Tensor|float] = {}) -> list[dict[str, th.Tensor|float]]:
+    decay : list[th.Tensor] = []
+    no_decay : list[th.Tensor] = []
     for name, param in model.named_parameters():
         if (name.endswith(".bias") and not decay_bias) or name.endswith(".weight_g") or name.endswith(".original1"):
             no_decay.append(param)
         else:
             decay.append(param)
-    return [{'params': decay,       'weight_decay': weight_decay},
-            {'params': no_decay,    'weight_decay': 0.0}]
+    decay_group = {'params': decay,       'weight_decay': weight_decay}
+    decay_group.update(extra_kwargs)
+    no_decay_group = {'params': no_decay, 'weight_decay': 0.0}
+    no_decay_group.update(extra_kwargs)
+    return [decay_group, no_decay_group]
+
+
+def simplified_clip_grad_norm_(
+    parameters: list[th.Tensor],
+    max_norm: float,
+    norm_type: float = 2.0
+) -> th.Tensor:
+    r"""Simplified version of torch's clip_grad_norm_.
+    """
+    grads = [p.grad for p in parameters if p.grad is not None]
+    norms = th._foreach_norm(grads, norm_type)
+    total_norm = th.linalg.vector_norm(th.stack(norms), norm_type)
+    clip_coef_clamped = th.clamp(max_norm / (total_norm + 1e-6), max=1.0)
+    th._foreach_mul_(grads, clip_coef_clamped)
+    return total_norm

@@ -174,7 +174,8 @@ def build_eval_callbacks(eval_configurations : list[dict],
                                     n_eval_episodes=eval_conf["eval_eps"],
                                     eval_freq_ep=eval_conf["eval_freq_ep"],
                                     deterministic=eval_conf["deterministic"],
-                                    eval_name=eval_conf["name"]))
+                                    eval_name=eval_conf["name"],
+                                    output_folder=run_folder+f"/eval_"+eval_conf["name"]+"/results"))
         ggLog.info(f"Built eval config '{eval_conf['name']}'")
     return callbacks
 
@@ -205,7 +206,8 @@ def build_collector(use_processes : bool,
                     collector_device : th.device,
                     collector_buffer_size : int,
                     session : adarl.utils.session.Session,
-                    num_envs : int):
+                    num_envs : int,
+                    deterministic_action_ratio : float = 0.0):
     vec_env_builder_norags = lambda: vec_env_builder(env_builder_args=env_builder_args,
                                                     run_folder=run_folder,
                                                     seed=seed,
@@ -215,7 +217,8 @@ def build_collector(use_processes : bool,
                             vec_env_builder=vec_env_builder_norags,
                             storage_torch_device=collector_device,
                             buffer_size=collector_buffer_size,
-                            session=session)
+                            session=session,
+                            deterministic_action_ratio=deterministic_action_ratio)
     else:
         collector = AsyncThreadExperienceCollector( vec_env=vec_env_builder_norags(),
                                                     buffer_size=collector_buffer_size,
@@ -260,6 +263,7 @@ def sac_train(  seed : int,
                 eval_configurations : list[dict] = [],
                 checkpoint_freq : int = 100,
                 collector_device : th.device | None = None,
+                buffer_device : th.device | str | None = None,
                 debug_level : int = 2,
                 no_wandb : bool = False,
                 log_weights_and_grads = False):
@@ -280,15 +284,19 @@ def sac_train(  seed : int,
     torch.backends.cudnn.deterministic = True
 
     # if hyperparams.device == "cuda": hyperparams.device = "cuda:0"
-    if isinstance(hyperparams.device, str):
-        device = th.device(hyperparams.device)
+    if isinstance(hyperparams.model_th_device, str):
+        device = th.device(hyperparams.model_th_device)
     else:
-        device = hyperparams.device
+        device = hyperparams.model_th_device
+    if isinstance(buffer_device, str):
+        buffer_device = th.device(buffer_device)
     if device.index is None:
         device = th.device(type=device.type, index=0)
     print(f"Device = {device}")
     if collector_device is None:
         collector_device = device
+    if buffer_device is None:
+        buffer_device = device
     if vec_env_builder is None:
         raise RuntimeError(f"You must specify either vec_env_builder or env_builder")
     vec_env_builder = wrap_with_logger(vec_env_builder)
@@ -317,8 +325,8 @@ def sac_train(  seed : int,
         buffer_size=hyperparams.buffer_size,
         observation_space=observation_space,
         action_space=action_space,
-        device=device,
-        storage_torch_device=device,
+        out_device=device,
+        storage_torch_device=buffer_device,
         handle_timeout_termination=True,
         n_envs=hyperparams.parallel_envs,
         random_add=True,

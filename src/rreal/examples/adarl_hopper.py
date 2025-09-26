@@ -64,7 +64,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                 batch_size = 4096,
                                                 q_lr=1e-3,
                                                 policy_lr=3e-4,
-                                                device = "cuda",
+                                                model_th_device = "cuda",
                                                 gamma = 0.99,
                                                 target_tau=0.005,
                                                 buffer_size=1_000_000,

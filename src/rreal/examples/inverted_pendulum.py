@@ -11,7 +11,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                   grad_steps=1,
                                   q_lr=0.005,
                                   policy_lr=0.0005,
-                                  device = "cuda",
+                                  model_th_device = "cuda",
                                   gamma = 0.99,
                                   target_tau=0.005,
                                   buffer_size=1_000_000,

@@ -128,7 +128,7 @@ def main(seed, folderName, run_id, args, env_builder_args, hyperparams):
         buffer_size=10_000_000,
         observation_space=observation_space,
         action_space=action_space,
-        device=device,
+        out_device=device,
         storage_torch_device=device,
         handle_timeout_termination=True,
         n_envs=num_envs)

@@ -23,6 +23,7 @@ import threading
 import time
 import torch as th
 import torch.multiprocessing as mp
+from rreal.algorithms.rl_agent import RLAgent
 
 class ExperienceCollector(ABC):
     def __init__(self, vec_env : gym.vector.VectorEnv,
@@ -51,9 +52,10 @@ class ExperienceCollector(ABC):
         return self._vec_env.unwrapped.num_envs
 
     def reset(self):
-        if self._vec_env is not None:
-            self._current_obs, info = self._vec_env.reset()
-        self._current_obs = copy.deepcopy(self._current_obs) # make a copy of it to avoid inplace issues, this will be then in-place written during the steps
+        with th.no_grad():
+            if self._vec_env is not None:
+                self._current_obs, info = self._vec_env.reset()
+            self._current_obs = copy.deepcopy(self._current_obs) # make a copy of it to avoid inplace issues, this will be then in-place written during the steps
             
     @abstractmethod
     def observation_space(self) -> gym.Space:
@@ -63,8 +65,8 @@ class ExperienceCollector(ABC):
     def action_space(self) -> gym.Space:
         raise NotImplementedError()
 
-    def collect_experience(self, policy, vsteps_to_collect, global_vstep_count, random_vsteps, policy_device,
-                           buffer : BasicStorage):
+    def collect_experience(self, policy : RLAgent, vsteps_to_collect, global_vstep_count, random_vsteps, policy_device,
+                           buffer : BasicStorage, deterministic_ratio = 0.0):
         t0 = time.monotonic()
         with th.no_grad(): #just to be sure
             if  self._current_obs is None:
@@ -83,7 +85,11 @@ class ExperienceCollector(ABC):
                 else:
                     th_obs = map_tensor_tree(self._current_obs, lambda a: th.as_tensor(a, device = policy_device))
                     # dbg_check_finite(th_obs)                    
-                    actions = policy.predict_action(th_obs)
+                    if deterministic_ratio>0:
+                        deterministic = (th.rand(1).item() < deterministic_ratio)
+                    else:
+                        deterministic = False
+                    actions = policy.predict_action(th_obs, deterministic=deterministic)
                     if not self._vecenv_is_torch:
                         actions = actions.detach().cpu().numpy()
                 t_post_act = time.monotonic()
@@ -186,19 +192,20 @@ class AsyncThreadExperienceCollector(ExperienceCollector):
         self._collector_thread.start()
 
     def _worker(self):
-        while self._running and not session.default_session.is_shutting_down():
-            got_set = self._start_collect.wait(timeout=2)
-            if got_set:
-                self._start_collect.clear()
-                t0 = time.monotonic()
-                self.collect_experience(policy=self._collector_model,
-                                        vsteps_to_collect=self._vsteps_to_collect,
-                                        global_vstep_count=self._global_vstep_count,
-                                        random_vsteps=self._random_vsteps,
-                                        policy_device=self._collector_model.device,
-                                        buffer=self._buffer)
-                self._last_collection_duration = time.monotonic() - t0
-                self._collect_done.set()
+        with th.no_grad():
+            while self._running and not session.default_session.is_shutting_down():
+                got_set = self._start_collect.wait(timeout=2)
+                if got_set:
+                    self._start_collect.clear()
+                    t0 = time.monotonic()
+                    self.collect_experience(policy=self._collector_model,
+                                            vsteps_to_collect=self._vsteps_to_collect,
+                                            global_vstep_count=self._global_vstep_count,
+                                            random_vsteps=self._random_vsteps,
+                                            policy_device=self._collector_model.device,
+                                            buffer=self._buffer)
+                    self._last_collection_duration = time.monotonic() - t0
+                    self._collect_done.set()
 
     def start_collection(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):
         self._collector_model.load_state_dict(model_state_dict, assign=False)
@@ -287,7 +294,8 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
     def __init__(self, vec_env_builder : Callable[[],gym.vector.VectorEnv],
                  buffer_size, storage_torch_device, start_method : Literal['fork', 'spawn', 'forkserver']= "forkserver",
                  session : session.Session = None,
-                 seed : int = 0):
+                 seed : int = 0,
+                 deterministic_action_ratio : float = 0.0):
         super().__init__(vec_env=None)
 
         ctx = mp_helper.get_context(method=start_method)
@@ -297,6 +305,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         self._storage_torch_device = storage_torch_device
         self._vec_env_builder = CloudpickleWrapper(vec_env_builder)
         self._state_dict : dict[str,th.Tensor]
+        self._deterministic_action_ratio = deterministic_action_ratio
         
         self._commander = SimpleCommander(mp_context=ctx, n_envs=1, timeout_s=60)
         self._collect_args = ctx.Array(ctypes.c_uint64, 3, lock = False)
@@ -342,60 +351,62 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
     def _worker(self, pipe, parent_session):
         ggLog.info(f"AsyncProcessExperienceCollector worker started with pid {os.getpid()}")
         setproctitle.setproctitle(mp.current_process().name)
-        session.set_current_session(parent_session)
-        self._pipe = pipe
-        pyTorch_makeDeterministic(seed = session.default_session.run_info["seed"])
-        while self._running.value:
-            # ggLog.info(f"waiting command")
-            cmd = self._commander.wait_command()
-            # ggLog.info(f"got command {cmd}")
-            if cmd == b"build_env":
-                self._vec_env : gym.vector.VectorEnv = self._vec_env_builder.var()
-                self.reset()
-                self._buffer = BasicStorage(buffer_size = self._buffer_size,
-                                            observation_space=self._vec_env.unwrapped.single_observation_space,
-                                            action_space=self._vec_env.unwrapped.single_action_space,
-                                            n_envs=self._vec_env.unwrapped.num_envs,
-                                            storage_torch_device=self._storage_torch_device,
-                                            share_mem=True,
-                                            allow_rollover=False)
-                self._obs_space = self._vec_env.unwrapped.single_observation_space
-                self._action_space = self._vec_env.unwrapped.single_action_space
-                self._num_envs = self._vec_env.unwrapped.num_envs
-                self._pipe.send((self._buffer, 
-                                 self._obs_space,
-                                 self._action_space,
-                                 self._num_envs))
-            if cmd == b"build_model":
-                # To ensure the correctly built model is used for collection we build it
-                # directyl in the worker, to avoid any issue that may arise by sending it 
-                # throucgh the pipe. Then we update its parameters by sharing the state dict
-                self._base_model_builder = self._pipe.recv()
-                self._collector_model = self._base_model_builder.var(self._obs_space, self._action_space)
-                self._state_dict = self._collector_model.state_dict()
-                self._pipe.send(self._state_dict)
-            elif cmd == b"collect":
-                vsteps_to_collect, global_vstep_count, random_vsteps = self._collect_args
-                self._buffer.clear()
-                t0 = time.monotonic()
-                self.collect_experience(policy=self._collector_model,
-                                        vsteps_to_collect=vsteps_to_collect,
-                                        global_vstep_count=global_vstep_count,
-                                        random_vsteps=random_vsteps,
-                                        policy_device=self._collector_model.device,
-                                        buffer = self._buffer)
-                self._last_collect_wall_duration.value = time.monotonic() - t0
-            elif cmd == b"close":
-                ggLog.warn(f"{type(self)}: closing")
-                self._vec_env.close()
-                self._running.value = ctypes.c_bool(False)
-            elif cmd is None:
-                ggLog.warn(f"Worker timed out waiting for command. Will retry.")
-            else:
-                ggLog.warn(f"{type(self)}: Unexpected command {cmd}")
-            if cmd is not None: # if a command was actually received
-                self._commander.mark_done()
-            # ggLog.info(f" {cmd} done")
+        with th.no_grad():
+            session.set_current_session(parent_session)
+            self._pipe = pipe
+            pyTorch_makeDeterministic(seed = session.default_session.run_info["seed"])
+            while self._running.value:
+                # ggLog.info(f"waiting command")
+                cmd = self._commander.wait_command()
+                # ggLog.info(f"got command {cmd}")
+                if cmd == b"build_env":
+                    self._vec_env : gym.vector.VectorEnv = self._vec_env_builder.var()
+                    self.reset()
+                    self._buffer = BasicStorage(buffer_size = self._buffer_size,
+                                                observation_space=self._vec_env.unwrapped.single_observation_space,
+                                                action_space=self._vec_env.unwrapped.single_action_space,
+                                                n_envs=self._vec_env.unwrapped.num_envs,
+                                                storage_torch_device=self._storage_torch_device,
+                                                share_mem=True,
+                                                allow_rollover=False)
+                    self._obs_space = self._vec_env.unwrapped.single_observation_space
+                    self._action_space = self._vec_env.unwrapped.single_action_space
+                    self._num_envs = self._vec_env.unwrapped.num_envs
+                    self._pipe.send((self._buffer, 
+                                    self._obs_space,
+                                    self._action_space,
+                                    self._num_envs))
+                if cmd == b"build_model":
+                    # To ensure the correctly built model is used for collection we build it
+                    # directyl in the worker, to avoid any issue that may arise by sending it 
+                    # throucgh the pipe. Then we update its parameters by sharing the state dict
+                    self._base_model_builder = self._pipe.recv()
+                    self._collector_model = self._base_model_builder.var(self._obs_space, self._action_space)
+                    self._state_dict = self._collector_model.state_dict()
+                    self._pipe.send(self._state_dict)
+                elif cmd == b"collect":
+                    vsteps_to_collect, global_vstep_count, random_vsteps = self._collect_args
+                    self._buffer.clear()
+                    t0 = time.monotonic()
+                    self.collect_experience(policy=self._collector_model,
+                                            vsteps_to_collect=vsteps_to_collect,
+                                            global_vstep_count=global_vstep_count,
+                                            random_vsteps=random_vsteps,
+                                            policy_device=self._collector_model.device,
+                                            buffer = self._buffer,
+                                            deterministic_ratio=self._deterministic_action_ratio)
+                    self._last_collect_wall_duration.value = time.monotonic() - t0
+                elif cmd == b"close":
+                    ggLog.warn(f"{type(self)}: closing")
+                    self._vec_env.close()
+                    self._running.value = ctypes.c_bool(False)
+                elif cmd is None:
+                    ggLog.warn(f"Worker timed out waiting for command. Will retry.")
+                else:
+                    ggLog.warn(f"{type(self)}: Unexpected command {cmd}")
+                if cmd is not None: # if a command was actually received
+                    self._commander.mark_done()
+                # ggLog.info(f" {cmd} done")
         ggLog.info(f"Collector worker terminating")
 
     def start_collection(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):

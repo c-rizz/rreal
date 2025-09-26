@@ -8,7 +8,7 @@ import copy
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
     import torch as th
     max_steps_per_episode = 1000
-    num_envs = 128
+    num_envs = 1 
     env_builder_args = {"env_name" : "HalfCheetah-v4",
                         "gym_args" : {  "forward_reward_weight" : 1.0,
                                         "ctrl_cost_weight" : 0.1,
@@ -47,20 +47,20 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
         sac_train(seed, folderName, run_id, args,
                     env_builder_args = env_builder_args,
                     vec_env_builder=vecenv_builder,
-                    hyperparams = SAC_init_hparams(  train_freq_vstep=16,
+                    hyperparams = SAC_init_hparams( train_freq_vstep=16,
                                                     grad_steps=32,
                                                     parallel_envs = num_envs,
                                                     batch_size = 4096,
                                                     q_lr=1e-3,
                                                     policy_lr=3e-4,
-                                                    device = train_device,
+                                                    model_th_device = train_device,
                                                     gamma = 0.99,
                                                     target_tau=0.005,
                                                     buffer_size=1_000_000,
-                                                    total_steps = 10_000_000,
+                                                    total_steps = 16000,
                                                     q_network_arch=[256,256],
                                                     policy_arch=[256,256],
-                                                    learning_starts=20*num_envs*max_steps_per_episode,
+                                                    learning_starts=10*num_envs*max_steps_per_episode,
                                                     log_freq_vstep = 1000,
                                                     reference_init_args={},
                                                     target_entropy_factor=None,

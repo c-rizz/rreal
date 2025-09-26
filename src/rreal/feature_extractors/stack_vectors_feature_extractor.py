@@ -6,22 +6,19 @@ import gymnasium as gym
 from adarl.utils.ObsConverter import ObsConverter
 import torch as th
 from rreal.feature_extractors import register_feature_extractor_class
-import inspect
 import yaml
 import adarl.utils.dbg.ggLog as ggLog
 from typing_extensions import override
 import zipfile
 from adarl.utils.running_mean_std import RunningNormalizer
+from adarl.utils.utils import get_func_input_args
 
 class StackVectorsFeatureExtractor(FeatureExtractor):
     def __init__(self,  observation_space : gym.spaces.Space,
                         device : th.device,
                         normalize_input_obs : bool = True):
         super().__init__()
-        _, _, _, values = inspect.getargvalues(inspect.currentframe())
-        self._init_args = values
-        self._init_args.pop("self")
-        self._init_args.pop("__class__")
+        self._init_args = get_func_input_args(exclude=["self", "__class__"])
         self._normalize_input_obs = normalize_input_obs
         self._th_device = device
         self._obs_converter = ObsConverter(observation_shape=observation_space)
@@ -29,13 +26,16 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
             self._normalizer = RunningNormalizer(shape=(self._obs_converter.vector_part_size(),),
                                                 dtype = self._obs_converter.getVectorPartDtype(),
                                                 device=self._th_device)
+            self._normalizer = th.compile(self._normalizer, mode="max-autotune")
         if self._obs_converter.has_image_part():
             raise NotImplementedError(f"Input observations contain images.")
 
     def extract_features(self, observation_batch) -> th.Tensor:
         with th.no_grad():
+            th.cuda.nvtx.mark("get vec part")
             vec_part = self._obs_converter.getVectorPart(observation_batch)
-            return self._normalizer(vec_part)
+            th.cuda.nvtx.mark("normalize")
+            return self._normalizer(vec_part).clone()
     
     def encoding_size(self) -> int:
         return self._obs_converter.vector_part_size()
