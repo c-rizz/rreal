@@ -496,6 +496,10 @@ class SAC(RLAgent):
                         "val_actor_loss":0.0,
                         "val_alpha_loss":0.0,
                         "alpha":0.0}
+        self._actor_stats_names = [ "avg_action_mean",   "min_action_mean",   "max_action_mean",   "q95_action_mean",   "q05_action_mean",
+                                    "avg_action_logstd", "min_action_logstd", "max_action_logstd", "q95_action_logstd", "q05_action_logstd"]
+        self._alpha_stats_names = ["avg_log_prob", "min_log_prob", "max_log_prob", "q95_log_prob", "q05_log_prob"]
+        self._stats.update({n:0.0 for n in self._actor_stats_names})
         
     def _nvtx_startup(self):
         if self._enable_nvtx and self._agent_updates == 10:
@@ -726,7 +730,7 @@ class SAC(RLAgent):
 
 
     # @th.compile(mode=compile_mode, fullgraph=True)
-    def _compute_actor_loss(self, transitions : TransitionBatch, freeze_critic : bool = False):
+    def _compute_actor_loss(self, transitions : TransitionBatch, freeze_critic : bool = False, get_stats : bool = False):
         # self._mark_nvtx("_compute_actor_loss")
         actor_obss = self.get_actor_subobservation(transitions.observations)
         # self._mark_nvtx("actor_enc")
@@ -734,7 +738,7 @@ class SAC(RLAgent):
         # self._mark_nvtx("get ref")
         reference_action : th.Tensor = actor_obss[self._hp.action_reference_obs_key] if self._hp.action_reference_obs_key is not None else None
         # self._mark_nvtx("sample")
-        act, act_log_prob, _, _ = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
+        act, act_log_prob, act_mean, act_logstd = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
         # act, act_log_prob = act.clone(), act_log_prob.clone() # prevent issues with cuda graphs
         # with th.no_grad():
         # self._mark_nvtx("crit_enc")
@@ -754,7 +758,20 @@ class SAC(RLAgent):
         # ggLog.info(f"min_q_pi.size() = {min_q_pi.size()}")
         # ggLog.info(f"act_log_prob.size() = {act_log_prob.size()}")
         # self._mark_nvtx("ret_q")
-        return ((self._alpha * act_log_prob) - min_q_pi).mean()
+        if get_stats:
+            actor_stats = th.stack([  act_mean.mean(),
+                                    act_mean.min(),
+                                    act_mean.max(),
+                                    act_mean.quantile(0.95),
+                                    act_mean.quantile(0.05),
+                                    act_logstd.mean(),
+                                    act_logstd.min(),
+                                    act_logstd.max(),
+                                    act_logstd.quantile(0.95),
+                                    act_logstd.quantile(0.05)])
+        else:
+            actor_stats = None
+        return ((self._alpha * act_log_prob) - min_q_pi).mean(), actor_stats
     
     # @th.compile(mode=compile_mode, fullgraph=True)
     def _alpha_loss(self, act_log_prob : th.Tensor):
@@ -762,11 +779,11 @@ class SAC(RLAgent):
     
     # @th.compile(mode=compile_mode, fullgraph=True)
     def _alpha_stats(self, act_log_prob : th.Tensor):
-        return (act_log_prob.mean(),
-                act_log_prob.min(),
-                act_log_prob.max(),
-                act_log_prob.quantile(0.95),
-                act_log_prob.quantile(0.05) )
+        return th.stack([   act_log_prob.mean(),
+                            act_log_prob.min(),
+                            act_log_prob.max(),
+                            act_log_prob.quantile(0.95),
+                            act_log_prob.quantile(0.05)] )
 
     @th.compile(mode=compile_mode, fullgraph=True)
     def _compute_alpha_loss(self, transitions : TransitionBatch):
@@ -781,7 +798,7 @@ class SAC(RLAgent):
 
     @th.compile(mode=compile_mode, fullgraph=True)
     def _compute_actor_and_alpha_loss(self, transitions : TransitionBatch):
-        actor_loss = self._compute_actor_loss(transitions)
+        actor_loss, actor_stats = self._compute_actor_loss(transitions, get_stats=False)
         # self._start_range_nvtx("actor opt")
         
         # self._start_range_nvtx("_update_alpha")
@@ -792,12 +809,12 @@ class SAC(RLAgent):
             alpha_loss, alpha_stats = None, None
             loss = actor_loss
         
-        return loss, actor_loss, alpha_loss, alpha_stats
+        return loss, actor_loss, alpha_loss, alpha_stats, actor_stats
     
     @th.compile(mode=compile_mode, fullgraph=True)
     def _compute_all_losses(self, transitions):
         q_loss = self._compute_critic_loss(transitions)
-        actor_loss = self._compute_actor_loss(transitions, freeze_critic=True)
+        actor_loss, actor_stats = self._compute_actor_loss(transitions, freeze_critic=True, get_stats=False)
         # self._start_range_nvtx("actor opt")
         
         # self._start_range_nvtx("_update_alpha")
@@ -807,7 +824,7 @@ class SAC(RLAgent):
         else:
             alpha_loss, alpha_stats = None, None
             loss = actor_loss + q_loss
-        return loss, q_loss, actor_loss, alpha_loss, alpha_stats
+        return loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats
     
     @th.compile(mode=compile_mode, fullgraph=False)
     def _actor_and_alpha_opt_step(self, actor_loss : th.Tensor, alpha_loss : th.Tensor | None):
@@ -819,12 +836,12 @@ class SAC(RLAgent):
         if alpha_loss is not None:
             self._last_alpha_loss.copy_(alpha_loss.detach())
 
-    def _update_actor_and_alpha(self, transitions : TransitionBatch) -> tuple[th.Tensor, th.Tensor | None]:
+    def _update_actor_and_alpha(self, transitions : TransitionBatch):
         # We aggregate actor and alpha to join the two compilation regions and cuda graphs, so to reduce overhead
         # self._nvtx_start_range("_update_actor_and_alpha")
         self._actor_and_alpha_optimizer.zero_grad(set_to_none=True)
         # self._nvtx_start_range("_compute_actor_and_alpha_loss")
-        actor_alpha_loss, actor_loss, alpha_loss, alpha_stats = self._compute_actor_and_alpha_loss(transitions)
+        actor_alpha_loss, actor_loss, alpha_loss, alpha_stats, actor_stats = self._compute_actor_and_alpha_loss(transitions)
         # self._nvtx_end_range()
         # self._nvtx_start_range("actor_alpha backward")
         actor_alpha_loss.backward()
@@ -835,11 +852,9 @@ class SAC(RLAgent):
         # self._nvtx_end_range()
 
         if alpha_stats is not None:
-            self._stats.update({k:v for k,v in zip(["avg_log_prob",
-                                                    "min_log_prob",
-                                                    "max_log_prob",
-                                                    "q95_log_prob",
-                                                    "q05_log_prob"],alpha_stats)})            
+            self._stats.update({k:v for k,v in zip(self._alpha_stats_names,alpha_stats.detach().clone())})
+        if actor_stats is not None:
+            self._stats.update({k:v for k,v in zip(self._actor_stats_names,actor_stats.detach().clone())})      
         self._alpha_updates += 1
         self._actor_updates += 1
         # self._nvtx_end_range()
@@ -851,7 +866,7 @@ class SAC(RLAgent):
         self._q_optimizer.zero_grad(set_to_none=True)
 
         # self._nvtx_start_range("_compute_all_losses")
-        loss, q_loss, actor_loss, alpha_loss, alpha_stats = self._compute_all_losses(transitions)
+        loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats = self._compute_all_losses(transitions)
         # self._nvtx_end_range()
         # self._nvtx_start_range("all backward")
         loss.backward()
@@ -865,11 +880,9 @@ class SAC(RLAgent):
         # self._nvtx_end_range()
 
         if alpha_stats is not None:
-            self._stats.update({k:v for k,v in zip(["avg_log_prob",
-                                                    "min_log_prob",
-                                                    "max_log_prob",
-                                                    "q95_log_prob",
-                                                    "q05_log_prob"],alpha_stats)})            
+            self._stats.update({k:v for k,v in zip(self._alpha_stats_names,alpha_stats.detach().clone())})
+        if actor_stats is not None:
+            self._stats.update({k:v for k,v in zip(self._actor_stats_names,actor_stats.detach().clone())})
         self._critic_updates += 1
         self._alpha_updates += 1
         self._actor_updates += 1
