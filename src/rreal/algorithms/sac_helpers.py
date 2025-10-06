@@ -14,6 +14,7 @@ import adarl.utils.session
 from adarl.envs.vector_env_logger import VectorEnvLogger
 from adarl.utils.buffers import ThDReplayBuffer
 from adarl.utils.ThDictEpReplayBuffer import ThDictEpReplayBuffer
+from adarl.utils.ThVecDictEpReplayBuffer import ThVecDictEpReplayBuffer
 import adarl.utils.sigint_handler
 from rreal.algorithms.sac import SAC, train_off_policy, SAC_init_hparams
 from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector, SyncExperienceCollector
@@ -331,6 +332,20 @@ def sac_train(  seed : int,
         n_envs=hyperparams.parallel_envs,
         random_add=True,
         fallback_to_cpu_storage=False)
+    # rb = ThVecDictEpReplayBuffer( buffer_size=hyperparams.buffer_size,
+    #                             observation_space=observation_space,
+    #                             action_space=action_space,
+    #                             output_device=device,
+    #                             storage_torch_device=buffer_device,
+    #                             n_envs=hyperparams.parallel_envs,
+    #                             max_episode_duration=max_episode_duration,
+    #                             validation_buffer_size = validation_buffer_size,
+    #                             validation_holdout_ratio = validation_holdout_ratio,
+    #                             min_episode_duration = 0,
+    #                             disable_validation_set = True,
+    #                             fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
+    #                             val_buffer_min_size = validation_batch_size)
+    
     # rb = ThDictEpReplayBuffer(  buffer_size=hyperparams.buffer_size,
     #                             observation_space=observation_space,
     #                             action_space=action_space,
