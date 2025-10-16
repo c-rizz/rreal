@@ -82,6 +82,14 @@ def split_params_for_weight_decay(model : th.nn.Module,
     no_decay_group.update(extra_kwargs)
     return [decay_group, no_decay_group]
 
+def get_params_with_decay_mask( model : th.nn.Module,
+                                decay_bias : bool = False) -> tuple[list[th.Tensor], list[bool]]:
+    should_decay : list[bool] = []
+    params : list[th.Tensor] = []
+    for name, param in model.named_parameters():
+        should_decay.append((name.endswith(".bias") and not decay_bias) or name.endswith(".weight_g") or name.endswith(".original1"))
+        params.append(param)
+    return params, should_decay
 
 def simplified_clip_grad_norm_(
     parameters: list[th.Tensor],

@@ -57,7 +57,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     gamma = 0.99,
                                                     target_tau=0.005,
                                                     buffer_size=1_000_000,
-                                                    total_steps = 16000,
+                                                    total_steps = 100_000,
                                                     q_network_arch=[256,256],
                                                     policy_arch=[256,256],
                                                     learning_starts=10*num_envs*max_steps_per_episode,
@@ -140,7 +140,7 @@ if __name__ == "__main__":
     ap.add_argument("--seedsNum", default=1, type=int, help="Number of seeds to test with")
     ap.add_argument("--seedsOffset", default=0, type=int, help="Offset the used seeds by this amount")
     ap.add_argument("--comment", required = True, type=str, help="Comment explaining what this run is about")
-    ap.add_argument("--algo", required = False, type=str, help="Algorithm to use (SAC/PPO)")
+    ap.add_argument("--algo", default = "sac", type=str, help="Algorithm to use (SAC/PPO)")
 
     ap.set_defaults(feature=True)
     args = vars(ap.parse_args())

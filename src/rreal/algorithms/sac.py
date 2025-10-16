@@ -43,6 +43,7 @@ th._dynamo.config.compiled_autograd = True
 # I tried to dig a bit in the torch/dynamo/inductor code to understand at the end what is being ran when
 # calling a compiled function, but its deeeeeeeep
 compile_mode="max-autotune" # reduce overhead doesn't seem to reduce overhead more than max-autotune
+disable_compile = False
 
 def compare_dicts(d1 : dict, d2 : dict) -> tuple[bool, str]:
     all_keys = set(d1.keys()).union(set(d2.keys()))
@@ -117,6 +118,7 @@ class SAC_init_hparams:
     critic_weight_decay : float = 0.0
     actor_weight_decay : float = 0.0
     deterministic_collection_ratio : float = 0.0
+    rewards_num : int = 1
 
 
 class AnnealingFunction(Protocol):
@@ -158,14 +160,16 @@ class QNetwork(nn.Module):
                  torch_device : Union[str,th.device] = "cuda",
                  nets_num : int = 1,
                  initial_scale = 0.003,
-                 use_weightnorm : bool = True):
+                 use_weightnorm : bool = True,
+                 rewards_num : int = 1):
         super().__init__()
         self._nets_num = nets_num
         self._obs_size = observation_size
         self._use_weightnorm = use_weightnorm
+        self._rewards_num = rewards_num
         self._q_nets = build_mlp_net(arch=q_network_arch,
                                      input_size=action_size + observation_size,
-                                     output_size=1,
+                                     output_size=rewards_num,
                                      ensemble_size=self._nets_num,
                                      return_ensemble_mean=False,
                                      use_weightnorm=self._use_weightnorm,
@@ -181,12 +185,13 @@ class QNetwork(nn.Module):
         min_q = th.amin(qvals,dim=1)
         # min_q = min_q.squeeze(1)
         # ggLog.info(f"min_q.size() = {min_q.size()}")
-        return min_q
+        return min_q.view(-1, self._rewards_num)
     
     # @th.compile(mode=compile_mode, fullgraph=True)    
     def forward(self, observations, actions):
         qvals = self._q_nets(th.cat([observations, actions], 1))
-        return qvals
+        # ggLog.info(f"QNetwork.forward: qvals.size() = {qvals.size()}")
+        return qvals.view(-1, self._nets_num, self._rewards_num)
 
 
 
@@ -211,6 +216,9 @@ class Actor(nn.Module):
         self._obs_size = observation_size
         self._use_weightnorm = use_weightnorm
         self._mean_bounds_ratio = mean_bounds_ratio if mean_bounds_ratio is not None else 1.0
+        # ggLog.info(f"Actor mean_bounds_ratio = {self._mean_bounds_ratio}")
+        # ggLog.info(f"Actor action_max = {action_max} action_min = {action_min}")
+
         # save action scaling factors as non-trained parameters
         if isinstance(action_max, int): action_max = float(action_max)
         if isinstance(action_min, int): action_min = float(action_min)
@@ -242,34 +250,35 @@ class Actor(nn.Module):
                                          last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=log_std_init),
                                          hidden_activations=inner_activations).to(device=torch_device)        
 
-    def forward(self, observation_batch):
+    def forward(self, observation_batch, reference_action : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor]:
         hidden_batch = self.act_fc(observation_batch)
         # dbg_check_finite(hidden_batch)
         mean = self.act_fc_mean(hidden_batch)
+        if reference_action is not None:
+            mean = mean + reference_action
         # The mean squashing does not alter the action probability, so no change should be necessary on
         # the logprob correction done in sample_action, I think
         # Still, it helps to avoid boudary issues with the noise being reduced on the edges of the action space
         mean_scales = self._mean_bounds_ratio*self.action_scale
-        mean_biases = self._mean_bounds_ratio*self.action_bias
+        mean_biases = self.action_bias
         mean = th.tanh(mean/mean_scales)*mean_scales + mean_biases
 
         log_std = self.act_fc_logstd(hidden_batch)
         log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min # squash the log_std network output
+        log_std = log_std + th.log(self.action_scale) # scale the log_std with the action scale, so that it is relative to the action range
         return mean, log_std
 
-    @th_compile_ext(mode=compile_mode, fullgraph=True, copy_outs=True)
+    @th_compile_ext(mode=compile_mode, fullgraph=True, copy_outs=True, disable=disable_compile)
     def sample_action(self, observation_batch, reference_action : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        mean, log_std = self(observation_batch)
-        if reference_action is not None:
-            mean = mean + reference_action
+        mean, log_std = self(observation_batch, reference_action)
         std = log_std.exp()
         x_t = mean + th.empty_like(mean).normal_(mean=0.0, std=1.0)*std # rsample has issues with torch.compile
         normal = th.distributions.Normal(mean, std)
         log_prob = normal.log_prob(x_t) # get the probability of the actions that we sampled
-        y_t = th.tanh(x_t) # squash the action in [-1,1]
+        y_t = th.tanh((x_t-self.action_bias)/self.action_scale) # squash the action in [-1,1]
 
         # scale mean and action to the proper bounds
-        mean = th.tanh(mean) * self.action_scale + self.action_bias
+        # mean = th.tanh(mean) * self.action_scale + self.action_bias
         action = y_t * self.action_scale + self.action_bias
 
         log_prob = log_prob - th.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6) # correct the probability for the squashing and scaling
@@ -310,6 +319,7 @@ class SAC(RLAgent):
         critic_weight_decay : float
         actor_weight_decay : float
         actor_mean_bounds_ratio : float
+        rewards_num : int
 
     def __init__(self,
                  action_size : int,
@@ -378,7 +388,8 @@ class SAC(RLAgent):
                                    action_reference_obs_key = init_hparams.action_reference_obs_key,
                                    critic_weight_decay = init_hparams.critic_weight_decay,
                                    actor_weight_decay = init_hparams.actor_weight_decay,
-                                   actor_mean_bounds_ratio = init_hparams.actor_mean_bounds_ratio)
+                                   actor_mean_bounds_ratio = init_hparams.actor_mean_bounds_ratio,
+                                   rewards_num=init_hparams.rewards_num)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = self._hp.torch_device
         self._critic_updates = 0
@@ -413,12 +424,14 @@ class SAC(RLAgent):
                                 action_size=self._hp.action_size,
                                 q_network_arch=init_hparams.q_network_arch,
                                 torch_device=self._hp.torch_device,
-                                nets_num=2)
+                                nets_num=2,
+                                rewards_num=self._hp.rewards_num)
         self._q_net_target = QNetwork(  observation_size=critic_input_size,
                                         action_size=self._hp.action_size,
                                         q_network_arch=init_hparams.q_network_arch,
                                         torch_device=self._hp.torch_device,
-                                        nets_num=2)
+                                        nets_num=2,
+                                        rewards_num=self._hp.rewards_num)
         self._q_net_target.load_state_dict(self._q_net.state_dict())
         self._q_optimizer = optim.AdamW(split_params_for_weight_decay(self._q_net, self._hp.critic_weight_decay), lr=self._hp.q_lr)
         self._actor = Actor(policy_arch=init_hparams.policy_arch,
@@ -433,7 +446,7 @@ class SAC(RLAgent):
         # self._actor_optimizer = optim.Adam(split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay),
         #                                    lr=self._hp.policy_lr)
         self._base_target_entropy_factor = th.as_tensor(self._hp.target_entropy_factor, device=self._hp.torch_device, dtype=th.float32)
-        self._target_entropy = self._base_target_entropy_factor*self._hp.action_size
+        self._target_entropy = self._base_target_entropy_factor*self._hp.action_size/self._hp.rewards_num
         if init_hparams.target_entropy_factor_annealing is None:
             init_hparams.target_entropy_factor_annealing = ("constant", [self._base_target_entropy_factor])
         self._target_entropy_factor_annealing : AnnealingFunction = annealings[init_hparams.target_entropy_factor_annealing[0]](*init_hparams.target_entropy_factor_annealing[1])
@@ -671,14 +684,15 @@ class SAC(RLAgent):
     def reset_hidden_state(self):
         return
 
-    @th.compile(mode=compile_mode, fullgraph=True)
-    def _compute_critic_loss(self, transitions : TransitionBatch):
+    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
+    def _compute_critic_loss(self, transitions : TransitionBatch): #, get_stats : bool = False):
         critic_obss = self.get_critic_subobservation(transitions.observations)
         critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
         with th.no_grad():
+            batch_size = transitions.terminated.size()[0]
             critic_next_obss = self.get_critic_subobservation(transitions.next_observations)
             crit_next_enc_obss = self._critic_feature_extractor.extract_features(critic_next_obss)   
-            if self._share_actor_critic_feature_extractor:     
+            if self._share_actor_critic_feature_extractor:
                 actor_next_obss = critic_next_obss
                 actor_next_obss_enc = crit_next_enc_obss
             else:
@@ -688,20 +702,27 @@ class SAC(RLAgent):
             
             # Compute next-values for TD
             next_state_actions, next_state_log_pi, _, _ = self._actor.sample_action(actor_next_obss_enc, reference_action = reference_action)
-            q_next = self._q_net_target.get_min_qval(crit_next_enc_obss, next_state_actions)
+            q_next = self._q_net_target.get_min_qval(crit_next_enc_obss, next_state_actions).view(batch_size,self._hp.rewards_num) # shape: batch x rewards_num
             soft_q_next = q_next - self._alpha * next_state_log_pi
-            td_q_values = transitions.rewards.flatten() + (1 - transitions.terminated.flatten()) * self._hp.gamma * (soft_q_next).view(-1)
+            
+            soft_q_next = soft_q_next.view(batch_size,self._hp.rewards_num) # shape: batch x rewards_num
+            rewards     = transitions.rewards.view(batch_size, self._hp.rewards_num)
+            terminateds = transitions.terminated.expand(batch_size,self._hp.rewards_num)
+
+            td_q_values = rewards + (1 - terminateds) * self._hp.gamma * soft_q_next
 
 
         # ggLog.info(f"td_q_values.size() = {td_q_values.size()}")
-        q_values = self._q_net(critic_enc_obss, transitions.actions)
+        q_values = self._q_net(critic_enc_obss, transitions.actions).view(batch_size,2,self._hp.rewards_num)
         # ggLog.info(f"q_values.size() = {q_values.size()}")
-        td_q_values = td_q_values.unsqueeze(1).unsqueeze(2)
-        td_q_values = td_q_values.expand(-1,2,1)
+        td_q_values = td_q_values.view(batch_size,1,self._hp.rewards_num)
+        td_q_values = td_q_values.expand(batch_size,2,self._hp.rewards_num)
         # ggLog.info(f"td_q_values.size() = {td_q_values.size()}")
-        return F.mse_loss(q_values, td_q_values)
+        square_errs = (q_values - td_q_values)**2
+        per_reward_square_errs = square_errs.mean(dim=(0,1)) # mean over batch and nets
+        return th.mean(per_reward_square_errs), per_reward_square_errs
 
-    @th.compile(mode=compile_mode, fullgraph=False)
+    @th.compile(mode=compile_mode, fullgraph=False, disable=disable_compile)
     def _critic_opt_step(self, q_loss : th.Tensor):
         simplified_clip_grad_norm_(list(self._q_net.parameters()), self._hp.max_grad_norm)
         self._q_optimizer.step()
@@ -714,7 +735,7 @@ class SAC(RLAgent):
         self._q_optimizer.zero_grad(set_to_none=True)
         # self._nvtx_start_range("critic forward")
         # ggLog.info(f"compute_critic_loss...")
-        q_loss = self._compute_critic_loss(transitions)
+        q_loss, subq_errs = self._compute_critic_loss(transitions)
         # ggLog.info(f"compute_critic_loss done")
         # self._nvtx_end_range()
         # self._nvtx_start_range("critic backward")
@@ -723,6 +744,9 @@ class SAC(RLAgent):
         # self._nvtx_start_range("critic opt")
         with th.no_grad():
             self._critic_opt_step(q_loss)
+        
+        if subq_errs is not None:
+            self._stats.update({f"q_loss_r{i}":err for i,err in enumerate(subq_errs.detach().clone())})
         # self._nvtx_end_range()
         self._critic_updates += 1
         # self._nvtx_end_range()
@@ -751,15 +775,16 @@ class SAC(RLAgent):
         if freeze_critic: 
             # Needed if we are updating actor and critic together, if done separately we just ignore these grads at optimizer time
             # In torch compile we cannot change requires grad, so we detach the weights, using this functional thing
-            min_q_pi = th.amin(th.func.functional_call(self._q_net, {k:t.detach() for k,t in dict(self._q_net.named_parameters()).items()}, (critic_enc_obss, act)), dim = 1) 
+            min_qs_pi = th.amin(th.func.functional_call(self._q_net, {k:t.detach() for k,t in dict(self._q_net.named_parameters()).items()}, (critic_enc_obss, act)), dim = 1) 
         else:    
-            min_q_pi = self._q_net.get_min_qval(critic_enc_obss, act)
+            min_qs_pi = self._q_net.get_min_qval(critic_enc_obss, act)
+        min_qs_pi = min_qs_pi.sum(dim=1, keepdim=True) # Sum all the qvalues for the different rewards
         
         # ggLog.info(f"min_q_pi.size() = {min_q_pi.size()}")
         # ggLog.info(f"act_log_prob.size() = {act_log_prob.size()}")
         # self._mark_nvtx("ret_q")
         if get_stats:
-            actor_stats = th.stack([  act_mean.mean(),
+            actor_stats = th.stack([act_mean.mean(),
                                     act_mean.min(),
                                     act_mean.max(),
                                     act_mean.quantile(0.95),
@@ -771,7 +796,7 @@ class SAC(RLAgent):
                                     act_logstd.quantile(0.05)])
         else:
             actor_stats = None
-        return ((self._alpha * act_log_prob) - min_q_pi).mean(), actor_stats
+        return ((self._alpha * act_log_prob) - min_qs_pi).mean(), actor_stats
     
     # @th.compile(mode=compile_mode, fullgraph=True)
     def _alpha_loss(self, act_log_prob : th.Tensor):
@@ -785,7 +810,7 @@ class SAC(RLAgent):
                             act_log_prob.quantile(0.95),
                             act_log_prob.quantile(0.05)] )
 
-    @th.compile(mode=compile_mode, fullgraph=True)
+    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
     def _compute_alpha_loss(self, transitions : TransitionBatch):
         with th.no_grad():
             actor_obss = self.get_actor_subobservation(transitions.observations)
@@ -796,7 +821,7 @@ class SAC(RLAgent):
         return self._alpha_loss(act_log_prob), stats
     
 
-    @th.compile(mode=compile_mode, fullgraph=True)
+    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
     def _compute_actor_and_alpha_loss(self, transitions : TransitionBatch):
         actor_loss, actor_stats = self._compute_actor_loss(transitions, get_stats=False)
         # self._start_range_nvtx("actor opt")
@@ -811,9 +836,9 @@ class SAC(RLAgent):
         
         return loss, actor_loss, alpha_loss, alpha_stats, actor_stats
     
-    @th.compile(mode=compile_mode, fullgraph=True)
+    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
     def _compute_all_losses(self, transitions):
-        q_loss = self._compute_critic_loss(transitions)
+        q_loss, subq_square_errs = self._compute_critic_loss(transitions)
         actor_loss, actor_stats = self._compute_actor_loss(transitions, freeze_critic=True, get_stats=False)
         # self._start_range_nvtx("actor opt")
         
@@ -824,9 +849,9 @@ class SAC(RLAgent):
         else:
             alpha_loss, alpha_stats = None, None
             loss = actor_loss + q_loss
-        return loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats
+        return loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, subq_square_errs
     
-    @th.compile(mode=compile_mode, fullgraph=False)
+    @th.compile(mode=compile_mode, fullgraph=False, disable=disable_compile)
     def _actor_and_alpha_opt_step(self, actor_loss : th.Tensor, alpha_loss : th.Tensor | None):
         simplified_clip_grad_norm_(list(self._actor.parameters()), self._hp.max_grad_norm)
         simplified_clip_grad_norm_([self._log_alpha], self._hp.max_grad_norm)
@@ -866,7 +891,7 @@ class SAC(RLAgent):
         self._q_optimizer.zero_grad(set_to_none=True)
 
         # self._nvtx_start_range("_compute_all_losses")
-        loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats = self._compute_all_losses(transitions)
+        loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, subq_errs = self._compute_all_losses(transitions)
         # self._nvtx_end_range()
         # self._nvtx_start_range("all backward")
         loss.backward()
@@ -883,6 +908,8 @@ class SAC(RLAgent):
             self._stats.update({k:v for k,v in zip(self._alpha_stats_names,alpha_stats.detach().clone())})
         if actor_stats is not None:
             self._stats.update({k:v for k,v in zip(self._actor_stats_names,actor_stats.detach().clone())})
+        if subq_errs is not None:
+            self._stats.update({f"q_loss_r{i}":err for i,err in enumerate(subq_errs.detach().clone())})
         self._critic_updates += 1
         self._alpha_updates += 1
         self._actor_updates += 1
@@ -895,7 +922,7 @@ class SAC(RLAgent):
         else:
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
-    @th.compile(mode=compile_mode, fullgraph=True)        
+    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)        
     def _update_target_nets(self):
         for param, target_param in zip(self._q_net.parameters(), self._q_net_target.parameters()):
             self._target_update(param, target_param, self._hp.target_tau)
@@ -977,9 +1004,9 @@ class SAC(RLAgent):
     def validate(self, buffer : BaseValidatingBuffer, batch_size : int):
         with th.no_grad():
             transitions = buffer.sample_validation(batch_size=batch_size)
-            critic_loss = self._compute_critic_loss(transitions)
-            actor_loss = self._compute_actor_loss(transitions)
-            alpha_loss = self._compute_alpha_loss(transitions)
+            critic_loss, square_errs = self._compute_critic_loss(transitions)
+            actor_loss, _ = self._compute_actor_loss(transitions)
+            alpha_loss, _ = self._compute_alpha_loss(transitions)
         self._stats.update({"val_q_loss":critic_loss,
                             "val_actor_loss":actor_loss,
                             "val_alpha_loss":alpha_loss})

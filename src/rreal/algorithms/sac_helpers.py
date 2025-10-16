@@ -322,29 +322,29 @@ def sac_train(  seed : int,
 
     # compiled_model = th.compile(model)
 
-    rb = ThDReplayBuffer(
-        buffer_size=hyperparams.buffer_size,
-        observation_space=observation_space,
-        action_space=action_space,
-        out_device=device,
-        storage_torch_device=buffer_device,
-        handle_timeout_termination=True,
-        n_envs=hyperparams.parallel_envs,
-        random_add=True,
-        fallback_to_cpu_storage=False)
-    # rb = ThVecDictEpReplayBuffer( buffer_size=hyperparams.buffer_size,
-    #                             observation_space=observation_space,
-    #                             action_space=action_space,
-    #                             output_device=device,
-    #                             storage_torch_device=buffer_device,
-    #                             n_envs=hyperparams.parallel_envs,
-    #                             max_episode_duration=max_episode_duration,
-    #                             validation_buffer_size = validation_buffer_size,
-    #                             validation_holdout_ratio = validation_holdout_ratio,
-    #                             min_episode_duration = 0,
-    #                             disable_validation_set = True,
-    #                             fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
-    #                             val_buffer_min_size = validation_batch_size)
+    # rb = ThDReplayBuffer(
+    #     buffer_size=hyperparams.buffer_size,
+    #     observation_space=observation_space,
+    #     action_space=action_space,
+    #     out_device=device,
+    #     storage_torch_device=buffer_device,
+    #     handle_timeout_termination=True,
+    #     n_envs=hyperparams.parallel_envs,
+    #     random_add=True,
+    #     fallback_to_cpu_storage=False)
+    rb = ThVecDictEpReplayBuffer( buffer_size=hyperparams.buffer_size,
+                                observation_space=observation_space,
+                                action_space=action_space,
+                                output_device=device,
+                                storage_torch_device=buffer_device,
+                                n_envs=hyperparams.parallel_envs,
+                                max_episode_duration=max_episode_duration,
+                                validation_buffer_size = validation_buffer_size,
+                                validation_holdout_ratio = validation_holdout_ratio,
+                                min_episode_duration = 0,
+                                disable_validation_set = True,
+                                fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
+                                val_buffer_min_size = validation_batch_size)
     
     # rb = ThDictEpReplayBuffer(  buffer_size=hyperparams.buffer_size,
     #                             observation_space=observation_space,
