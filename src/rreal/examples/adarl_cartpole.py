@@ -101,7 +101,7 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                     overlay_text_xy=(0.025,0.025),
                                     overlay_text_height=0.035,
                                     overlay_text_color_rgb=(255,150,0),
-                                    overlay_text_func=lambda vo, a, r, te, tr, info:   
+                                    overlay_text_func=lambda vo, a, r, te, tr, info, extra_info:   
                                             f"\n"
                                             f"Angle    {info['pole_angle']: .3f}")
     return vrunner

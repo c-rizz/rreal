@@ -26,10 +26,12 @@ import torch.multiprocessing as mp
 from rreal.algorithms.rl_agent import RLAgent
 
 class ExperienceCollector(ABC):
-    def __init__(self, vec_env : gym.vector.VectorEnv,
+    def __init__(self, vec_env : gym.vector.VectorEnv | None,
                         buffer : Optional[BasicStorage] = None,
                         log_freq = 0):
         self._vec_env = vec_env
+        if vec_env is not None:
+            self._obs_space, self._action_space, self._reward_space = self._get_vecenv_spaces()
         self._current_obs : dict[str, th.Tensor] = None # type: ignore
         self._collector_model : th.nn.Module
         self._buffer = buffer
@@ -51,19 +53,41 @@ class ExperienceCollector(ABC):
     def num_envs(self):
         return self._vec_env.unwrapped.num_envs
 
+    def _get_vecenv_spaces(self):
+        observation_space = self._vec_env.unwrapped.single_observation_space
+        action_space = self._vec_env.unwrapped.single_action_space
+        if hasattr(self._vec_env.unwrapped, "single_reward_space"):
+            reward_space = self._vec_env.unwrapped.single_reward_space
+        else:
+            reward_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
+        return observation_space, action_space, reward_space
+
+    def _rewards_num(self):
+        if isinstance(self._reward_space, gym.spaces.Box):
+            if len(self._reward_space.shape) == 0:
+                rewards_num = 1
+            elif len(self._reward_space.shape) == 1:
+                rewards_num = self._reward_space.shape[0]
+            else:
+                raise RuntimeError(f"AsyncProcessExperienceCollector: unsupported reward space shape {self._reward_space.shape}, dimensionality can only be 0 or 1.")
+        else:
+            raise RuntimeError(f"AsyncProcessExperienceCollector: unsupported reward space type {self._reward_space}")
+        return rewards_num
+    
+    def observation_space(self):
+        return self._obs_space
+    
+    def action_space(self):
+        return self._action_space
+    
+    def reward_space(self):
+        return self._reward_space
+    
     def reset(self):
         with th.no_grad():
             if self._vec_env is not None:
                 self._current_obs, info = self._vec_env.reset()
             self._current_obs = copy.deepcopy(self._current_obs) # make a copy of it to avoid inplace issues, this will be then in-place written during the steps
-            
-    @abstractmethod
-    def observation_space(self) -> gym.Space:
-        raise NotImplementedError()
-    
-    @abstractmethod
-    def action_space(self) -> gym.Space:
-        raise NotImplementedError()
 
     def collect_experience(self, policy : RLAgent, vsteps_to_collect, global_vstep_count, random_vsteps, policy_device,
                            buffer : BasicStorage, deterministic_ratio = 0.0):
@@ -182,8 +206,9 @@ class AsyncThreadExperienceCollector(ExperienceCollector):
         self._buffer_size = buffer_size
         self._storage_torch_device = storage_torch_device
         self._buffer = BasicStorage(buffer_size = self._buffer_size,
-                                    observation_space=self._vec_env.single_observation_space,
-                                    action_space=self._vec_env.single_action_space,
+                                    observation_space=self._obs_space,
+                                    action_space=self._action_space,
+                                    rewards_num=self._rewards_num(),
                                     n_envs=self._vec_env.num_envs,
                                     storage_torch_device=self._storage_torch_device,
                                     share_mem=True,
@@ -227,11 +252,6 @@ class AsyncThreadExperienceCollector(ExperienceCollector):
         self._running = False
         self._collector_thread.join()
 
-    def observation_space(self):
-        return self._vec_env.single_observation_space
-    
-    def action_space(self):
-        return self._vec_env.single_action_space
         
     def collection_duration(self):
         return self._last_collection_duration
@@ -247,8 +267,9 @@ class SyncExperienceCollector(ExperienceCollector):
         self._started_collect = False
         self._storage_torch_device = storage_torch_device
         self._buffer = BasicStorage(buffer_size = self._buffer_size,
-                                    observation_space=self._vec_env.single_observation_space,
-                                    action_space=self._vec_env.single_action_space,
+                                    observation_space=self._obs_space,
+                                    action_space=self._action_space,
+                                    rewards_num=self._rewards_num(),
                                     n_envs=self._vec_env.num_envs,
                                     storage_torch_device=self._storage_torch_device,
                                     share_mem=True,
@@ -278,12 +299,6 @@ class SyncExperienceCollector(ExperienceCollector):
 
     def close(self):
         self._running = False
-
-    def observation_space(self):
-        return self._vec_env.single_observation_space
-    
-    def action_space(self):
-        return self._vec_env.single_action_space
         
     def collection_duration(self):
         return self._last_collection_duration
@@ -322,14 +337,16 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         p2.close()
         counter += 1
 
+        self._obs_space : gym.Space
+        self._action_space : gym.Space
+        self._reward_space : gym.Space
+        self._num_envs : int
         self._build_env()
         atexit.register(self.close)
 
     def _build_env(self):
         self._commander.set_command("build_env")
-        self._obs_space : gym.Space
-        self._action_space : gym.Space
-        self._buffer, self._obs_space, self._action_space, self._num_envs = self._pipe.recv()
+        self._buffer, self._obs_space, self._action_space, self._reward_space, self._num_envs = self._pipe.recv()
         self._commander.wait_done(timeout=60)
 
     def observation_space(self) -> gym.Space:
@@ -337,6 +354,9 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
     
     def action_space(self) -> gym.Space:
         return self._action_space
+    
+    def reward_space(self) -> gym.Space:
+        return self._reward_space
 
     def num_envs(self):
         return self._num_envs    
@@ -362,19 +382,20 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                 if cmd == b"build_env":
                     self._vec_env : gym.vector.VectorEnv = self._vec_env_builder.var()
                     self.reset()
+                    self._obs_space, self._action_space, self._reward_space = self._get_vecenv_spaces()
                     self._buffer = BasicStorage(buffer_size = self._buffer_size,
-                                                observation_space=self._vec_env.unwrapped.single_observation_space,
-                                                action_space=self._vec_env.unwrapped.single_action_space,
+                                                observation_space=self._obs_space,
+                                                action_space=self._action_space,
+                                                rewards_num=self._rewards_num(),
                                                 n_envs=self._vec_env.unwrapped.num_envs,
                                                 storage_torch_device=self._storage_torch_device,
                                                 share_mem=True,
                                                 allow_rollover=False)
-                    self._obs_space = self._vec_env.unwrapped.single_observation_space
-                    self._action_space = self._vec_env.unwrapped.single_action_space
                     self._num_envs = self._vec_env.unwrapped.num_envs
                     self._pipe.send((self._buffer, 
                                     self._obs_space,
                                     self._action_space,
+                                    self._reward_space,
                                     self._num_envs))
                 if cmd == b"build_model":
                     # To ensure the correctly built model is used for collection we build it

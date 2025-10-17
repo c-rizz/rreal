@@ -247,7 +247,17 @@ def wrap_with_gym(vec_runner_builder : VecEnvRunnerBuilderProtocol) -> VecEnvBui
                                     quiet=env_builder_args["quiet"])
     return wrapped_builder
 
-from dataclasses import dataclass
+def _rewards_num(reward_space):
+    if isinstance(reward_space, gym.spaces.Box):
+        if len(reward_space.shape) == 0:
+            rewards_num = 1
+        elif len(reward_space.shape) == 1:
+            rewards_num = reward_space.shape[0]
+        else:
+            raise RuntimeError(f"AsyncProcessExperienceCollector: unsupported reward space shape {reward_space.shape}, dimensionality can only be 0 or 1.")
+    else:
+        raise RuntimeError(f"AsyncProcessExperienceCollector: unsupported reward space type {reward_space}")
+    return rewards_num
 
 
 def sac_train(  seed : int,
@@ -314,6 +324,9 @@ def sac_train(  seed : int,
     collector.set_base_collector_model(lambda o,a: build_sac(o,a,hyperparams))    
     observation_space = collector.observation_space()
     action_space = collector.action_space()
+    rewards_num = _rewards_num(collector.reward_space())
+
+    hyperparams.rewards_num = rewards_num
     model = build_sac(observation_space, action_space, hyperparams)
 
     # torchexplorer.watch(model, backend="wandb")
@@ -332,7 +345,7 @@ def sac_train(  seed : int,
     #     n_envs=hyperparams.parallel_envs,
     #     random_add=True,
     #     fallback_to_cpu_storage=False)
-    rb = ThVecDictEpReplayBuffer( buffer_size=hyperparams.buffer_size,
+    rb = ThVecDictEpReplayBuffer(buffer_size=hyperparams.buffer_size,
                                 observation_space=observation_space,
                                 action_space=action_space,
                                 output_device=device,
@@ -344,7 +357,8 @@ def sac_train(  seed : int,
                                 min_episode_duration = 0,
                                 disable_validation_set = True,
                                 fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
-                                val_buffer_min_size = validation_batch_size)
+                                val_buffer_min_size = validation_batch_size,
+                                rewards_num=rewards_num)
     
     # rb = ThDictEpReplayBuffer(  buffer_size=hyperparams.buffer_size,
     #                             observation_space=observation_space,
