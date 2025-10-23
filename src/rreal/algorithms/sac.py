@@ -236,6 +236,7 @@ class Actor(nn.Module):
                                     last_activation_class=inner_activations,
                                     hidden_activations=inner_activations,
                                     use_weightnorm=self._use_weightnorm).to(device=torch_device)
+        action_mean_init = th.as_tensor(action_mean_init, dtype=th.float32).to(device=torch_device)
         mean_init = th.atanh((action_mean_init-self.action_bias)/self.action_scale).to("cpu")
         self.act_fc_mean = build_mlp_net(arch=[],
                                          input_size=policy_arch[-1],
@@ -325,12 +326,13 @@ class SAC(RLAgent):
                  action_size : int,
                  init_hparams : SAC_init_hparams,
                  observation_space : gym.spaces.Space,
+                 reward_space : gym.spaces.Space,
                  action_init : th.Tensor | float = 0.0,
                  action_max : Union[float, List[float]] = 1.0,
                  action_min : Union[float, List[float]] = -1.0,
                  actor_feature_extractor : FeatureExtractor | None = None,
                  critic_feature_extractor : FeatureExtractor | None = None,
-                 merge_actor_and_critic_updates : bool = True
+                 merge_actor_and_critic_updates : bool = True,
                  ):
         super().__init__()
         self._init_args = get_func_input_args(exclude=[ "self",
@@ -340,6 +342,7 @@ class SAC(RLAgent):
                                                         "actor_feature_extractor"])
         # ggLog.info(f"self._init_args = \n"+pprint.pformat(self._init_args))
         self._init_args = copy.deepcopy(self._init_args)
+        rewards_num = spaces.get_1d_space_size(reward_space)
         init_hparams = copy.deepcopy(init_hparams)
         if init_hparams.target_entropy_factor is None:
             init_hparams.target_entropy_factor = -1.0
@@ -389,7 +392,7 @@ class SAC(RLAgent):
                                    critic_weight_decay = init_hparams.critic_weight_decay,
                                    actor_weight_decay = init_hparams.actor_weight_decay,
                                    actor_mean_bounds_ratio = init_hparams.actor_mean_bounds_ratio,
-                                   rewards_num=init_hparams.rewards_num)
+                                   rewards_num = rewards_num)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = self._hp.torch_device
         self._critic_updates = 0
@@ -425,13 +428,13 @@ class SAC(RLAgent):
                                 q_network_arch=init_hparams.q_network_arch,
                                 torch_device=self._hp.torch_device,
                                 nets_num=2,
-                                rewards_num=self._hp.rewards_num)
+                                rewards_num=rewards_num)
         self._q_net_target = QNetwork(  observation_size=critic_input_size,
                                         action_size=self._hp.action_size,
                                         q_network_arch=init_hparams.q_network_arch,
                                         torch_device=self._hp.torch_device,
                                         nets_num=2,
-                                        rewards_num=self._hp.rewards_num)
+                                        rewards_num=rewards_num)
         self._q_net_target.load_state_dict(self._q_net.state_dict())
         self._q_optimizer = optim.AdamW(split_params_for_weight_decay(self._q_net, self._hp.critic_weight_decay), lr=self._hp.q_lr)
         self._actor = Actor(policy_arch=init_hparams.policy_arch,
@@ -446,7 +449,7 @@ class SAC(RLAgent):
         # self._actor_optimizer = optim.Adam(split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay),
         #                                    lr=self._hp.policy_lr)
         self._base_target_entropy_factor = th.as_tensor(self._hp.target_entropy_factor, device=self._hp.torch_device, dtype=th.float32)
-        self._target_entropy = self._base_target_entropy_factor*self._hp.action_size/self._hp.rewards_num
+        self._target_entropy = self._base_target_entropy_factor*self._hp.action_size/rewards_num
         if init_hparams.target_entropy_factor_annealing is None:
             init_hparams.target_entropy_factor_annealing = ("constant", [self._base_target_entropy_factor])
         self._target_entropy_factor_annealing : AnnealingFunction = annealings[init_hparams.target_entropy_factor_annealing[0]](*init_hparams.target_entropy_factor_annealing[1])

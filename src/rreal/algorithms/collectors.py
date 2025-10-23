@@ -24,6 +24,12 @@ import time
 import torch as th
 import torch.multiprocessing as mp
 from rreal.algorithms.rl_agent import RLAgent
+import typing
+
+
+class ModelBuilderProtocol(typing.Protocol):
+    def __call__(self, observation_space : gym.Space, action_space : gym.Space, reward_space : gym.Space) -> RLAgent:
+        ...
 
 class ExperienceCollector(ABC):
     def __init__(self, vec_env : Union[gym.vector.VectorEnv, None],
@@ -33,7 +39,7 @@ class ExperienceCollector(ABC):
         if vec_env is not None:
             self._obs_space, self._action_space, self._reward_space = self._get_vecenv_spaces()
         self._current_obs : dict[str, th.Tensor] = None # type: ignore
-        self._collector_model : th.nn.Module
+        self._collector_model : RLAgent
         self._buffer = buffer
         self._vecenv_is_torch = True
         self._stats = { "t_act" : 0.,
@@ -47,8 +53,8 @@ class ExperienceCollector(ABC):
         self._log_freq = log_freq
 
 
-    def set_base_collector_model(self, model_builder : Callable[[gym.spaces.Space, gym.spaces.Space],th.nn.Module]):
-        self._collector_model = copy.deepcopy(model_builder(self.observation_space(), self.action_space()))
+    def set_base_collector_model(self, model_builder : ModelBuilderProtocol):
+        self._collector_model = copy.deepcopy(model_builder(self.observation_space(), self.action_space(), self.reward_space()))
 
     def num_envs(self):
         return self._vec_env.unwrapped.num_envs
@@ -201,7 +207,7 @@ class AsyncThreadExperienceCollector(ExperienceCollector):
         self._start_collect = threading.Event()
         self._collect_done = threading.Event()
         self._collect_done.set() # As if we already collected something and it finished
-        self._collector_model : th.nn.Module
+        self._collector_model : RLAgent
         self._running = True
         self._buffer_size = buffer_size
         self._storage_torch_device = storage_torch_device
@@ -262,7 +268,7 @@ class SyncExperienceCollector(ExperienceCollector):
                         storage_torch_device):
         super().__init__(vec_env=vec_env)
 
-        self._collector_model : th.nn.Module
+        self._collector_model : RLAgent
         self._buffer_size = buffer_size
         self._started_collect = False
         self._storage_torch_device = storage_torch_device
@@ -361,7 +367,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
     def num_envs(self):
         return self._num_envs    
 
-    def set_base_collector_model(self, model_builder : Callable[[gym.spaces.Space, gym.spaces.Space],th.nn.Module]):
+    def set_base_collector_model(self, model_builder : ModelBuilderProtocol):
         self._base_model_builder = CloudpickleWrapper(model_builder)
         self._pipe.send(self._base_model_builder)
         self._commander.set_command("build_model")
@@ -380,6 +386,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                 cmd = self._commander.wait_command()
                 # ggLog.info(f"got command {cmd}")
                 if cmd == b"build_env":
+                    ggLog.info(f"{type(self)}: building vec env")
                     self._vec_env : gym.vector.VectorEnv = self._vec_env_builder.var()
                     self.reset()
                     self._obs_space, self._action_space, self._reward_space = self._get_vecenv_spaces()
@@ -402,7 +409,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                     # directyl in the worker, to avoid any issue that may arise by sending it 
                     # throucgh the pipe. Then we update its parameters by sharing the state dict
                     self._base_model_builder = self._pipe.recv()
-                    self._collector_model = self._base_model_builder.var(self._obs_space, self._action_space)
+                    self._collector_model : RLAgent = self._base_model_builder.var(self._obs_space, self._action_space, self._reward_space)
                     self._state_dict = self._collector_model.state_dict()
                     self._pipe.send(self._state_dict)
                 elif cmd == b"collect":
@@ -432,7 +439,10 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
 
     def start_collection(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):
         for n,t in model_state_dict.items():
-            self._state_dict[n].copy_(t)
+            try:
+                self._state_dict[n].copy_(t)
+            except Exception as e:
+                raise RuntimeError(f"Error copying param {n} to collector model: _state_dict[n].size()={self._state_dict[n].size()}, t.size()={t.size()}\n{e}") from e
         self._collect_args[:] = vsteps_to_collect, global_vstep_count, random_vsteps
         self._commander.set_command("collect")
 
