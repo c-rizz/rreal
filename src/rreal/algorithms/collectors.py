@@ -26,7 +26,7 @@ import torch.multiprocessing as mp
 from rreal.algorithms.rl_agent import RLAgent
 
 class ExperienceCollector(ABC):
-    def __init__(self, vec_env : gym.vector.VectorEnv | None,
+    def __init__(self, vec_env : Union[gym.vector.VectorEnv, None],
                         buffer : Optional[BasicStorage] = None,
                         log_freq = 0):
         self._vec_env = vec_env
