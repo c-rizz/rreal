@@ -12,6 +12,7 @@ from typing import Any
 
 
 def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = "", autoreset = True, quiet = False):
+    print(f"Building cartpole vrunner with args: {env_builder_args}")
     mode = env_builder_args["mode"]
     th_device = env_builder_args["th_device"]
     quiet = env_builder_args["quiet"]
@@ -103,7 +104,10 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                     overlay_text_color_rgb=(255,150,0),
                                     overlay_text_func=lambda vo, a, r, te, tr, info, extra_info:   
                                             f"\n"
-                                            f"Angle    {info['pole_angle']: .3f}")
+                                            f"Angle    {info['pole_angle']: .3f} \n"
+                                            f"Position {info['cart_pos']: .3f} \n"
+                                            f"Step     {info['step_count']} \n"
+                                            f"Reward   {info['reward']: .3f} \n")
     return vrunner
 
 def cartpole_venv_builder(  seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = ""):
@@ -195,7 +199,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
         "name" : "video_stoch",
         "deterministic" : False, # If using the policy as deterministic or not
         "eval_freq_ep" : num_envs*10, # How often perform evaluation runs are performed
-        "eval_eps" : 1, # how many episodes to run for each evaluation run
+        "eval_eps" : 10, # how many episodes to run for each evaluation run
         "env_builder_args" : video_eval_env_builder_args, # env args for the eval
         "num_envs" : 1, # numbero of parallel eval envs
     }
@@ -211,24 +215,24 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                     args, # Run arguments
                     vec_env_builder  = cartpole_venv_builder,
                     env_builder_args = env_builder_args, 
-                    hyperparams = SAC_init_hparams(  train_freq_vstep=16, # do 1 train step every 16 vsteps
+                    hyperparams = SAC_init_hparams( train_freq_vstep=16, # do 1 train step every 16 vsteps
                                                     grad_steps=16, # do 16 grad steps per train step
                                                     parallel_envs = num_envs,
                                                     batch_size = 512, 
                                                     q_lr=1e-3,
-                                                    policy_lr=3e-4,
+                                                    policy_lr=1e-3,
                                                     model_th_device = train_device,
                                                     gamma = 0.99,
                                                     target_tau=0.005,
-                                                    buffer_size=1_000_000,
+                                                    buffer_size=num_envs*max_steps_per_episode*100,
                                                     total_steps = num_envs*max_steps_per_episode*100, # Total training steps to do
                                                     q_network_arch=[64,64],
                                                     policy_arch=[64,64],
-                                                    learning_starts=num_envs*max_steps_per_episode*50, # The training of the agent starts after these steps are collected
+                                                    learning_starts=min(num_envs*max_steps_per_episode*2, 100_000), # The training of the agent starts after these steps are collected
                                                     log_freq_vstep = 1000, # Print logs at this frequency
                                                     reference_init_args={"env_builder_args": env_builder_args}, # Save also these arguments when the policy gets saved
-                                                    target_entropy_factor=-0.5,
-                                                    actor_log_std_init=-1.0),
+                                                    target_entropy_factor=-3.0,
+                                                    actor_log_std_init=-0.0),
                     collector_device=collect_device, # Device used byt the experience collector, if possible keep this on cuda
                     max_episode_duration=max_steps_per_episode,
                     validation_buffer_size = 0, #100_000, # Used for computing validation losses

@@ -189,8 +189,9 @@ def build_eval_callbacks(eval_configurations : list[dict],
 #     envs = VectorEnvLogger(env = envs)
 #     return envs
 
-def build_sac(obs_space : gym.Space, act_space : gym.Space, hyperparams : SAC_init_hparams):
+def build_sac(obs_space : gym.Space, act_space : gym.Space, reward_space : gym.Space, hyperparams : SAC_init_hparams):
     agent = SAC(observation_space=obs_space,
+                reward_space=reward_space,
                 action_size=int(np.prod(act_space.shape)),
                 action_min = act_space.low.tolist(),
                 action_max = act_space.high.tolist(),
@@ -246,18 +247,6 @@ def wrap_with_gym(vec_runner_builder : VecEnvRunnerBuilderProtocol) -> VecEnvBui
                                                                 num_envs = num_envs),
                                     quiet=env_builder_args["quiet"])
     return wrapped_builder
-
-def _rewards_num(reward_space):
-    if isinstance(reward_space, gym.spaces.Box):
-        if len(reward_space.shape) == 0:
-            rewards_num = 1
-        elif len(reward_space.shape) == 1:
-            rewards_num = reward_space.shape[0]
-        else:
-            raise RuntimeError(f"AsyncProcessExperienceCollector: unsupported reward space shape {reward_space.shape}, dimensionality can only be 0 or 1.")
-    else:
-        raise RuntimeError(f"AsyncProcessExperienceCollector: unsupported reward space type {reward_space}")
-    return rewards_num
 
 
 def sac_train(  seed : int,
@@ -321,13 +310,12 @@ def sac_train(  seed : int,
                                 collector_device = collector_device,
                                 collector_buffer_size = hyperparams.train_freq_vstep*hyperparams.parallel_envs,
                                 session = session)
-    collector.set_base_collector_model(lambda o,a: build_sac(o,a,hyperparams))    
+    collector.set_base_collector_model(lambda o,a,r: build_sac(o,a,r,hyperparams))
     observation_space = collector.observation_space()
     action_space = collector.action_space()
-    rewards_num = _rewards_num(collector.reward_space())
+    reward_space = collector.reward_space()
 
-    hyperparams.rewards_num = rewards_num
-    model = build_sac(observation_space, action_space, hyperparams)
+    model = build_sac(observation_space, action_space, reward_space, hyperparams)
 
     # torchexplorer.watch(model, backend="wandb")
     if log_weights_and_grads:
@@ -345,6 +333,7 @@ def sac_train(  seed : int,
     #     n_envs=hyperparams.parallel_envs,
     #     random_add=True,
     #     fallback_to_cpu_storage=False)
+    rewards_num = spaces.get_1d_space_size(reward_space)
     rb = ThVecDictEpReplayBuffer(buffer_size=hyperparams.buffer_size,
                                 observation_space=observation_space,
                                 action_space=action_space,
