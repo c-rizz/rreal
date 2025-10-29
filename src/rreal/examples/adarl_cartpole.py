@@ -179,7 +179,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
     import torch as th
     # DEfine the arguments for the training environment
     max_steps_per_episode = 1000
-    num_envs = 32
+    num_envs = 64
     env_builder_args = {"mode":args["mode"],
                         "th_device" : th.device("cuda") if args["mode"] == "mjx" else th.device("cpu"),
                         "enable_rendering" : False,
@@ -198,8 +198,8 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
     eval_conf_video_stoch = {
         "name" : "video_stoch",
         "deterministic" : False, # If using the policy as deterministic or not
-        "eval_freq_ep" : num_envs*10, # How often perform evaluation runs are performed
-        "eval_eps" : 10, # how many episodes to run for each evaluation run
+        "eval_freq_ep" : num_envs*1, # How often perform evaluation runs are performed
+        "eval_eps" : 64, # how many episodes to run for each evaluation run
         "env_builder_args" : video_eval_env_builder_args, # env args for the eval
         "num_envs" : 1, # numbero of parallel eval envs
     }
@@ -280,7 +280,7 @@ if __name__ == "__main__":
     ap.add_argument("--seedsNum", default=1, type=int, help="Number of seeds to test with")
     ap.add_argument("--seedsOffset", default=0, type=int, help="Offset the used seeds by this amount")
     ap.add_argument("--comment", required = True, type=str, help="Comment explaining what this run is about")
-    ap.add_argument("--algorithm", required = False, type=str, help="Algorithm to use (SAC/PPO)")
+    ap.add_argument("--algorithm", default = "sac", type=str, help="Algorithm to use (SAC/PPO)")
     ap.add_argument("--mode", required = False, type=str, help="Simulation mode to use")
 
     ap.set_defaults(feature=True)

@@ -1117,12 +1117,6 @@ def train_off_policy(collector : ExperienceCollector,
         if trained and validation_freq>0 and train_count%validation_freq==0:
             model.validate(buffer, batch_size=validation_batch_size)
         t_after_val = time.monotonic()
-        if trained:
-            # ggLog.info(f"SAC: "+str([f"{k}={v}, " for k,v in model.get_stats().items()]))
-            wlogs = {"sac/"+k:v for k,v in model.get_stats().items()}
-            wlogs["sac/buffer_frames"] = buffer.stored_frames()
-            wlogs["sac/val_buffer_frames"] = buffer.stored_validation_frames() if isinstance(buffer,BaseValidatingBuffer) else 0
-            wandb_log(wlogs,throttle_period=2, silent_throttling=True)
         
         # ------------------   Store collected experience  ------------------
         tmp_buff = collector.wait_collection(timeout = 300.0)
@@ -1161,8 +1155,16 @@ def train_off_policy(collector : ExperienceCollector,
         t_add_sl                += t_add
         t_tot_sl                += tf-t0
         grad_steps_done_sl += grad_steps_done
+        iter_per_sec = grad_steps_done_sl/t_train_sl
         t = time.monotonic()
         # ggLog.info(f"global_steps = {global_step}")
+        if trained:
+            # ggLog.info(f"SAC: "+str([f"{k}={v}, " for k,v in model.get_stats().items()]))
+            wlogs = {"sac/"+k:v for k,v in model.get_stats().items()}
+            wlogs["sac/ips"] = iter_per_sec
+            wlogs["sac/buffer_frames"] = buffer.stored_frames()
+            wlogs["sac/val_buffer_frames"] = buffer.stored_validation_frames() if isinstance(buffer,BaseValidatingBuffer) else 0
+            wandb_log(wlogs,throttle_period=2, silent_throttling=True)
         if global_exp_step - last_log_steps > log_freq_vstep*num_envs:
             last_log_steps = global_exp_step
             ips = model.get_stats().get('iterations_per_second',float("nan"))
@@ -1182,7 +1184,7 @@ def train_off_policy(collector : ExperienceCollector,
                        f" tadd={t_add_sl:.2f}"
                        f" tot={t_tot_sl:.2f}"
                        f" fps={steps_sl/t_tot_sl:.2f} collfps={steps_sl/t_coll_sl:.2f}"
-                       f" ips={grad_steps_done_sl/t_train_sl:.2f}"
+                       f" ips={iter_per_sec:.2f}"
                        f" alltime_fps={global_exp_step/(t-start_time):.2f} alltime_ips={model._tot_grad_steps_count/(t-start_time):.2f}")
             dictlist = [f"{k}:{v:.6g}" for k,v in collector.get_stats().items()]
             ggLog.info(f"Collection: {', '.join(dictlist)}")
