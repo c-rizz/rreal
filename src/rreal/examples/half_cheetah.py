@@ -141,6 +141,7 @@ if __name__ == "__main__":
     ap.add_argument("--seedsOffset", default=0, type=int, help="Offset the used seeds by this amount")
     ap.add_argument("--comment", required = True, type=str, help="Comment explaining what this run is about")
     ap.add_argument("--algo", default = "sac", type=str, help="Algorithm to use (SAC/PPO)")
+    ap.add_argument("--no-wandb", action='store_true', help="Disable wandb logging")
 
     ap.set_defaults(feature=True)
     args = vars(ap.parse_args())
@@ -155,4 +156,5 @@ if __name__ == "__main__":
                 args = args,
                 debug_level = -10,
                 start_adarl=False,
-                pkgs_to_save=["adarl","rreal"])
+                pkgs_to_save=["adarl","rreal"],
+                use_wandb=not args["no_wandb"])

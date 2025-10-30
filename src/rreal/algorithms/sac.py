@@ -449,7 +449,7 @@ class SAC(RLAgent):
         # self._actor_optimizer = optim.Adam(split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay),
         #                                    lr=self._hp.policy_lr)
         self._base_target_entropy_factor = th.as_tensor(self._hp.target_entropy_factor, device=self._hp.torch_device, dtype=th.float32)
-        self._target_entropy = self._base_target_entropy_factor*self._hp.action_size/rewards_num
+        self._target_entropy = self._base_target_entropy_factor*self._hp.action_size
         if init_hparams.target_entropy_factor_annealing is None:
             init_hparams.target_entropy_factor_annealing = ("constant", [self._base_target_entropy_factor])
         self._target_entropy_factor_annealing : AnnealingFunction = annealings[init_hparams.target_entropy_factor_annealing[0]](*init_hparams.target_entropy_factor_annealing[1])
@@ -505,7 +505,7 @@ class SAC(RLAgent):
 
 
         self._stats = { "tot_grad_steps_count":0,
-                        "q_loss":0.0,
+                        "q_loss_tot":0.0,
                         "actor_loss":0.0,
                         "alpha_loss":0.0,
                         "val_q_loss":0.0,
@@ -706,7 +706,7 @@ class SAC(RLAgent):
             # Compute next-values for TD
             next_state_actions, next_state_log_pi, _, _ = self._actor.sample_action(actor_next_obss_enc, reference_action = reference_action)
             q_next = self._q_net_target.get_min_qval(crit_next_enc_obss, next_state_actions).view(batch_size,self._hp.rewards_num) # shape: batch x rewards_num
-            soft_q_next = q_next - self._alpha * next_state_log_pi
+            soft_q_next = q_next - self._alpha/self._hp.rewards_num * next_state_log_pi
             
             soft_q_next = soft_q_next.view(batch_size,self._hp.rewards_num) # shape: batch x rewards_num
             rewards     = transitions.rewards.view(batch_size, self._hp.rewards_num)
@@ -748,8 +748,8 @@ class SAC(RLAgent):
         with th.no_grad():
             self._critic_opt_step(q_loss)
         
-        if subq_errs is not None:
-            self._stats.update({f"q_loss_r{i}":err for i,err in enumerate(subq_errs.detach().clone())})
+        if subq_errs is not None:            
+            self._stats.update({f"q_loss_r{i:03d}":err for i,err in enumerate(subq_errs.detach().clone())})
         # self._nvtx_end_range()
         self._critic_updates += 1
         # self._nvtx_end_range()
@@ -1035,7 +1035,7 @@ class SAC(RLAgent):
         q_loss, actor_loss, alpha_loss = q_act_alpha_losses[-1]
         adarl.utils.session.default_session.run_info["train_iterations"].value = self._tot_grad_steps_count
         self._stats.update({"tot_grad_steps_count":self._tot_grad_steps_count,
-                            "q_loss":q_loss,
+                            "q_loss_tot":q_loss,
                             "actor_loss":actor_loss,
                             "alpha_loss":alpha_loss,
                             "alpha":self._alpha.clone(),
