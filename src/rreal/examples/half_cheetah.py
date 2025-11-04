@@ -54,7 +54,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     q_lr=1e-3,
                                                     policy_lr=3e-4,
                                                     model_th_device = train_device,
-                                                    gamma = 0.99,
+                                                    gamma = th.as_tensor(0.99),
                                                     target_tau=0.005,
                                                     buffer_size=1_000_000,
                                                     total_steps = 100_000,

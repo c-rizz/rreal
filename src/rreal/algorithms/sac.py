@@ -15,7 +15,7 @@ from rreal.feature_extractors import get_feature_extractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
 from rreal.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay, simplified_clip_grad_norm_
-from typing import List, Union, Literal
+from typing import List, Union, Literal, Mapping
 import adarl.utils.callbacks
 import adarl.utils.dbg.ggLog as ggLog
 import adarl.utils.session
@@ -72,7 +72,7 @@ class SAC_init_hparams:
     """The learning rate for the policy network"""
     model_th_device : str | th.device
     """The torch device where the model will be located"""
-    gamma : float
+    gamma : th.Tensor | Mapping[str, float | th.Tensor]
     """The discount factor for the Q-learning algorithm"""
     target_tau : float
     """The target update factor for the soft update of the target network, the smaller it is the more delayed the target is. Usually 0.005."""
@@ -118,8 +118,6 @@ class SAC_init_hparams:
     critic_weight_decay : float = 0.0
     actor_weight_decay : float = 0.0
     deterministic_collection_ratio : float = 0.0
-    rewards_num : int = 1
-
 
 class AnnealingFunction(Protocol):
         def __call__(self,  global_exp_step : int, train_iterations : int) -> float:
@@ -190,8 +188,9 @@ class QNetwork(nn.Module):
     # @th.compile(mode=compile_mode, fullgraph=True)    
     def forward(self, observations, actions):
         qvals = self._q_nets(th.cat([observations, actions], 1))
+        qvals = qvals.view(-1, self._nets_num, self._rewards_num)
         # ggLog.info(f"QNetwork.forward: qvals.size() = {qvals.size()}")
-        return qvals.view(-1, self._nets_num, self._rewards_num)
+        return qvals
 
 
 
@@ -303,7 +302,8 @@ class SAC(RLAgent):
         critic_observation_filter : list[str] | None
         critic_observation_space : gym.spaces.Space
         feature_extractor_lr : float
-        gamma : float
+        gamma : th.Tensor
+        gamma_reward_scaling : bool
         log_std_init : float
         max_grad_norm : float
         observation_space : gym.spaces.Space
@@ -342,7 +342,11 @@ class SAC(RLAgent):
                                                         "actor_feature_extractor"])
         # ggLog.info(f"self._init_args = \n"+pprint.pformat(self._init_args))
         self._init_args = copy.deepcopy(self._init_args)
+        if not isinstance(reward_space, spaces.ThBox):
+            raise RuntimeError(f"SAC currently only supports ThBox reward spaces, but got {type(reward_space)}")
+        self._reward_space = reward_space
         rewards_num = spaces.get_1d_space_size(reward_space)
+        self._reward_names = reward_space.labels if hasattr(reward_space, "labels") else [f"reward_r{i:03d}" for i in range(rewards_num)]
         init_hparams = copy.deepcopy(init_hparams)
         if init_hparams.target_entropy_factor is None:
             init_hparams.target_entropy_factor = -1.0
@@ -362,9 +366,20 @@ class SAC(RLAgent):
             critic_observation_space = observation_space
         if init_hparams.action_reference_obs_key is not None:
             action_init = 0.0
+
+        gammas = init_hparams.gamma
+        if isinstance(gammas, Mapping):
+            gammas = th.as_tensor([gammas[rn] for rn in self._reward_names], dtype=th.float32)
+        elif isinstance(gammas, th.Tensor):
+            gammas = gammas.expand(rewards_num).to(device=init_hparams.model_th_device)
+        elif isinstance(gammas, float):
+            gammas = th.as_tensor(gammas).expand(rewards_num).to(device=init_hparams.model_th_device)
+        else:
+            raise RuntimeError(f"Invalid gamma type {type(init_hparams.gamma)}, must be float or th.Tensor or dict")
+        
         self._hp = SAC.Hyperparams(q_lr=init_hparams.q_lr,
                                    policy_lr = init_hparams.policy_lr,
-                                   gamma=init_hparams.gamma,
+                                   gamma=gammas.expand(rewards_num).to(device=init_hparams.model_th_device),
                                    auto_entropy_temperature=init_hparams.auto_entropy_temperature,
                                    constant_entropy_temperature=init_hparams.constant_entropy_temperature,
                                    action_init=action_init,
@@ -392,7 +407,8 @@ class SAC(RLAgent):
                                    critic_weight_decay = init_hparams.critic_weight_decay,
                                    actor_weight_decay = init_hparams.actor_weight_decay,
                                    actor_mean_bounds_ratio = init_hparams.actor_mean_bounds_ratio,
-                                   rewards_num = rewards_num)
+                                   rewards_num = rewards_num,
+                                   gamma_reward_scaling = True)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = self._hp.torch_device
         self._critic_updates = 0
@@ -506,6 +522,7 @@ class SAC(RLAgent):
 
         self._stats = { "tot_grad_steps_count":0,
                         "q_loss_tot":0.0,
+                        "q_loss":0.0,
                         "actor_loss":0.0,
                         "alpha_loss":0.0,
                         "val_q_loss":0.0,
@@ -516,7 +533,9 @@ class SAC(RLAgent):
                                     "avg_action_logstd", "min_action_logstd", "max_action_logstd", "q95_action_logstd", "q05_action_logstd"]
         self._alpha_stats_names = ["avg_log_prob", "min_log_prob", "max_log_prob", "q95_log_prob", "q05_log_prob"]
         self._stats.update({n:0.0 for n in self._actor_stats_names})
-        
+        example_q_stats = th.zeros((5, self._hp.rewards_num), device=self.device)
+        self._update_q_stats(example_q_stats)
+    
     def _nvtx_startup(self):
         if self._enable_nvtx and self._agent_updates == 10:
             th.cuda.cudart().cudaProfilerStart()
@@ -686,9 +705,17 @@ class SAC(RLAgent):
     @override
     def reset_hidden_state(self):
         return
+    
+    def _compute_batch_stats(self, batch : th.Tensor):
+        mean = batch.mean(dim=0)
+        min = batch.amin(dim=0)
+        max = batch.amax(dim=0)
+        q05 = batch.quantile(0.05, dim=0)
+        q95 = batch.quantile(0.95, dim=0)
+        return th.stack([mean, min, max, q05, q95], dim=0)
 
     @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
-    def _compute_critic_loss(self, transitions : TransitionBatch): #, get_stats : bool = False):
+    def _compute_critic_loss(self, transitions : TransitionBatch, get_stats : bool = True):
         critic_obss = self.get_critic_subobservation(transitions.observations)
         critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
         with th.no_grad():
@@ -712,18 +739,32 @@ class SAC(RLAgent):
             rewards     = transitions.rewards.view(batch_size, self._hp.rewards_num)
             terminateds = transitions.terminated.expand(batch_size,self._hp.rewards_num)
 
+            if self._hp.gamma_reward_scaling:
+                # rewards = rewards * (1 - self._hp.gamma)
+                rewards = rewards * (1 - self._hp.gamma)/(1-th.amax(self._hp.gamma)) # scale to keep similar reward magnitudes when using multiple
             td_q_values = rewards + (1 - terminateds) * self._hp.gamma * soft_q_next
-
 
         # ggLog.info(f"td_q_values.size() = {td_q_values.size()}")
         q_values = self._q_net(critic_enc_obss, transitions.actions).view(batch_size,2,self._hp.rewards_num)
+
         # ggLog.info(f"q_values.size() = {q_values.size()}")
         td_q_values = td_q_values.view(batch_size,1,self._hp.rewards_num)
         td_q_values = td_q_values.expand(batch_size,2,self._hp.rewards_num)
         # ggLog.info(f"td_q_values.size() = {td_q_values.size()}")
         square_errs = (q_values - td_q_values)**2
-        per_reward_square_errs = square_errs.mean(dim=(0,1)) # mean over batch and nets
-        return th.mean(per_reward_square_errs), per_reward_square_errs
+        per_reward_square_errs : th.Tensor = square_errs.mean(dim=(0,1)) # mean over batch and nets, batch x nets x rewards_num -> rewards_num
+
+
+        with th.no_grad():
+            q_stats = self._compute_batch_stats(th.amin(q_values.detach(), dim=1)) # get stats on min q values over the 2 networks
+        stats = (per_reward_square_errs.detach().clone(), q_stats.detach())
+        # if get_stats:
+        #     with th.no_grad():
+        #         q_stats = self._compute_batch_stats(th.amin(q_values.detach(), dim=1)) # get stats on min q values over the 2 networks
+        #     stats = (per_reward_square_errs.detach().clone(), q_stats.detach())
+        # else:
+        #     stats = (None, None)
+        return th.sum(per_reward_square_errs), stats
 
     @th.compile(mode=compile_mode, fullgraph=False, disable=disable_compile)
     def _critic_opt_step(self, q_loss : th.Tensor):
@@ -731,6 +772,12 @@ class SAC(RLAgent):
         self._q_optimizer.step()
         self._last_q_loss.copy_(q_loss.detach())
 
+    def _update_q_stats(self, q_val_stats : th.Tensor):
+        if q_val_stats is not None:
+            q_stat_by_rew = {self._reward_names[i]: q_val_stats[:,i] for i in range(self._hp.rewards_num)}
+            for rew_name, stats in q_stat_by_rew.items():
+                self._stats.update({f"q_val_{stat_name}_{rew_name}":stat_value for stat_name, stat_value in zip( ["avg", "min", "max", "q05", "q95"], stats.detach().clone())})
+        
     def _update_critic(self, transitions : TransitionBatch):
         # ggLog.info(f"critic update...")
         
@@ -738,7 +785,7 @@ class SAC(RLAgent):
         self._q_optimizer.zero_grad(set_to_none=True)
         # self._nvtx_start_range("critic forward")
         # ggLog.info(f"compute_critic_loss...")
-        q_loss, subq_errs = self._compute_critic_loss(transitions)
+        q_loss, (subq_errs, q_stats) = self._compute_critic_loss(transitions)
         # ggLog.info(f"compute_critic_loss done")
         # self._nvtx_end_range()
         # self._nvtx_start_range("critic backward")
@@ -749,7 +796,8 @@ class SAC(RLAgent):
             self._critic_opt_step(q_loss)
         
         if subq_errs is not None:            
-            self._stats.update({f"q_loss_r{i:03d}":err for i,err in enumerate(subq_errs.detach().clone())})
+            self._stats.update({f"q_loss_r_{self._reward_names[i]}":err for i,err in enumerate(subq_errs.detach().clone())})
+        self._update_q_stats(q_stats)
         # self._nvtx_end_range()
         self._critic_updates += 1
         # self._nvtx_end_range()
@@ -841,7 +889,7 @@ class SAC(RLAgent):
     
     @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
     def _compute_all_losses(self, transitions):
-        q_loss, subq_square_errs = self._compute_critic_loss(transitions)
+        q_loss, (subq_square_errs, q_stats) = self._compute_critic_loss(transitions)
         actor_loss, actor_stats = self._compute_actor_loss(transitions, freeze_critic=True, get_stats=False)
         # self._start_range_nvtx("actor opt")
         
@@ -852,7 +900,7 @@ class SAC(RLAgent):
         else:
             alpha_loss, alpha_stats = None, None
             loss = actor_loss + q_loss
-        return loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, subq_square_errs
+        return loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, (subq_square_errs, q_stats)
     
     @th.compile(mode=compile_mode, fullgraph=False, disable=disable_compile)
     def _actor_and_alpha_opt_step(self, actor_loss : th.Tensor, alpha_loss : th.Tensor | None):
@@ -894,7 +942,7 @@ class SAC(RLAgent):
         self._q_optimizer.zero_grad(set_to_none=True)
 
         # self._nvtx_start_range("_compute_all_losses")
-        loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, subq_errs = self._compute_all_losses(transitions)
+        loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, (subq_errs, q_stats) = self._compute_all_losses(transitions)
         # self._nvtx_end_range()
         # self._nvtx_start_range("all backward")
         loss.backward()
@@ -912,7 +960,8 @@ class SAC(RLAgent):
         if actor_stats is not None:
             self._stats.update({k:v for k,v in zip(self._actor_stats_names,actor_stats.detach().clone())})
         if subq_errs is not None:
-            self._stats.update({f"q_loss_r{i}":err for i,err in enumerate(subq_errs.detach().clone())})
+            self._stats.update({f"q_loss_r_{self._reward_names[i]}":err for i,err in enumerate(subq_errs.detach().clone())})
+        self._update_q_stats(q_stats)
         self._critic_updates += 1
         self._alpha_updates += 1
         self._actor_updates += 1
@@ -1007,7 +1056,7 @@ class SAC(RLAgent):
     def validate(self, buffer : BaseValidatingBuffer, batch_size : int):
         with th.no_grad():
             transitions = buffer.sample_validation(batch_size=batch_size)
-            critic_loss, square_errs = self._compute_critic_loss(transitions)
+            critic_loss, (square_errs, q_stats) = self._compute_critic_loss(transitions)
             actor_loss, _ = self._compute_actor_loss(transitions)
             alpha_loss, _ = self._compute_alpha_loss(transitions)
         self._stats.update({"val_q_loss":critic_loss,
@@ -1036,6 +1085,7 @@ class SAC(RLAgent):
         adarl.utils.session.default_session.run_info["train_iterations"].value = self._tot_grad_steps_count
         self._stats.update({"tot_grad_steps_count":self._tot_grad_steps_count,
                             "q_loss_tot":q_loss,
+                            "q_loss":q_loss,
                             "actor_loss":actor_loss,
                             "alpha_loss":alpha_loss,
                             "alpha":self._alpha.clone(),
@@ -1161,9 +1211,11 @@ def train_off_policy(collector : ExperienceCollector,
         if trained:
             # ggLog.info(f"SAC: "+str([f"{k}={v}, " for k,v in model.get_stats().items()]))
             wlogs = {"sac/"+k:v for k,v in model.get_stats().items()}
+            # ggLog.info(f"Wandb log: "+str(wlogs.keys()))
             wlogs["sac/ips"] = iter_per_sec
             wlogs["sac/buffer_frames"] = buffer.stored_frames()
             wlogs["sac/val_buffer_frames"] = buffer.stored_validation_frames() if isinstance(buffer,BaseValidatingBuffer) else 0
+            # ggLog.info(f"SAC Wandb log has q_val_avg={wlogs['sac/q_val_avg']}")
             wandb_log(wlogs,throttle_period=2, silent_throttling=True)
         if global_exp_step - last_log_steps > log_freq_vstep*num_envs:
             last_log_steps = global_exp_step
