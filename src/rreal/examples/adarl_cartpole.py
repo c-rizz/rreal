@@ -28,7 +28,7 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
     elif mode == "xbot-gazebo":
         from adarl_ros.adapters.RosXbotGazeboAdapter import RosXbotGazeboAdapter
         from adarl.adapters.VecSimJointImpedanceAdapterWrapper import VecSimJointImpedanceAdapterWrapper
-        adapter = VecSimJointImpedanceAdapterWrapper(adapter = RosXbotGazeboAdapter(model_name = robot_name,
+        adapter = VecSimJointImpedanceAdapterWrapper(adapters = RosXbotGazeboAdapter(model_name = robot_name,
                                                                                     stepLength_sec = stepLength_sec,
                                                                                     forced_ros_master_uri = None,
                                                                                     maxObsDelay = float("+inf"),
@@ -48,15 +48,14 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
     elif mode == "pybullet":
         from adarl.adapters.PyBulletJointImpedanceAdapter import PyBulletJointImpedanceAdapter
         from adarl.adapters.VecSimJointImpedanceAdapterWrapper import VecSimJointImpedanceAdapterWrapper
-        adapter = VecSimJointImpedanceAdapterWrapper(adapter = PyBulletJointImpedanceAdapter(stepLength_sec=stepLength_sec,
+        adapter = VecSimJointImpedanceAdapterWrapper(adapters = [PyBulletJointImpedanceAdapter(stepLength_sec=stepLength_sec,
                                                                             restore_on_reset=False,
                                                                             debug_gui=False,
                                                                             simulation_step=1/1024,
-                                                                            enable_rendering=env_builder_args.pop("enable_rendering"),
+                                                                            enable_rendering=env_builder_args["enable_rendering"],
                                                                             global_max_torque_position_control = 100,
                                                                             real_time_factor=None,
-                                                                            th_device=th_device),
-                                                        vec_size = num_envs,
+                                                                            th_device=th_device) for _ in range(num_envs)],
                                                         th_device = th_device)
     elif mode == "mjx":
         from adarl.adapters.MjxJointImpedanceAdapter import MjxJointImpedanceAdapter
@@ -114,29 +113,29 @@ def cartpole_venv_builder(  seed : int, run_folder : str, num_envs : int, env_bu
     mode = env_builder_args["mode"]
     quiet = env_builder_args["quiet"]
     stepLength_sec= env_builder_args["step_length_sec"]
-    if mode == "pybullet": # pybullet does not have a vectorized adapter, so we parallelized multiple envs
-        device = env_builder_args["th_device"]
-        def single_env_builder(seed : int, log_folder : str, is_eval : bool, env_builder_args : dict[str, Any]):
-            vrunner = cartpole_vrun_builder(seed = seed,
-                                        run_folder = run_folder,
-                                        env_builder_args = env_builder_args,
-                                        num_envs = 1,
-                                        autoreset = False,
-                                        quiet = True)
-            return GymRunnerWrapper(runner=vrunner, quiet=quiet), 1/stepLength_sec
-        env = build_vec_env(env_builder=single_env_builder,
-                            env_builder_args=env_builder_args,
-                            log_folder=run_folder,
-                            seed=seed,
-                            num_envs=num_envs,
-                            collector_device=device,
-                            env_action_device = device)
-    else:
-        vrunner = cartpole_vrun_builder(seed = seed,
-                                        run_folder = run_folder,
-                                        env_builder_args = env_builder_args,
-                                        num_envs = num_envs)
-        env = GymVecRunnerWrapper(runner=vrunner, quiet=quiet)
+    # if mode == "pybullet": # pybullet does not have a vectorized adapter, so we parallelized multiple envs
+    #     device = env_builder_args["th_device"]
+    #     def single_env_builder(seed : int, log_folder : str, is_eval : bool, env_builder_args : dict[str, Any]):
+    #         vrunner = cartpole_vrun_builder(seed = seed,
+    #                                     run_folder = run_folder,
+    #                                     env_builder_args = env_builder_args,
+    #                                     num_envs = 1,
+    #                                     autoreset = False,
+    #                                     quiet = True)
+    #         return GymRunnerWrapper(runner=vrunner, quiet=quiet), 1/stepLength_sec
+    #     env = build_vec_env(env_builder=single_env_builder,
+    #                         env_builder_args=env_builder_args,
+    #                         log_folder=run_folder,
+    #                         seed=seed,
+    #                         num_envs=num_envs,
+    #                         collector_device=device,
+    #                         env_action_device = device)
+    # else:
+    vrunner = cartpole_vrun_builder(seed = seed,
+                                    run_folder = run_folder,
+                                    env_builder_args = env_builder_args,
+                                    num_envs = num_envs)
+    env = GymVecRunnerWrapper(runner=vrunner, quiet=quiet)
     
     env.reset(seed=seed)
     return env
@@ -179,7 +178,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
     import torch as th
     # DEfine the arguments for the training environment
     max_steps_per_episode = 1000
-    num_envs = 64
+    num_envs = 8
     env_builder_args = {"mode":args["mode"],
                         "th_device" : th.device("cuda") if args["mode"] == "mjx" else th.device("cpu"),
                         "enable_rendering" : False,
@@ -187,7 +186,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                         "quiet" : True,
                         "video_save_freq" : 0,
                         "max_steps" : max_steps_per_episode,
-                        "step_length_sec" : 48/1024,
+                        "step_length_sec" : 24/1024,
                         "task" : "balance",
                         "sparse_reward" :  True}
     
@@ -199,7 +198,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
         "name" : "video_stoch",
         "deterministic" : False, # If using the policy as deterministic or not
         "eval_freq_ep" : num_envs*1, # How often perform evaluation runs are performed
-        "eval_eps" : 64, # how many episodes to run for each evaluation run
+        "eval_eps" : 1, # how many episodes to run for each evaluation run
         "env_builder_args" : video_eval_env_builder_args, # env args for the eval
         "num_envs" : 1, # numbero of parallel eval envs
     }
@@ -228,11 +227,11 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     total_steps = num_envs*max_steps_per_episode*100, # Total training steps to do
                                                     q_network_arch=[64,64],
                                                     policy_arch=[64,64],
-                                                    learning_starts=min(num_envs*max_steps_per_episode*2, 100_000), # The training of the agent starts after these steps are collected
+                                                    learning_starts=min(num_envs*max_steps_per_episode*2, 10_000), # The training of the agent starts after these steps are collected
                                                     log_freq_vstep = 1000, # Print logs at this frequency
                                                     reference_init_args={"env_builder_args": env_builder_args}, # Save also these arguments when the policy gets saved
                                                     target_entropy_factor=-3.0,
-                                                    actor_log_std_init=-0.0),
+                                                    actor_log_std_init=-1.0),
                     collector_device=collect_device, # Device used byt the experience collector, if possible keep this on cuda
                     max_episode_duration=max_steps_per_episode,
                     validation_buffer_size = 0, #100_000, # Used for computing validation losses
@@ -281,7 +280,7 @@ if __name__ == "__main__":
     ap.add_argument("--seedsOffset", default=0, type=int, help="Offset the used seeds by this amount")
     ap.add_argument("--comment", required = True, type=str, help="Comment explaining what this run is about")
     ap.add_argument("--algorithm", default = "sac", type=str, help="Algorithm to use (SAC/PPO)")
-    ap.add_argument("--mode", required = False, type=str, help="Simulation mode to use")
+    ap.add_argument("--mode", default = "mjx", type=str, help="Simulation mode to use")
 
     ap.set_defaults(feature=True)
     args = vars(ap.parse_args())

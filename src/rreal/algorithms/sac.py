@@ -36,6 +36,7 @@ from adarl.utils.async_cuda2cpu_queue import log_async
 import pprint
 import adarl.utils.spaces as spaces
 from typing import Protocol
+import numpy as np
 
 th._dynamo.config.compiled_autograd = True
 
@@ -72,7 +73,7 @@ class SAC_init_hparams:
     """The learning rate for the policy network"""
     model_th_device : str | th.device
     """The torch device where the model will be located"""
-    gamma : th.Tensor | Mapping[str, float | th.Tensor]
+    gamma : th.Tensor | Mapping[str, float | th.Tensor] | float
     """The discount factor for the Q-learning algorithm"""
     target_tau : float
     """The target update factor for the soft update of the target network, the smaller it is the more delayed the target is. Usually 0.005."""
@@ -284,6 +285,7 @@ class Actor(nn.Module):
         log_prob = log_prob - th.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6) # correct the probability for the squashing and scaling
         log_prob = log_prob.sum(1, keepdim=True) # get probability per each multidimensional action, not for each action component
 
+        dbg_check_finite(action, async_assert=True, assert_msg="sac.Actor.sample_action: action is not finite")
         return action, log_prob, mean, log_std
 
 class SAC(RLAgent):
@@ -346,7 +348,9 @@ class SAC(RLAgent):
             raise RuntimeError(f"SAC currently only supports ThBox reward spaces, but got {type(reward_space)}")
         self._reward_space = reward_space
         rewards_num = spaces.get_1d_space_size(reward_space)
-        self._reward_names = reward_space.labels if hasattr(reward_space, "labels") else [f"reward_r{i:03d}" for i in range(rewards_num)]
+        self._reward_names = reward_space.labels if hasattr(reward_space, "labels") else np.array([f"reward_r{i:03d}" for i in range(rewards_num)], dtype=object)
+        if self._reward_names.ndim == 0:
+            self._reward_names = np.expand_dims(self._reward_names, axis=0)
         init_hparams = copy.deepcopy(init_hparams)
         if init_hparams.target_entropy_factor is None:
             init_hparams.target_entropy_factor = -1.0
