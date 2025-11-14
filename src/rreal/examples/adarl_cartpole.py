@@ -58,9 +58,31 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                                                             th_device=th_device) for _ in range(num_envs)],
                                                         th_device = th_device)
     elif mode == "mjx":
+        from adarl.adapters.MjxAdapter import MjxAdapter
+        import jax
+        sim_dt = 1/1024
+        if env_builder_args["step_length_sec"] % sim_dt != 0:
+            raise RuntimeError(f"step_length_sec {env_builder_args['step_length_sec']} is not a multimple of sim_dt {sim_dt}")
+        adapter = MjxAdapter(   vec_size=num_envs,
+                                enable_rendering=env_builder_args.pop("enable_rendering"),
+                                jax_device=jax.devices("gpu")[0],
+                                output_th_device = th_device,
+                                sim_step_dt=sim_dt,
+                                step_length_sec=stepLength_sec,
+                                realtime_factor=-1.0,
+                                gui_env_index=0,
+                                show_gui=False,
+                                log_freq=max_steps*(stepLength_sec/sim_dt),
+                                record_whole_joint_trajectories = True,
+                                log_freq_joints_trajectories = int(stepLength_sec/sim_dt),
+                                log_folder=run_folder,
+                                opt_preset="fast",
+                                add_ground=False,
+                                add_sky=False)
+    elif mode == "mjx_jimp":
         from adarl.adapters.MjxJointImpedanceAdapter import MjxJointImpedanceAdapter
         import jax
-        sim_dt = 4/1024
+        sim_dt = 1/1024
         if env_builder_args["step_length_sec"] % sim_dt != 0:
             raise RuntimeError(f"step_length_sec {env_builder_args['step_length_sec']} is not a multimple of sim_dt {sim_dt}")
         adapter = MjxJointImpedanceAdapter( vec_size=num_envs,
@@ -74,12 +96,13 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                             default_max_joint_impedance_ctrl_torque=100.0,
                                             show_gui=False,
                                             log_freq=max_steps*(stepLength_sec/sim_dt),
-                                            record_whole_joint_trajectories = False,
-                                            log_freq_joints_trajectories = int(250*(50/1024)/(2/4096)),
+                                            record_whole_joint_trajectories = True,
+                                            log_freq_joints_trajectories = int(stepLength_sec/sim_dt),
                                             log_folder=run_folder,
                                             opt_preset="fast",
                                             add_ground=False,
-                                            add_sky=False)
+                                            add_sky=False,
+                                            reference_filter_cutoff_frequency=10000.0)
     else:
         raise NotImplementedError(f"Requested unknown adapter '{mode}'")
     env = CartpoleContinuousVecEnv(adapter=adapter,
@@ -141,7 +164,61 @@ def cartpole_venv_builder(  seed : int, run_folder : str, num_envs : int, env_bu
     return env
 
 
+def sac_sb3_train(vec_env_builder,
+                  seed,
+                  run_id,
+                  folderName,
+                  debug_level,
+                  no_wandb,
+                  model_th_device,
+                  buffer_device,
+                  env_builder_args,
+                  num_envs):
+    from rreal.algorithms.sac_helpers import wrap_with_logger
+    import adarl.utils.session
+    import inspect
+    import torch
+    import torch as th
+    import numpy as np
+    import random
+    from stable_baselines3 import SAC
+    run_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
+                                                        inspect.currentframe(),
+                                                        seed=seed,
+                                                        run_id=run_id,
+                                                        run_comment=args["comment"],
+                                                        folderName=folderName,
+                                                        debug=debug_level,
+                                                        use_wandb=not no_wandb)
 
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+
+    # if hyperparams.device == "cuda": hyperparams.device = "cuda:0"
+    if isinstance(model_th_device, str):
+        device = th.device(model_th_device)
+    else:
+        device = model_th_device
+    if isinstance(buffer_device, str):
+        buffer_device = th.device(buffer_device)
+    if device.index is None:
+        device = th.device(type=device.type, index=0)
+    print(f"Device = {device}")
+    collector_device = device
+    buffer_device = device
+    if vec_env_builder is None:
+        raise RuntimeError(f"You must specify either vec_env_builder or env_builder")
+    vec_env_builder = wrap_with_logger(vec_env_builder)
+    venv = vec_env_builder(env_builder_args=env_builder_args,
+                           seed=seed,
+                           run_folder=run_folder,
+                           num_envs=num_envs)
+    
+
+    model = SAC("MultiInputPolicy", venv, verbose=1)
+    model.learn(total_timesteps=10000, log_interval=4)
 
 
 
@@ -177,16 +254,17 @@ def cartpole_venv_builder(  seed : int, run_folder : str, num_envs : int, env_bu
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
     import torch as th
     # DEfine the arguments for the training environment
+    algo = args["algorithm"].lower()
     max_steps_per_episode = 1000
-    num_envs = 8
+    num_envs = 1
     env_builder_args = {"mode":args["mode"],
-                        "th_device" : th.device("cuda") if args["mode"] == "mjx" else th.device("cpu"),
+                        "th_device" : th.device("cuda") if args["mode"] == "mjx" and algo!="sac_sb3" else th.device("cpu"),
                         "enable_rendering" : False,
                         "log_info_stats" : True,
                         "quiet" : True,
                         "video_save_freq" : 0,
                         "max_steps" : max_steps_per_episode,
-                        "step_length_sec" : 24/1024,
+                        "step_length_sec" : 48/1024,
                         "task" : "balance",
                         "sparse_reward" :  True}
     
@@ -197,7 +275,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
     eval_conf_video_stoch = {
         "name" : "video_stoch",
         "deterministic" : False, # If using the policy as deterministic or not
-        "eval_freq_ep" : num_envs*1, # How often perform evaluation runs are performed
+        "eval_freq_ep" : num_envs*10, # How often perform evaluation runs are performed
         "eval_eps" : 1, # how many episodes to run for each evaluation run
         "env_builder_args" : video_eval_env_builder_args, # env args for the eval
         "num_envs" : 1, # numbero of parallel eval envs
@@ -207,38 +285,47 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
     # Train
     train_device = th.device("cuda",0)
     collect_device = env_builder_args["th_device"]
-    if args["algorithm"].lower() == "sac":
-        sac_train(  seed, # Seed used across this run
-                    folderName, # Folder wher run outpusts are saved
-                    run_id, # Id of the run
-                    args, # Run arguments
-                    vec_env_builder  = cartpole_venv_builder,
-                    env_builder_args = env_builder_args, 
-                    hyperparams = SAC_init_hparams( train_freq_vstep=16, # do 1 train step every 16 vsteps
-                                                    grad_steps=16, # do 16 grad steps per train step
+    if algo == "sac":
+        sac_train(seed, folderName, run_id, args,
+                    env_builder_args = env_builder_args,
+                    vec_env_builder=cartpole_venv_builder,
+                    hyperparams = SAC_init_hparams( train_freq_vstep=16,
+                                                    grad_steps=32,
                                                     parallel_envs = num_envs,
-                                                    batch_size = 512, 
+                                                    batch_size = 512,
                                                     q_lr=1e-3,
-                                                    policy_lr=1e-3,
+                                                    policy_lr=3e-4,
                                                     model_th_device = train_device,
-                                                    gamma = 0.99,
+                                                    gamma = th.as_tensor(0.99),
                                                     target_tau=0.005,
-                                                    buffer_size=num_envs*max_steps_per_episode*100,
-                                                    total_steps = num_envs*max_steps_per_episode*100, # Total training steps to do
-                                                    q_network_arch=[64,64],
-                                                    policy_arch=[64,64],
-                                                    learning_starts=min(num_envs*max_steps_per_episode*2, 10_000), # The training of the agent starts after these steps are collected
-                                                    log_freq_vstep = 1000, # Print logs at this frequency
-                                                    reference_init_args={"env_builder_args": env_builder_args}, # Save also these arguments when the policy gets saved
-                                                    target_entropy_factor=-3.0,
+                                                    buffer_size=1_000_000,
+                                                    total_steps = 100_000,
+                                                    q_network_arch=[256,256],
+                                                    policy_arch=[256,256],
+                                                    learning_starts=2_000,
+                                                    log_freq_vstep = 1000,
+                                                    reference_init_args={},
+                                                    target_entropy_factor=None,
                                                     actor_log_std_init=-1.0),
-                    collector_device=collect_device, # Device used byt the experience collector, if possible keep this on cuda
+                    collector_device=collect_device,
                     max_episode_duration=max_steps_per_episode,
-                    validation_buffer_size = 0, #100_000, # Used for computing validation losses
-                    validation_holdout_ratio = 0, #0.01, # Put this amount of experience in the validation buffer instead of training 
-                    validation_batch_size = 0, # Batch size for the validation losses
-                    eval_configurations=eval_configs) # Evaluation environments config
-    elif args["algorithm"].lower() == "ppo":
+                    validation_buffer_size = 0, #100_000,
+                    validation_holdout_ratio = 0, #0.01,
+                    validation_batch_size = 0,
+                    eval_configurations=eval_configs,
+                    checkpoint_freq = -1)
+    elif algo == "sac_sb3":
+        sac_sb3_train( vec_env_builder = cartpole_venv_builder,
+                seed=seed,
+                run_id=run_id,
+                folderName=folderName,
+                debug_level=-10,
+                no_wandb=False,
+                model_th_device=th.device("cuda"),
+                buffer_device=th.device("cuda"),
+                env_builder_args=env_builder_args,
+                num_envs=num_envs)
+    elif algo == "ppo":
         from rreal.algorithms.ppo2 import ppo_train, PPO_hyperparams
         ppo_train(  seed=seed,
                 folderName=folderName,

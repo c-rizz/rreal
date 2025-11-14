@@ -9,11 +9,8 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
     import torch as th
     max_steps_per_episode = 1000
     num_envs = 1 
-    env_builder_args = {"env_name" : "HalfCheetah-v4",
-                        "gym_args" : {  "forward_reward_weight" : 1.0,
-                                        "ctrl_cost_weight" : 0.1,
-                                        "reset_noise_scale" : 0.1,
-                                        "exclude_current_positions_from_observation" : True},
+    env_builder_args = {"env_name" : "InvertedPendulum-v4",
+                        "gym_args" : {},
                         "max_episode_steps" : max_steps_per_episode,
                         "quiet" : True,
                         "clip_action" : False,

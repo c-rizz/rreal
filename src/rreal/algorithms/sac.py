@@ -37,6 +37,7 @@ import pprint
 import adarl.utils.spaces as spaces
 from typing import Protocol
 import numpy as np
+import typing
 
 th._dynamo.config.compiled_autograd = True
 
@@ -61,6 +62,39 @@ def compare_dicts(d1 : dict, d2 : dict) -> tuple[bool, str]:
 
 def nop_func(arg1):
     pass
+
+@typing.runtime_checkable
+class AnnealingFunction(Protocol):
+        def __call__(self,  global_exp_step : int, train_iterations : int) -> float:
+            ...
+def get_constant_annealing(value : float) -> AnnealingFunction:
+    """
+    Returns a function that always returns the same value.
+    This is used for the target entropy in SAC.
+    """
+    def constant_annealing(global_exp_step : int, train_iterations : int) -> float:
+        return value
+    return constant_annealing
+
+def get_ramp_annealing(ramp_start_step : int, ramp_end_step : int, start_value : float, end_value : float) -> AnnealingFunction:
+    """
+    Returns a function that ramps from start_value to end_value between ramp_start_step and ramp_end_step.
+    """
+    def ramp_annealing(global_exp_step : int, train_iterations : int) -> float:
+        if train_iterations < ramp_start_step:
+            return start_value
+        elif train_iterations > ramp_end_step:
+            return end_value
+        else:
+            progress = (train_iterations - ramp_start_step) / (ramp_end_step - ramp_start_step)
+            return start_value + progress * (end_value - start_value)
+    return ramp_annealing
+
+annealings :dict[str, typing.Callable[..., AnnealingFunction]] = {
+    "constant": get_constant_annealing,
+    "ramp": get_ramp_annealing
+}
+
 @dataclass
 class SAC_init_hparams:
     q_network_arch : list[int]
@@ -103,7 +137,7 @@ class SAC_init_hparams:
     """The list of observation keys to filter in the actor's policy, by default it is None (no filtering, all observation keys are used)"""
     critic_observation_filter : list[str] | None = None
     """The list of observation keys to filter in the critic's Q network, by default it is None (no filtering, all observation keys are used)"""
-    target_entropy_factor_annealing : tuple[Literal['constant', 'ramp'], list[float | th.Tensor]] | None = None
+    target_entropy_factor_annealing : tuple[Literal['constant', 'ramp'], list[float | th.Tensor]] | AnnealingFunction | None = None
     """The target entropy factor annealing function, by default it is None (no annealing), see predefined annealings in sac.py"""
     action_reference_obs_key : str | None = None
     """The observation key that will be used as a reference for the action, meaning the actor distribution is computed as `mean = NN(obs) + act_ref` 
@@ -119,37 +153,8 @@ class SAC_init_hparams:
     critic_weight_decay : float = 0.0
     actor_weight_decay : float = 0.0
     deterministic_collection_ratio : float = 0.0
+    alpha_lr_factor : float = 1.0
 
-class AnnealingFunction(Protocol):
-        def __call__(self,  global_exp_step : int, train_iterations : int) -> float:
-            ...
-def get_constant_annealing(value : float) -> AnnealingFunction:
-    """
-    Returns a function that always returns the same value.
-    This is used for the target entropy in SAC.
-    """
-    def constant_annealing(global_step : int, iterations : int) -> float:
-        return value
-    return constant_annealing
-
-def get_ramp_annealing(ramp_start_step : int, ramp_end_step : int, start_value : float, end_value : float) -> AnnealingFunction:
-    """
-    Returns a function that ramps from start_value to end_value between ramp_start_step and ramp_end_step.
-    """
-    def ramp_annealing(global_exp_step : int, train_iterations : int) -> float:
-        if train_iterations < ramp_start_step:
-            return start_value
-        elif train_iterations > ramp_end_step:
-            return end_value
-        else:
-            progress = (train_iterations - ramp_start_step) / (ramp_end_step - ramp_start_step)
-            return start_value + progress * (end_value - start_value)
-    return ramp_annealing
-
-annealings = {
-    "constant": get_constant_annealing,
-    "ramp": get_ramp_annealing
-}
 
 class QNetwork(nn.Module):
     def __init__(self,
@@ -206,7 +211,7 @@ class Actor(nn.Module):
                         log_std_init = -3.0,
                         init_noise = 0.001,
                         torch_device : Union[str,th.device] = "cuda",
-                        action_mean_init = 0.0,
+                        action_mean_init : float | th.Tensor= 0.0,
                         use_weightnorm : bool = True,
                         mean_bounds_ratio : float | None = None):
         super().__init__()
@@ -314,7 +319,7 @@ class SAC(RLAgent):
         policy_update_freq : int
         q_lr : float
         q_network_arch : List[int]
-        target_entropy_annealing : tuple[Literal["constant", "ramp"], list[float | th.Tensor]] | None
+        target_entropy_annealing : tuple[Literal["constant", "ramp"], list[float | th.Tensor]] | AnnealingFunction |None
         target_entropy_factor : float
         target_tau : float
         targets_update_freq : int
@@ -323,6 +328,7 @@ class SAC(RLAgent):
         actor_weight_decay : float
         actor_mean_bounds_ratio : float
         rewards_num : int
+        alpha_lr_factor : float
 
     def __init__(self,
                  action_size : int,
@@ -344,11 +350,11 @@ class SAC(RLAgent):
                                                         "actor_feature_extractor"])
         # ggLog.info(f"self._init_args = \n"+pprint.pformat(self._init_args))
         self._init_args = copy.deepcopy(self._init_args)
-        if not isinstance(reward_space, spaces.ThBox):
+        if not isinstance(reward_space, spaces.gym_spaces.Box):
             raise RuntimeError(f"SAC currently only supports ThBox reward spaces, but got {type(reward_space)}")
         self._reward_space = reward_space
         rewards_num = spaces.get_1d_space_size(reward_space)
-        self._reward_names = reward_space.labels if hasattr(reward_space, "labels") else np.array([f"reward_r{i:03d}" for i in range(rewards_num)], dtype=object)
+        self._reward_names = reward_space.labels if isinstance(reward_space, spaces.ThBox) else np.array([f"reward_r{i:03d}" for i in range(rewards_num)], dtype=object)
         if self._reward_names.ndim == 0:
             self._reward_names = np.expand_dims(self._reward_names, axis=0)
         init_hparams = copy.deepcopy(init_hparams)
@@ -412,7 +418,8 @@ class SAC(RLAgent):
                                    actor_weight_decay = init_hparams.actor_weight_decay,
                                    actor_mean_bounds_ratio = init_hparams.actor_mean_bounds_ratio,
                                    rewards_num = rewards_num,
-                                   gamma_reward_scaling = True)
+                                   gamma_reward_scaling = True,
+                                   alpha_lr_factor= init_hparams.alpha_lr_factor)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = self._hp.torch_device
         self._critic_updates = 0
@@ -472,16 +479,19 @@ class SAC(RLAgent):
         self._target_entropy = self._base_target_entropy_factor*self._hp.action_size
         if init_hparams.target_entropy_factor_annealing is None:
             init_hparams.target_entropy_factor_annealing = ("constant", [self._base_target_entropy_factor])
-        self._target_entropy_factor_annealing : AnnealingFunction = annealings[init_hparams.target_entropy_factor_annealing[0]](*init_hparams.target_entropy_factor_annealing[1])
+        if isinstance(init_hparams.target_entropy_factor_annealing, AnnealingFunction):
+            self._target_entropy_factor_annealing = init_hparams.target_entropy_factor_annealing
+        else:
+            self._target_entropy_factor_annealing = annealings[init_hparams.target_entropy_factor_annealing[0]](*init_hparams.target_entropy_factor_annealing[1])
         if self._hp.auto_entropy_temperature:
             self._log_alpha = th.zeros(1, requires_grad=True, device=init_hparams.model_th_device)
             self._alpha = self._log_alpha.exp().detach()
             # self._alpha_optimizer = optim.Adam([self._log_alpha], lr=self._hp.q_lr)
         else:
-            self._alpha = th.as_tensor(constant_entropy_temperature).to(device=self._hp.torch_device, non_blocking=self._hp.torch_device.type=="cuda")
+            self._alpha = th.as_tensor(self._hp.constant_entropy_temperature).to(device=self._hp.torch_device, non_blocking=self._hp.torch_device.type=="cuda")
             self._log_alpha = self._alpha.log().detach()
-
-        self._actor_and_alpha_optimizer = optim.AdamW([{ "params":[self._log_alpha], "lr":self._hp.q_lr}]+
+        alpha_lr = self._hp.q_lr * self._hp.alpha_lr_factor
+        self._actor_and_alpha_optimizer = optim.AdamW([{ "params":[self._log_alpha], "lr":alpha_lr}]+
                                                       split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay,
                                                                                     extra_kwargs={"lr":self._hp.policy_lr}))
 
@@ -497,7 +507,7 @@ class SAC(RLAgent):
             else:
                 actor_extractor_params = list(self._actor_feature_extractor.parameters())
                 if len(actor_extractor_params) > 0:
-                    self._actor_feature_extractor_optimizer = optim.Adam(actor_extractor_params, lr=self._hp.feature_extractor_lr)
+                    self._actor_feature_extractor_optimizer = optim.AdamW(actor_extractor_params, lr=self._hp.feature_extractor_lr)
                 else:
                     self._actor_feature_extractor_optimizer = None
         else:
@@ -535,18 +545,18 @@ class SAC(RLAgent):
                         "alpha":0.0}
         self._actor_stats_names = [ "avg_action_mean",   "min_action_mean",   "max_action_mean",   "q95_action_mean",   "q05_action_mean",
                                     "avg_action_logstd", "min_action_logstd", "max_action_logstd", "q95_action_logstd", "q05_action_logstd"]
-        self._alpha_stats_names = ["avg_log_prob", "min_log_prob", "max_log_prob", "q95_log_prob", "q05_log_prob"]
+        self._alpha_stats_names = ["avg_log_prob", "min_log_prob", "max_log_prob", "q95_log_prob", "q05_log_prob", "current_entropy"]
         self._stats.update({n:0.0 for n in self._actor_stats_names})
         example_q_stats = th.zeros((5, self._hp.rewards_num), device=self.device)
         self._update_q_stats(example_q_stats)
     
     def _nvtx_startup(self):
         if self._enable_nvtx and self._agent_updates == 10:
-            th.cuda.cudart().cudaProfilerStart()
+            th.cuda.cudart().cudaProfilerStart() #type: ignore
 
     def _nvtx_stop(self):
         if self._enable_nvtx and self._agent_updates > 100:
-            th.cuda.cudart().cudaProfilerStop()  
+            th.cuda.cudart().cudaProfilerStop() #type: ignore
 
     def _mark_nvtx(self, name : str):
         if self._enable_nvtx and self._agent_updates >10:
@@ -560,19 +570,25 @@ class SAC(RLAgent):
         if self._enable_nvtx and self._agent_updates >10:
             th.cuda.nvtx.range_pop()
 
-    def get_actor_subobservation(self, observation : dict | th.Tensor):
+    def get_actor_subobservation(self, observation : dict | th.Tensor)  -> th.Tensor | dict:
         if self._hp.actor_observation_filter is None:
             return observation
         else:
-            r = {k:observation.get(k,None) for k in self._hp.actor_observation_filter}
+            r = {k:observation.get(k,None) for k in self._hp.actor_observation_filter} #type: ignore
             return {k:v for k,v in r.items() if v is not None}
 
-    def get_critic_subobservation(self, observation : dict | th.Tensor):
+    def get_critic_subobservation(self, observation : dict | th.Tensor) -> th.Tensor | dict:
         if self._hp.critic_observation_filter is None:
             return observation
         else:
-            r = {k:observation.get(k,None) for k in self._hp.critic_observation_filter}
+            r = {k:observation.get(k,None) for k in self._hp.critic_observation_filter} #type: ignore
             return {k:v for k,v in r.items() if v is not None}
+
+    def _get_reference_action(self, observation_batch : dict | th.Tensor) -> th.Tensor | None:
+        if self._hp.action_reference_obs_key is not None:
+            return observation_batch[self._hp.action_reference_obs_key]
+        else:
+            return None
 
     def get_feature_extractors(self):
         return self._critic_feature_extractor, self._actor_feature_extractor
@@ -670,7 +686,7 @@ class SAC(RLAgent):
         return model
 
     @override
-    def predict_action(self, observation_batch, deterministic = False, info_return : dict | None = None):
+    def predict_action(self, observation_batch : th.Tensor | dict , deterministic = False, info_return : dict | None = None):
         th.compiler.cudagraph_mark_step_begin()
         # s = {k:v.size() for k,v in observation.items()}
         # ggLog.info(f"predict: observation = {s}")
@@ -686,7 +702,7 @@ class SAC(RLAgent):
         observation_batch = self.get_actor_subobservation(observation_batch)
         observation_batch = map_tensor_tree(observation_batch, lambda t: t.to(device = self.device, dtype = th.float32))
         observation_batch_enc = self._actor_feature_extractor.extract_features(observation_batch)
-        reference_action : th.Tensor = observation_batch[self._hp.action_reference_obs_key] if self._hp.action_reference_obs_key is not None else None
+        reference_action = self._get_reference_action(observation_batch)
         action, log_prob, mean, log_std = self._actor.sample_action(observation_batch_enc, reference_action=reference_action)
         if not is_batched:
             action = action.squeeze()
@@ -732,7 +748,7 @@ class SAC(RLAgent):
             else:
                 actor_next_obss = self.get_actor_subobservation(transitions.next_observations)
                 actor_next_obss_enc = self._actor_feature_extractor.extract_features(actor_next_obss)
-            reference_action : th.Tensor = actor_next_obss[self._hp.action_reference_obs_key] if self._hp.action_reference_obs_key is not None else None
+            reference_action = self._get_reference_action(actor_next_obss)
             
             # Compute next-values for TD
             next_state_actions, next_state_log_pi, _, _ = self._actor.sample_action(actor_next_obss_enc, reference_action = reference_action)
@@ -815,7 +831,7 @@ class SAC(RLAgent):
         # self._mark_nvtx("actor_enc")
         actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
         # self._mark_nvtx("get ref")
-        reference_action : th.Tensor = actor_obss[self._hp.action_reference_obs_key] if self._hp.action_reference_obs_key is not None else None
+        reference_action = self._get_reference_action(actor_obss)
         # self._mark_nvtx("sample")
         act, act_log_prob, act_mean, act_logstd = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
         # act, act_log_prob = act.clone(), act_log_prob.clone() # prevent issues with cuda graphs
@@ -855,6 +871,10 @@ class SAC(RLAgent):
     
     # @th.compile(mode=compile_mode, fullgraph=True)
     def _alpha_loss(self, act_log_prob : th.Tensor):
+        # current_entropy = -act_log_prob.mean()
+        # # if current_entropy > target_entropy then alpha goes toward zero (focus on reward maximization)
+        # # if current_entropy < target_entropy then alpha goes toward +inf (focus on entropy maximization) (maybe cap it?)
+        # return self._log_alpha.exp() * (current_entropy - self._target_entropy) 
         return (-self._log_alpha.exp() * (act_log_prob + self._target_entropy)).mean()
     
     # @th.compile(mode=compile_mode, fullgraph=True)
@@ -863,14 +883,15 @@ class SAC(RLAgent):
                             act_log_prob.min(),
                             act_log_prob.max(),
                             act_log_prob.quantile(0.95),
-                            act_log_prob.quantile(0.05)] )
+                            act_log_prob.quantile(0.05),
+                            -act_log_prob.mean()] )
 
     @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
     def _compute_alpha_loss(self, transitions : TransitionBatch):
         with th.no_grad():
             actor_obss = self.get_actor_subobservation(transitions.observations)
             actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
-            reference_action : th.Tensor = actor_obss[self._hp.action_reference_obs_key] if self._hp.action_reference_obs_key is not None else None
+            reference_action = self._get_reference_action(actor_obss)
             _, act_log_prob, _, _ = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
             stats = self._alpha_stats(act_log_prob)
         return self._alpha_loss(act_log_prob), stats
