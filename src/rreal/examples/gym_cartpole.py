@@ -46,27 +46,28 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                     hyperparams = SAC_init_hparams( train_freq_vstep=16,
                                                     grad_steps=32,
                                                     parallel_envs = num_envs,
-                                                    batch_size = 4096,
+                                                    batch_size = 512,
                                                     q_lr=1e-3,
                                                     policy_lr=3e-4,
                                                     model_th_device = train_device,
                                                     gamma = th.as_tensor(0.99),
                                                     target_tau=0.005,
                                                     buffer_size=1_000_000,
-                                                    total_steps = 100_000,
+                                                    total_steps = 50_000,
                                                     q_network_arch=[256,256],
                                                     policy_arch=[256,256],
-                                                    learning_starts=10*num_envs*max_steps_per_episode,
+                                                    learning_starts=2_000,
                                                     log_freq_vstep = 1000,
                                                     reference_init_args={},
-                                                    target_entropy_factor=None,
+                                                    target_entropy_factor=-1.0,
                                                     actor_log_std_init=-1.0),
                     collector_device=collect_device,
                     max_episode_duration=max_steps_per_episode,
                     validation_buffer_size = 0, #100_000,
                     validation_holdout_ratio = 0, #0.01,
                     validation_batch_size = 0,
-                    eval_configurations=eval_configs) #256)
+                    eval_configurations=eval_configs,
+                    checkpoint_freq = -1)
     # elif args["algo"].lower() == "ppo":
     #     from rreal.algorithms.ppo import ppo_train, PPO_hyperparams
     #     raise RuntimeError(f"Use ppo2, this one is bugged")

@@ -73,12 +73,13 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                 gui_env_index=0,
                                 show_gui=False,
                                 log_freq=max_steps*(stepLength_sec/sim_dt),
-                                record_whole_joint_trajectories = True,
+                                record_whole_joint_trajectories = False,
                                 log_freq_joints_trajectories = int(stepLength_sec/sim_dt),
                                 log_folder=run_folder,
+                                safe_revolute_dof_armature=0.0,
                                 opt_preset="fast",
-                                add_ground=False,
-                                add_sky=False)
+                                add_ground=False
+                                )
     elif mode == "mjx_jimp":
         from adarl.adapters.MjxJointImpedanceAdapter import MjxJointImpedanceAdapter
         import jax
@@ -96,13 +97,14 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                             default_max_joint_impedance_ctrl_torque=100.0,
                                             show_gui=False,
                                             log_freq=max_steps*(stepLength_sec/sim_dt),
-                                            record_whole_joint_trajectories = True,
+                                            record_whole_joint_trajectories = False,
                                             log_freq_joints_trajectories = int(stepLength_sec/sim_dt),
                                             log_folder=run_folder,
                                             opt_preset="fast",
                                             add_ground=False,
                                             add_sky=False,
-                                            reference_filter_cutoff_frequency=10000.0)
+                                            reference_filter_cutoff_frequency=40.0,
+                                            reference_filter_mode="none")
     else:
         raise NotImplementedError(f"Requested unknown adapter '{mode}'")
     env = CartpoleContinuousVecEnv(adapter=adapter,
@@ -299,13 +301,13 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     gamma = th.as_tensor(0.99),
                                                     target_tau=0.005,
                                                     buffer_size=1_000_000,
-                                                    total_steps = 100_000,
+                                                    total_steps = 50_000,
                                                     q_network_arch=[256,256],
                                                     policy_arch=[256,256],
                                                     learning_starts=2_000,
                                                     log_freq_vstep = 1000,
                                                     reference_init_args={},
-                                                    target_entropy_factor=None,
+                                                    target_entropy_factor=-1.0,
                                                     actor_log_std_init=-1.0),
                     collector_device=collect_device,
                     max_episode_duration=max_steps_per_episode,
@@ -382,5 +384,5 @@ if __name__ == "__main__":
                 args = args, # Args received by the runFunction
                 debug_level = -10,
                 start_adarl=False, # Used to automatically run the adarl setup, instead of doing it maually in the runFunction
-                pkgs_to_save=["adarl","rreal"] # Will save these packages for future reference
-                )
+                pkgs_to_save=["adarl","rreal"], # Will save these packages for future reference
+                always_subproc = False)

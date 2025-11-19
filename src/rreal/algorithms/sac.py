@@ -207,7 +207,7 @@ class Actor(nn.Module):
                         action_max : Union[float, th.Tensor] = 1,
                         action_min : Union[float, th.Tensor] = -1,
                         log_std_max = 2,
-                        log_std_min = -5,
+                        log_std_min = -6,
                         log_std_init = -3.0,
                         init_noise = 0.001,
                         torch_device : Union[str,th.device] = "cuda",

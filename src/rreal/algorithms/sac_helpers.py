@@ -49,6 +49,40 @@ class VecEnvRunnerBuilderProtocol(typing.Protocol):
     def __call__(self, seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = "", autoreset = True, quiet = False) -> EnvRunnerInterface:
         ...
 
+class TargetEntropyAnnealer:
+    def __init__(self, start_target: float = -1.5,
+                 end_target: float = -5.0,
+                 start_reference_threshold: float = 0.25,
+                 reference_smoothing_alpha: float = 0.999,
+                 reference_key: str = "linvel_q95"):
+        self._start_target = start_target
+        self._end_target = end_target
+        self._start_reference_threshold = start_reference_threshold
+        self._reference_key = reference_key
+
+        self._reference_smoothing_alpha = reference_smoothing_alpha
+        self._smoothed_reference : float | None = None
+
+    def anneal(self, global_exp_step : int, train_iterations : int) -> float:
+        import adarl.utils.session
+        import adarl.utils.dbg.ggLog as ggLog
+        linvelq95 = adarl.utils.session.default_session.run_info["extras"].get(self._reference_key, None)
+
+        if self._smoothed_reference is None:
+            self._smoothed_reference = linvelq95
+        else:
+            a = self._reference_smoothing_alpha
+            self._smoothed_reference = a*self._smoothed_reference + (1.0 - a)*linvelq95
+        linvelq95 = self._smoothed_reference
+
+        if linvelq95 is None:
+            ggLog.warn(f"target_entropy_annealing_linvelq95: No linvel q95 info found, using default target entropy factor of {self._start_target}")
+            return self._start_target
+        # print(f"Linvel q95 = {linvelq95}")
+        if linvelq95 < self._start_reference_threshold:
+            return self._end_target + (self._start_target - self._end_target)*(linvelq95/self._start_reference_threshold)
+        else:
+            return self._start_target
 
 def gym_builder(seed, log_folder, is_eval, env_builder_args : dict[str,typing.Any]):
     # env = gym.make(env_builder_args["env_name"], render_mode="rgb_array")
