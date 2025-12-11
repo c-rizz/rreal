@@ -76,7 +76,7 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                 record_whole_joint_trajectories = False,
                                 log_freq_joints_trajectories = int(stepLength_sec/sim_dt),
                                 log_folder=run_folder,
-                                safe_revolute_dof_armature=0.0,
+                                safe_revolute_dof_armature=0.01,
                                 opt_preset="fast",
                                 add_ground=False
                                 )
@@ -258,7 +258,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
     # DEfine the arguments for the training environment
     algo = args["algorithm"].lower()
     max_steps_per_episode = 1000
-    num_envs = 1
+    num_envs = 16
     env_builder_args = {"mode":args["mode"],
                         "th_device" : th.device("cuda") if args["mode"] == "mjx" and algo!="sac_sb3" else th.device("cpu"),
                         "enable_rendering" : False,
@@ -295,16 +295,16 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     grad_steps=32,
                                                     parallel_envs = num_envs,
                                                     batch_size = 512,
-                                                    q_lr=1e-3,
-                                                    policy_lr=3e-4,
+                                                    q_lr=0.0005,
+                                                    policy_lr=0.0002,
                                                     model_th_device = train_device,
                                                     gamma = th.as_tensor(0.99),
                                                     target_tau=0.005,
-                                                    buffer_size=1_000_000,
-                                                    total_steps = 50_000,
+                                                    buffer_size=num_envs*max_steps_per_episode*100,
+                                                    total_steps = num_envs*max_steps_per_episode*50,
                                                     q_network_arch=[256,256],
                                                     policy_arch=[256,256],
-                                                    learning_starts=2_000,
+                                                    learning_starts=max(2_000, num_envs*10),
                                                     log_freq_vstep = 1000,
                                                     reference_init_args={},
                                                     target_entropy_factor=-1.0,

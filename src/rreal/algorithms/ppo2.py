@@ -184,28 +184,68 @@ class PPO(RLAgent):
         """The layer sizes of the critic MLP"""
         actor_network_arch : tuple[int,...] = (64,64)
         """The layer sizes of the actor MLP"""
+        actor_observation_filter : list[str] | None = None
+        """Subset of observation keys visible to the actor. Requires Dict observations."""
+        critic_observation_filter : list[str] | None = None
+        """Subset of observation keys visible to the critic. Requires Dict observations."""
 
     _hp : Final[Hyperparams]
 
+    def _get_filtered_observation_space(self,
+                                        observation_space : gym.spaces.Space,
+                                        obs_filter : list[str] | None,
+                                        role : str) -> gym.spaces.Space:
+        if obs_filter is None:
+            return observation_space
+        if not isinstance(observation_space, gym.spaces.Dict):
+            raise RuntimeError(f"observation space must be a Dict to use {role}_observation_filter, but it's a {type(observation_space)}")
+        return gym.spaces.Dict({k:v for k,v in observation_space.spaces.items() if k in obs_filter})
+
     def __init__(self, hyperparams : Hyperparams,
-                 feature_extractor : FeatureExtractor | None = None):
+                 feature_extractor : FeatureExtractor | None = None,
+                 actor_feature_extractor : FeatureExtractor | None = None,
+                 critic_feature_extractor : FeatureExtractor | None = None):
         super().__init__()
         self._hp = copy.deepcopy(hyperparams)
-        if feature_extractor is None:
-            self._feature_extractor = StackVectorsFeatureExtractor(observation_space=self._hp.observation_space,
-                                                                   device=hyperparams.th_device)
+        self._actor_observation_space = self._get_filtered_observation_space(self._hp.observation_space,
+                                                                             self._hp.actor_observation_filter,
+                                                                             "actor")
+        self._critic_observation_space = self._get_filtered_observation_space(self._hp.observation_space,
+                                                                              self._hp.critic_observation_filter,
+                                                                              "critic")
+        if feature_extractor is not None and (actor_feature_extractor is not None or critic_feature_extractor is not None):
+            raise RuntimeError("Provide either feature_extractor or actor/critic_feature_extractor, not both.")
+        share_observation_filter = self._hp.actor_observation_filter == self._hp.critic_observation_filter
+        if feature_extractor is not None:
+            if not share_observation_filter:
+                raise RuntimeError("Cannot share a single feature_extractor when actor and critic observation filters differ.")
+            self._actor_feature_extractor = feature_extractor
+            self._critic_feature_extractor = feature_extractor
         else:
-            raise NotImplementedError()
-            self._feature_extractor = feature_extractor
+            if actor_feature_extractor is None and critic_feature_extractor is None:
+                shared_extractor = StackVectorsFeatureExtractor(observation_space=self._actor_observation_space,
+                                                                device=hyperparams.th_device)
+                self._actor_feature_extractor = shared_extractor
+                self._critic_feature_extractor = shared_extractor
+            else:
+                if critic_feature_extractor is None:
+                    critic_feature_extractor = StackVectorsFeatureExtractor(observation_space=self._critic_observation_space,
+                                                                            device=hyperparams.th_device)
+                if actor_feature_extractor is None:
+                    actor_feature_extractor = StackVectorsFeatureExtractor(observation_space=self._actor_observation_space,
+                                                                            device=hyperparams.th_device)
+                self._critic_feature_extractor = critic_feature_extractor
+                self._actor_feature_extractor = actor_feature_extractor
+        self._share_actor_critic_feature_extractor = self._actor_feature_extractor is self._critic_feature_extractor
         self.critic = build_mlp_net(arch=self._hp.critic_network_arch,
-                                    input_size=self._feature_extractor.encoding_size(),
+                                    input_size=self._critic_feature_extractor.encoding_size(),
                                     output_size=1,
                                     # use_weightnorm=True,
                                     use_torchscript=True,
                                     # hidden_activations=th.nn.Tanh,
                                     layer_init_func=lambda m: ortho_layer_init_(m,1)).to(device=self._hp.th_device)
         self.actor_mean = build_mlp_net(arch=self._hp.actor_network_arch,
-                                    input_size=self._feature_extractor.encoding_size(),
+                                    input_size=self._actor_feature_extractor.encoding_size(),
                                     output_size=self._hp.action_len,
                                     # use_weightnorm=True,
                                     use_torchscript=True,
@@ -215,6 +255,8 @@ class PPO(RLAgent):
                                     last_layer_init_func=lambda m: ortho_layer_init_(m,0.01)).to(device=self._hp.th_device)
         
         self.actor_logstd = nn.Parameter(th.zeros(1, self._hp.action_len, device=self._hp.th_device))
+        if self._hp.q_lr is not None and self._hp.q_lr!=self._hp.policy_lr:
+            raise NotImplementedError("Different learning rates for Q and policy are not supported yet.")
         self._optimizer = optim.Adam(self.parameters(), lr=self._hp.policy_lr, eps=1e-5)
         self._grad_step_count = 0
         self._grad_step_count_th = th.as_tensor(0, device=self._hp.th_device)
@@ -238,16 +280,40 @@ class PPO(RLAgent):
     def get_value(self, x):
         return self.critic(x)
 
-    def get_action_logprob_entropy_critic_mean(self, obs_batch, enc_obs_batch = None, action=None):
-        if enc_obs_batch is None:
-            enc_obs_batch = self._feature_extractor.extract_features(obs_batch)
-        action_mean = self.actor_mean(enc_obs_batch)
+    def get_actor_subobservation(self, observation):
+        if self._hp.actor_observation_filter is None:
+            return observation
+        if not isinstance(observation, dict):
+            raise RuntimeError(f"actor_observation_filter requires dict observations, got {type(observation)}")
+        return {k: observation[k] for k in self._hp.actor_observation_filter}
+
+    def get_critic_subobservation(self, observation):
+        if self._hp.critic_observation_filter is None:
+            return observation
+        if not isinstance(observation, dict):
+            raise RuntimeError(f"critic_observation_filter requires dict observations, got {type(observation)}")
+        return {k: observation[k] for k in self._hp.critic_observation_filter}
+
+    def get_action_logprob_entropy_critic_mean(self, obs_batch=None, enc_actor_obs_batch = None, enc_critic_obs_batch = None, action=None):
+        if enc_actor_obs_batch is None:
+            if self._share_actor_critic_feature_extractor and enc_critic_obs_batch is not None:
+                enc_actor_obs_batch = enc_critic_obs_batch
+            else:
+                actor_obs = self.get_actor_subobservation(obs_batch)
+                enc_actor_obs_batch = self._actor_feature_extractor.extract_features(actor_obs)
+        if enc_critic_obs_batch is None:
+            if self._share_actor_critic_feature_extractor and enc_actor_obs_batch is not None:
+                enc_critic_obs_batch = enc_actor_obs_batch
+            else:
+                critic_obs = self.get_critic_subobservation(obs_batch)
+                enc_critic_obs_batch = self._critic_feature_extractor.extract_features(critic_obs)
+        action_mean = self.actor_mean(enc_actor_obs_batch)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = th.exp(action_logstd)
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(enc_obs_batch), action_mean
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(enc_critic_obs_batch), action_mean
 
     def compute_losses(self, mb_advantages, mb_values, mb_returns, mb_logprobs, newvalues, newlogprobs, entropies):
         logratio = newlogprobs - mb_logprobs                
@@ -285,8 +351,15 @@ class PPO(RLAgent):
         # t_0 = time.monotonic()
         raw_obss, actions, rewards, dones, logprobs, values = buff.get_rollout_data()
         raw_obss = map_tensor_tree(raw_obss, lambda l: l.flatten(0,1))
-        enc_obss = self._feature_extractor.extract_features(raw_obss) 
-        enc_obss = map_tensor_tree(enc_obss, lambda l: l.view((buff.num_steps+1, buff.num_envs)+l.shape[1:]))
+        actor_obss = self.get_actor_subobservation(raw_obss)
+        critic_obss = self.get_critic_subobservation(raw_obss)
+        enc_actor_obss = self._actor_feature_extractor.extract_features(actor_obss)
+        if self._share_actor_critic_feature_extractor:
+            enc_critic_obss = enc_actor_obss
+        else:
+            enc_critic_obss = self._critic_feature_extractor.extract_features(critic_obss)
+        enc_actor_obss = map_tensor_tree(enc_actor_obss, lambda l: l.view((buff.num_steps+1, buff.num_envs)+l.shape[1:]))
+        enc_critic_obss = map_tensor_tree(enc_critic_obss, lambda l: l.view((buff.num_steps+1, buff.num_envs)+l.shape[1:]))
         
         # t_postenc = time.monotonic()
         # bootstrap value if not done
@@ -303,7 +376,8 @@ class PPO(RLAgent):
         
         # flatten the batch
         minibatch_size = self._hp.minibatch_size
-        b_encobs = enc_obss[:self._hp.num_steps].view((self.__batch_size,) + enc_obss.size()[2:])
+        b_actor_encobs = enc_actor_obss[:self._hp.num_steps].view((self.__batch_size,) + enc_actor_obss.size()[2:])
+        b_critic_encobs = enc_critic_obss[:self._hp.num_steps].view((self.__batch_size,) + enc_critic_obss.size()[2:])
         b_logprobs = logprobs[:self._hp.num_steps].view(self.__batch_size)
         b_actions = actions.view((self.__batch_size,self._hp.action_len))
         b_advantages = advantages.view(self.__batch_size)
@@ -324,14 +398,18 @@ class PPO(RLAgent):
                 end = start + minibatch_size
                 mb_inds = b_inds[start:end]
                 # print(f"mb_inds = {mb_inds}")
-                mb_encobs = b_encobs[mb_inds]
+                mb_actor_encobs = b_actor_encobs[mb_inds]
+                mb_critic_encobs = b_critic_encobs[mb_inds]
                 mb_acts = b_actions[mb_inds]
                 mb_logprobs = b_logprobs[mb_inds]
                 mb_values = b_values[mb_inds]
                 mb_advantages = b_advantages[mb_inds]
                 mb_returns = b_returns[mb_inds]
 
-                _, newlogprobs, entropies, newvalues, _ = self.get_action_logprob_entropy_critic_mean(obs_batch=None, enc_obs_batch=mb_encobs, action=mb_acts)
+                _, newlogprobs, entropies, newvalues, _ = self.get_action_logprob_entropy_critic_mean(obs_batch=None,
+                                                                                                     enc_actor_obs_batch=mb_actor_encobs,
+                                                                                                     enc_critic_obs_batch=mb_critic_encobs,
+                                                                                                     action=mb_acts)
 
                 # with th.no_grad():
                 #     old_approx_kl = (-logratio).mean()
@@ -405,15 +483,15 @@ class PPO(RLAgent):
 
     @override
     def save(self, path : str):
-        pass
+        raise NotImplementedError()
 
     @override
     def load_(self, path : str):
-        pass
+        raise NotImplementedError()
     
     @override
     def load(cls, path : str):
-        pass
+        raise NotImplementedError()
 
         
 
@@ -603,6 +681,8 @@ class PPO_hyperparams():
     log_freq_vstep : int
     critic_network_arch : tuple[int,...]
     actor_network_arch : tuple[int,...]
+    actor_observation_filter : list[str] | None = None
+    critic_observation_filter : list[str] | None = None
 
 def ppo_train(  seed : int,
                 folderName : str,
@@ -677,7 +757,9 @@ def ppo_train(  seed : int,
                                     gamma=agent_hyperparams.gamma,
                                     update_epochs=agent_hyperparams.update_epochs,
                                     actor_network_arch=agent_hyperparams.actor_network_arch,
-                                    critic_network_arch=agent_hyperparams.critic_network_arch))
+                                    critic_network_arch=agent_hyperparams.critic_network_arch,
+                                    actor_observation_filter=agent_hyperparams.actor_observation_filter,
+                                    critic_observation_filter=agent_hyperparams.critic_observation_filter))
     ggLog.info(f"Compiling PPO model...")
     t0 = time.monotonic()
     agent = th.compile(agent, fullgraph=True, mode="max-autotune")

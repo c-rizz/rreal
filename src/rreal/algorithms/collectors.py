@@ -336,6 +336,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         self._last_collect_wall_duration.value = 0.0
         p1, p2 = ctx.Pipe()
         global counter
+        ggLog.info(f"starting proc. Cuda initialized = {th.cuda.is_initialized(), th.cuda._is_in_bad_fork()}")
         self._collector_process : mp.Process = ctx.Process(target = self._worker, args=(p2,session), name=f"async_experience_collector_{counter}")
         self._collector_process.start()
         self._pipe = p1

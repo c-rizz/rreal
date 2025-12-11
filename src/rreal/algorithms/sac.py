@@ -15,7 +15,7 @@ from rreal.feature_extractors import get_feature_extractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
 from rreal.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay, simplified_clip_grad_norm_
-from typing import List, Union, Literal, Mapping
+from typing import List, Union, Literal, Mapping, Callable
 import adarl.utils.callbacks
 import adarl.utils.dbg.ggLog as ggLog
 import adarl.utils.session
@@ -47,6 +47,25 @@ th._dynamo.config.compiled_autograd = True
 compile_mode="max-autotune" # reduce overhead doesn't seem to reduce overhead more than max-autotune
 disable_compile = False
 
+DictObs = dict[str, th.Tensor]
+@dataclass
+class DictTransitionBatch():
+    observations : DictObs
+    actions : th.Tensor
+    next_observations : DictObs
+    terminated : th.Tensor
+    rewards : th.Tensor
+
+class TransitionAugmentorFunction(Protocol):
+        def __call__(self,
+                     observations : DictObs,
+                     actions : th.Tensor,
+                     next_observations : DictObs,
+                     rewards : th.Tensor,
+                     terminateds : th.Tensor
+                     ) -> tuple[DictObs, th.Tensor, DictObs, th.Tensor, th.Tensor]:
+            ...
+
 def compare_dicts(d1 : dict, d2 : dict) -> tuple[bool, str]:
     all_keys = set(d1.keys()).union(set(d2.keys()))
     diffs = ""
@@ -62,6 +81,8 @@ def compare_dicts(d1 : dict, d2 : dict) -> tuple[bool, str]:
 
 def nop_func(arg1):
     pass
+
+
 
 @typing.runtime_checkable
 class AnnealingFunction(Protocol):
@@ -155,7 +176,6 @@ class SAC_init_hparams:
     deterministic_collection_ratio : float = 0.0
     alpha_lr_factor : float = 1.0
 
-
 class QNetwork(nn.Module):
     def __init__(self,
                  action_size : int,
@@ -165,7 +185,8 @@ class QNetwork(nn.Module):
                  nets_num : int = 1,
                  initial_scale = 0.003,
                  use_weightnorm : bool = True,
-                 rewards_num : int = 1):
+                 rewards_num : int = 1,
+                 inner_activations : Callable[[],nn.Module] = nn.Tanh):
         super().__init__()
         self._nets_num = nets_num
         self._obs_size = observation_size
@@ -179,6 +200,7 @@ class QNetwork(nn.Module):
                                      use_weightnorm=self._use_weightnorm,
                                      use_torchscript=False,
                                      use_jit_fork=False,
+                                     hidden_activations=inner_activations,
                                      last_layer_init_func= lambda m: scale_layer_weights(m,initial_scale)).to(device=torch_device)
     
     # @th.compile(mode=compile_mode, fullgraph=True)
@@ -213,27 +235,29 @@ class Actor(nn.Module):
                         torch_device : Union[str,th.device] = "cuda",
                         action_mean_init : float | th.Tensor= 0.0,
                         use_weightnorm : bool = True,
-                        mean_bounds_ratio : float | None = None):
+                        mean_bounds_ratio : float | None = None,
+                        inner_activations : Callable[[],nn.Module] = th.nn.Tanh,
+                        dtype : th.dtype = th.float32):
         super().__init__()
         self._log_std_max = log_std_max
         self._log_std_min = log_std_min
         self.device = torch_device
+        self.dtype = dtype
         self._obs_size = observation_size
         self._use_weightnorm = use_weightnorm
         self._mean_bounds_ratio = mean_bounds_ratio if mean_bounds_ratio is not None else 1.0
-        # ggLog.info(f"Actor mean_bounds_ratio = {self._mean_bounds_ratio}")
-        # ggLog.info(f"Actor action_max = {action_max} action_min = {action_min}")
+        ggLog.info(f"Actor mean_bounds_ratio = {self._mean_bounds_ratio}")
+        ggLog.info(f"Actor action_max = {action_max} action_min = {action_min}")
 
         # save action scaling factors as non-trained parameters
         if isinstance(action_max, int): action_max = float(action_max)
         if isinstance(action_min, int): action_min = float(action_min)
-        if isinstance(action_max,float): action_max = th.as_tensor([action_max]*action_size, dtype=th.float32)
-        if isinstance(action_min,float): action_min = th.as_tensor([action_min]*action_size, dtype=th.float32)
+        if isinstance(action_max,float): action_max = th.as_tensor([action_max]*action_size, dtype=self.dtype)
+        if isinstance(action_min,float): action_min = th.as_tensor([action_min]*action_size, dtype=self.dtype)
         self.action_bias : th.Tensor
         self.action_scale : th.Tensor
-        self.register_buffer("action_scale", th.as_tensor((action_max - action_min) / 2.0, dtype=th.float32, device=torch_device))
-        self.register_buffer("action_bias",  th.as_tensor((action_max + action_min) / 2.0, dtype=th.float32, device=torch_device))
-        inner_activations = th.nn.Tanh
+        self.register_buffer("action_scale", th.as_tensor((action_max - action_min) / 2.0, dtype=self.dtype, device=torch_device))
+        self.register_buffer("action_bias",  th.as_tensor((action_max + action_min) / 2.0, dtype=self.dtype, device=torch_device))
         if len(policy_arch)<1:
             raise RuntimeError(f"Invalid policy arch {policy_arch}, must have at least 1 layer")
         else:
@@ -241,7 +265,7 @@ class Actor(nn.Module):
                                     last_activation_class=inner_activations,
                                     hidden_activations=inner_activations,
                                     use_weightnorm=self._use_weightnorm).to(device=torch_device)
-        action_mean_init = th.as_tensor(action_mean_init, dtype=th.float32).to(device=torch_device)
+        action_mean_init = th.as_tensor(action_mean_init, dtype=self.dtype).to(device=torch_device)
         mean_init = th.atanh((action_mean_init-self.action_bias)/self.action_scale).to("cpu")
         self.act_fc_mean = build_mlp_net(arch=[],
                                          input_size=policy_arch[-1],
@@ -254,7 +278,7 @@ class Actor(nn.Module):
                                          output_size=action_size,
                                          use_weightnorm=self._use_weightnorm,
                                          last_layer_init_func=lambda m: scale_layer_weights(m, init_noise, bias_offset=log_std_init),
-                                         hidden_activations=inner_activations).to(device=torch_device)        
+                                         hidden_activations=inner_activations).to(device=torch_device)      
 
     def forward(self, observation_batch, reference_action : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor]:
         hidden_batch = self.act_fc(observation_batch)
@@ -266,8 +290,13 @@ class Actor(nn.Module):
         # the logprob correction done in sample_action, I think
         # Still, it helps to avoid boudary issues with the noise being reduced on the edges of the action space
         mean_scales = self._mean_bounds_ratio*self.action_scale
+        eps = 1e-6
+        mean_scales = th.atanh(th.clamp(mean_scales, min=-1+eps, max=1-eps)) # because it gets squashed again later
         mean_biases = self.action_bias
+        # ggLog.info(f"mean unsquash = {mean.min()} to {mean.max()}")
         mean = th.tanh(mean/mean_scales)*mean_scales + mean_biases
+        # ggLog.info(f"mean_scales = {mean_scales}")
+        # ggLog.info(f"mean = {mean.min()} to {mean.max()}")
 
         log_std = self.act_fc_logstd(hidden_batch)
         log_std = (th.tanh(log_std)+1)*0.5*(self._log_std_max - self._log_std_min) + self._log_std_min # squash the log_std network output
@@ -282,6 +311,7 @@ class Actor(nn.Module):
         normal = th.distributions.Normal(mean, std)
         log_prob = normal.log_prob(x_t) # get the probability of the actions that we sampled
         y_t = th.tanh((x_t-self.action_bias)/self.action_scale) # squash the action in [-1,1]
+        mean = th.tanh((mean -self.action_bias)/self.action_scale) # squash the mean in [-1,1] in the same way as the action
 
         # scale mean and action to the proper bounds
         # mean = th.tanh(mean) * self.action_scale + self.action_bias
@@ -387,6 +417,7 @@ class SAC(RLAgent):
         else:
             raise RuntimeError(f"Invalid gamma type {type(init_hparams.gamma)}, must be float or th.Tensor or dict")
         
+        self._dtype = th.float32
         self._hp = SAC.Hyperparams(q_lr=init_hparams.q_lr,
                                    policy_lr = init_hparams.policy_lr,
                                    gamma=gammas.expand(rewards_num).to(device=init_hparams.model_th_device),
@@ -419,7 +450,9 @@ class SAC(RLAgent):
                                    actor_mean_bounds_ratio = init_hparams.actor_mean_bounds_ratio,
                                    rewards_num = rewards_num,
                                    gamma_reward_scaling = True,
-                                   alpha_lr_factor= init_hparams.alpha_lr_factor)
+                                   alpha_lr_factor=init_hparams.alpha_lr_factor)
+        self._transition_augmentation_func = None
+        self._default_reward_weights = th.ones(rewards_num, dtype=self._dtype, device=self._hp.torch_device)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = self._hp.torch_device
         self._critic_updates = 0
@@ -472,10 +505,11 @@ class SAC(RLAgent):
                             torch_device=self._hp.torch_device,
                             log_std_init=self._hp.log_std_init,
                             action_mean_init=self._hp.action_init,
-                            mean_bounds_ratio=self._hp.actor_mean_bounds_ratio)
+                            mean_bounds_ratio=self._hp.actor_mean_bounds_ratio,
+                            dtype=self._dtype)
         # self._actor_optimizer = optim.Adam(split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay),
         #                                    lr=self._hp.policy_lr)
-        self._base_target_entropy_factor = th.as_tensor(self._hp.target_entropy_factor, device=self._hp.torch_device, dtype=th.float32)
+        self._base_target_entropy_factor = th.as_tensor(self._hp.target_entropy_factor, device=self._hp.torch_device, dtype=self._dtype)
         self._target_entropy = self._base_target_entropy_factor*self._hp.action_size
         if init_hparams.target_entropy_factor_annealing is None:
             init_hparams.target_entropy_factor_annealing = ("constant", [self._base_target_entropy_factor])
@@ -570,21 +604,21 @@ class SAC(RLAgent):
         if self._enable_nvtx and self._agent_updates >10:
             th.cuda.nvtx.range_pop()
 
-    def get_actor_subobservation(self, observation : dict | th.Tensor)  -> th.Tensor | dict:
+    def get_actor_subobservation(self, observation : DictObs)  -> DictObs:
         if self._hp.actor_observation_filter is None:
             return observation
         else:
             r = {k:observation.get(k,None) for k in self._hp.actor_observation_filter} #type: ignore
             return {k:v for k,v in r.items() if v is not None}
 
-    def get_critic_subobservation(self, observation : dict | th.Tensor) -> th.Tensor | dict:
+    def get_critic_subobservation(self, observation : DictObs) -> DictObs:
         if self._hp.critic_observation_filter is None:
             return observation
         else:
             r = {k:observation.get(k,None) for k in self._hp.critic_observation_filter} #type: ignore
             return {k:v for k,v in r.items() if v is not None}
 
-    def _get_reference_action(self, observation_batch : dict | th.Tensor) -> th.Tensor | None:
+    def _get_reference_action(self, observation_batch : DictObs) -> th.Tensor | None:
         if self._hp.action_reference_obs_key is not None:
             return observation_batch[self._hp.action_reference_obs_key]
         else:
@@ -686,7 +720,7 @@ class SAC(RLAgent):
         return model
 
     @override
-    def predict_action(self, observation_batch : th.Tensor | dict , deterministic = False, info_return : dict | None = None):
+    def predict_action(self, observation_batch : DictObs , deterministic = False, info_return : dict | None = None):
         th.compiler.cudagraph_mark_step_begin()
         # s = {k:v.size() for k,v in observation.items()}
         # ggLog.info(f"predict: observation = {s}")
@@ -697,10 +731,10 @@ class SAC(RLAgent):
                                             lambda obs,obs_space_size: obs.dim() == len(obs_space_size))
         is_batched = not all(flatten_tensor_tree(has_right_dims).values())
         if not is_batched:
-            observation_batch = map_tensor_tree(observation_batch, lambda t: t.unsqueeze(0))
+            observation_batch = {k:t.unsqueeze(0) for k,t in observation_batch.items()}
 
         observation_batch = self.get_actor_subobservation(observation_batch)
-        observation_batch = map_tensor_tree(observation_batch, lambda t: t.to(device = self.device, dtype = th.float32))
+        observation_batch = {k:t.to(device = self.device, dtype = self._dtype) for k,t in observation_batch.items()}
         observation_batch_enc = self._actor_feature_extractor.extract_features(observation_batch)
         reference_action = self._get_reference_action(observation_batch)
         action, log_prob, mean, log_std = self._actor.sample_action(observation_batch_enc, reference_action=reference_action)
@@ -735,8 +769,9 @@ class SAC(RLAgent):
         return th.stack([mean, min, max, q05, q95], dim=0)
 
     @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
-    def _compute_critic_loss(self, transitions : TransitionBatch, get_stats : bool = True):
+    def _compute_critic_loss(self, transitions : DictTransitionBatch, get_stats : bool = True):
         critic_obss = self.get_critic_subobservation(transitions.observations)
+        actor_obss = self.get_actor_subobservation(transitions.observations)
         critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
         with th.no_grad():
             batch_size = transitions.terminated.size()[0]
@@ -798,7 +833,7 @@ class SAC(RLAgent):
             for rew_name, stats in q_stat_by_rew.items():
                 self._stats.update({f"q_val_{stat_name}_{rew_name}":stat_value for stat_name, stat_value in zip( ["avg", "min", "max", "q05", "q95"], stats.detach().clone())})
         
-    def _update_critic(self, transitions : TransitionBatch):
+    def _update_critic(self, transitions : DictTransitionBatch):
         # ggLog.info(f"critic update...")
         
         # self._nvtx_start_range("_update_critic")
@@ -825,7 +860,7 @@ class SAC(RLAgent):
 
 
     # @th.compile(mode=compile_mode, fullgraph=True)
-    def _compute_actor_loss(self, transitions : TransitionBatch, freeze_critic : bool = False, get_stats : bool = False):
+    def _compute_actor_loss(self, transitions : DictTransitionBatch, freeze_critic : bool = False, get_stats : bool = False):
         # self._mark_nvtx("_compute_actor_loss")
         actor_obss = self.get_actor_subobservation(transitions.observations)
         # self._mark_nvtx("actor_enc")
@@ -887,7 +922,7 @@ class SAC(RLAgent):
                             -act_log_prob.mean()] )
 
     @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
-    def _compute_alpha_loss(self, transitions : TransitionBatch):
+    def _compute_alpha_loss(self, transitions : DictTransitionBatch):
         with th.no_grad():
             actor_obss = self.get_actor_subobservation(transitions.observations)
             actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
@@ -898,7 +933,7 @@ class SAC(RLAgent):
     
 
     @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
-    def _compute_actor_and_alpha_loss(self, transitions : TransitionBatch):
+    def _compute_actor_and_alpha_loss(self, transitions : DictTransitionBatch):
         actor_loss, actor_stats = self._compute_actor_loss(transitions, get_stats=False)
         # self._start_range_nvtx("actor opt")
         
@@ -937,7 +972,7 @@ class SAC(RLAgent):
         if alpha_loss is not None:
             self._last_alpha_loss.copy_(alpha_loss.detach())
 
-    def _update_actor_and_alpha(self, transitions : TransitionBatch):
+    def _update_actor_and_alpha(self, transitions : DictTransitionBatch):
         # We aggregate actor and alpha to join the two compilation regions and cuda graphs, so to reduce overhead
         # self._nvtx_start_range("_update_actor_and_alpha")
         self._actor_and_alpha_optimizer.zero_grad(set_to_none=True)
@@ -1014,7 +1049,7 @@ class SAC(RLAgent):
             if self._actor_feature_extractor_optimizer is not None:
                 self._actor_feature_extractor_optimizer.step()
 
-    def _update_full_merged(self, transitions : TransitionBatch):
+    def _update_full_merged(self, transitions : DictTransitionBatch):
         th.compiler.cudagraph_mark_step_begin()
         # self._nvtx_startup()
         # self._nvtx_start_range(f"iteration{self._critic_updates}")
@@ -1042,7 +1077,7 @@ class SAC(RLAgent):
         # self._nvtx_stop()
         return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
 
-    def _update(self, transitions : TransitionBatch):
+    def _update(self, transitions : DictTransitionBatch):
         # ggLog.info(f" ----------- SAC update {self._agent_updates}...")
         th.compiler.cudagraph_mark_step_begin()
         # sync_dbg_mode = th.cuda.get_sync_debug_mode()
@@ -1089,16 +1124,37 @@ class SAC(RLAgent):
                             "val_alpha_loss":alpha_loss})
         return critic_loss, actor_loss, alpha_loss
 
+    def set_transition_augmentor(self, transition_augmentor: TransitionAugmentorFunction):
+        self._transition_augmentation_func = transition_augmentor
+
+    def _augment_transitions(self, transitions : DictTransitionBatch) -> DictTransitionBatch:
+        if self._transition_augmentation_func is not None:
+            o, a, no, r, t = self._transition_augmentation_func(transitions.observations,
+                                                                transitions.actions,
+                                                                transitions.next_observations,
+                                                                transitions.rewards,
+                                                                transitions.terminated)
+            transitions = DictTransitionBatch(
+                observations=o,
+                actions=a,
+                next_observations=no,
+                rewards=r,
+                terminated=t
+            )
+        return transitions
+
     @override
     def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[th.Tensor,th.Tensor,th.Tensor]:
         # ggLog.info(f":::::::::::::::::::::::: train_model: global_step={global_step}")
         q_act_alpha_losses = [None]*iterations
         target_entropy_cpu = self._target_entropy_factor_annealing(global_step, self._tot_grad_steps_count)*self._hp.action_size
-        self._target_entropy.copy_(th.as_tensor(target_entropy_cpu).to(device=self.device, dtype=th.float32, non_blocking=self.device.type=="cuda"))
+        self._target_entropy.copy_(th.as_tensor(target_entropy_cpu).to(device=self.device, dtype=self._dtype, non_blocking=self.device.type=="cuda"))
         t0 = time.monotonic()
         for i in range(iterations):
             # self._nvtx_start_range("sample")
-            transitions = buffer.sample(self._hp.batch_size)
+            transitions : DictTransitionBatch = buffer.sample(self._hp.batch_size) #TODO: maybe add a check that does this cast better
+
+            transitions = self._augment_transitions(transitions)
             # self._nvtx_end_range()
             # transitions = map_tensor_tree(transitions, lambda t : t.to(device=self.device, non_blocking=self.device.type=="cuda"))
             # th.cuda.synchronize(self.device)

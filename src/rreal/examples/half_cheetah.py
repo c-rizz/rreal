@@ -111,7 +111,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     th_device=th.device("cuda"),
                                                     actor_network_arch=(256,256),
                                                     critic_network_arch=(256,256),
-                                                    q_lr=0.001,
+                                                    q_lr=None,
                                                     policy_lr=3e-4,
                                                     update_epochs=10,
                                                     total_steps=10_000_000,

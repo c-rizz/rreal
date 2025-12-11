@@ -28,7 +28,7 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
                                                 device=self._th_device)
             self._normalizer = th.compile(self._normalizer, mode="max-autotune")
         if self._obs_converter.has_image_part():
-            raise NotImplementedError(f"Input observations contain images.")
+            raise NotImplementedError(f"Input observations contains non-monodimensional tensors (images?).")
 
     def extract_features(self, observation_batch) -> th.Tensor:
         with th.no_grad():

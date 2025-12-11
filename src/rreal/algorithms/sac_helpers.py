@@ -16,7 +16,7 @@ from adarl.utils.buffers import ThDReplayBuffer
 from adarl.utils.ThDictEpReplayBuffer import ThDictEpReplayBuffer
 from adarl.utils.ThVecDictEpReplayBuffer import ThVecDictEpReplayBuffer
 import adarl.utils.sigint_handler
-from rreal.algorithms.sac import SAC, train_off_policy, SAC_init_hparams
+from rreal.algorithms.sac import SAC, train_off_policy, SAC_init_hparams, TransitionAugmentorFunction
 from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector, SyncExperienceCollector
 import wandb 
 from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
@@ -224,6 +224,10 @@ def build_eval_callbacks(eval_configurations : list[dict],
 #     return envs
 
 def build_sac(obs_space : gym.Space, act_space : gym.Space, reward_space : gym.Space, hyperparams : SAC_init_hparams):
+    ggLog.info(f"Building SAC agent with:\n"
+               f"    obs_space: {obs_space}\n"
+               f"    act_space: {act_space}\n"
+               f"    reward_space: {reward_space}")
     agent = SAC(observation_space=obs_space,
                 reward_space=reward_space,
                 action_size=int(np.prod(act_space.shape)),
@@ -283,6 +287,10 @@ def wrap_with_gym(vec_runner_builder : VecEnvRunnerBuilderProtocol) -> VecEnvBui
     return wrapped_builder
 
 
+class AugmentorBuilder(typing.Protocol):
+    def __call__(self, observation_space, action_space, reward_space) -> TransitionAugmentorFunction:
+        ...
+
 def sac_train(  seed : int,
                 folderName : str,
                 run_id : str,
@@ -300,7 +308,8 @@ def sac_train(  seed : int,
                 buffer_device : th.device | str | None = None,
                 debug_level : int = 2,
                 no_wandb : bool = False,
-                log_weights_and_grads = False):
+                log_weights_and_grads = False,
+                transition_augmentor_builder: AugmentorBuilder | None = None):
 
     run_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
@@ -312,10 +321,6 @@ def sac_train(  seed : int,
                                                         use_wandb=not no_wandb)
     validation_enabled = validation_buffer_size > 0 or validation_holdout_ratio > 0 or validation_batch_size > 0
 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
 
     # if hyperparams.device == "cuda": hyperparams.device = "cuda:0"
     if isinstance(hyperparams.model_th_device, str):
@@ -332,7 +337,7 @@ def sac_train(  seed : int,
     if buffer_device is None:
         buffer_device = device
     if vec_env_builder is None:
-        raise RuntimeError(f"You must specify either vec_env_builder or env_builder")
+        raise RuntimeError(f"You must specify either vec_env_builder")
     vec_env_builder = wrap_with_logger(vec_env_builder)
     # env setup
     collector = build_collector(use_processes = True,
@@ -354,6 +359,10 @@ def sac_train(  seed : int,
     # torchexplorer.watch(model, backend="wandb")
     if log_weights_and_grads:
         wandb.watch((model, model._actor, model._q_net), log="all", log_freq=1000, log_graph=False)
+
+    if transition_augmentor_builder is not None:
+        transition_augmentor = transition_augmentor_builder(observation_space, action_space, reward_space)
+        model.set_transition_augmentor(transition_augmentor)
 
     # compiled_model = th.compile(model)
 
