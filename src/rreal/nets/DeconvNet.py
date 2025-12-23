@@ -4,6 +4,7 @@ import torch.nn as nn
 from typing import List
 import numpy as np
 import adarl.utils.dbg.ggLog as ggLog
+from typing import Sequence
 
 # from torchsummary import summary
 class ResizeConvolution(nn.Module):
@@ -29,12 +30,12 @@ class DeconvNet(nn.Module):
     def __init__(self,  output_channels : int = 1,
                         output_width : int = 64,
                         output_height : int = 64,
-                        input_shape_chw : int = (256,4,4),
+                        input_shape_chw : Sequence[int] = (256,4,4),
                         filters_number : List[int] = [256,128,64,32],
-                        strides : List[int] = None,
-                        kernel_sizes : List[int] = None,
-                        paddings : List[int] = None,
-                        scales : List[int] = None,
+                        strides : List[int] | None = None,
+                        kernel_sizes : List[int] | None = None,
+                        paddings : List[int] | None = None,
+                        scales : List[int] | None = None,
                         torchDevice : str = "cuda",
                         use_batchnorm = True):
         super().__init__()

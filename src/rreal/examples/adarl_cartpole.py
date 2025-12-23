@@ -1,17 +1,12 @@
 #!/usr/bin/env python3  
 from __future__ import annotations
-from rreal.algorithms.sac_helpers import sac_train, SAC_init_hparams, gym_builder, build_vec_env
-import copy
-from adarl.envs.examples.CartpoleContinuousVecEnv import CartpoleContinuousVecEnv
-from adarl.envs.vec.EnvRunner import EnvRunner
-from adarl.envs.vec.EnvRunnerRecorderWrapper import EnvRunnerRecorderWrapper
-from adarl.envs.vec.GymVecRunnerWrapper import GymVecRunnerWrapper
-from adarl.envs.vec.GymRunnerWrapper import GymRunnerWrapper
-from adarl.envs.vec.lr_wrappers.ObsToDict import ObsToDict
-from typing import Any
 
 
 def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = "", autoreset = True, quiet = False):
+    from adarl.envs.examples.CartpoleContinuousVisualVecEnv import CartpoleContinuousVisualVecEnv
+    from adarl.envs.vec.EnvRunner import EnvRunner
+    from adarl.envs.vec.EnvRunnerRecorderWrapper import EnvRunnerRecorderWrapper
+    from adarl.envs.vec.lr_wrappers.ObsToDict import ObsToDict
     print(f"Building cartpole vrunner with args: {env_builder_args}")
     mode = env_builder_args["mode"]
     th_device = env_builder_args["th_device"]
@@ -107,13 +102,23 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                             reference_filter_mode="none")
     else:
         raise NotImplementedError(f"Requested unknown adapter '{mode}'")
-    env = CartpoleContinuousVecEnv(adapter=adapter,
+    # env = CartpoleContinuousVecEnv(adapter=adapter,
+    #                                max_episode_steps=max_steps,
+    #                                render=True,
+    #                                step_duration_sec=stepLength_sec,
+    #                                th_device=adapter.output_th_device(),
+    #                                task=env_builder_args.pop("task"),
+    #                                sparse_reward=env_builder_args.pop("sparse_reward"))
+    env = CartpoleContinuousVisualVecEnv(adapter=adapter,
                                    max_episode_steps=max_steps,
                                    render=True,
                                    step_duration_sec=stepLength_sec,
                                    th_device=adapter.output_th_device(),
                                    task=env_builder_args.pop("task"),
-                                   sparse_reward=env_builder_args.pop("sparse_reward"))
+                                   sparse_reward=env_builder_args.pop("sparse_reward"),
+                                   img_obs=env_builder_args.pop("img_obs"),
+                                   img_obs_resolution=env_builder_args.pop("img_obs_resolution"),
+                                   img_obs_frame_stacking_size=env_builder_args.pop("img_obs_frame_stacking_size"))
     env = ObsToDict(env=env)
     vrunner = EnvRunner(env=env, verbose=False, quiet=quiet, episodeInfoLogFile=run_folder+"/vec_runner.log",
                         render_envs=[0], autoreset=autoreset,
@@ -135,6 +140,8 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
     return vrunner
 
 def cartpole_venv_builder(  seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = ""):
+    from adarl.envs.vec.Runner2VecGymWrapper import Runner2VecGymWrapper
+    
     mode = env_builder_args["mode"]
     quiet = env_builder_args["quiet"]
     stepLength_sec= env_builder_args["step_length_sec"]
@@ -160,7 +167,7 @@ def cartpole_venv_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                     run_folder = run_folder,
                                     env_builder_args = env_builder_args,
                                     num_envs = num_envs)
-    env = GymVecRunnerWrapper(runner=vrunner, quiet=quiet)
+    env = Runner2VecGymWrapper(runner=vrunner, quiet=quiet)
     
     env.reset(seed=seed)
     return env
@@ -255,10 +262,12 @@ def sac_sb3_train(vec_env_builder,
 
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
     import torch as th
+    from rreal.algorithms.sac_helpers import sac_train, SAC_init_hparams, gym_builder, build_vec_env
+    import copy
     # DEfine the arguments for the training environment
     algo = args["algorithm"].lower()
     max_steps_per_episode = 1000
-    num_envs = 16
+    num_envs = 32
     env_builder_args = {"mode":args["mode"],
                         "th_device" : th.device("cuda") if args["mode"] == "mjx" and algo!="sac_sb3" else th.device("cpu"),
                         "enable_rendering" : False,
@@ -268,7 +277,10 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                         "max_steps" : max_steps_per_episode,
                         "step_length_sec" : 48/1024,
                         "task" : "balance",
-                        "sparse_reward" :  True}
+                        "sparse_reward" :  True,
+                        "img_obs" : False,
+                        "img_obs_resolution" : (64,64),
+                        "img_obs_frame_stacking_size" : 3}
     
     # Define the arguments for the evaluation environment(s)
     video_eval_env_builder_args = copy.deepcopy(env_builder_args)
@@ -280,7 +292,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
         "eval_freq_ep" : num_envs*10, # How often perform evaluation runs are performed
         "eval_eps" : 1, # how many episodes to run for each evaluation run
         "env_builder_args" : video_eval_env_builder_args, # env args for the eval
-        "num_envs" : 1, # numbero of parallel eval envs
+        "num_envs" : 32, # number of parallel eval envs
     }
     eval_configs = [eval_conf_video_stoch]
     

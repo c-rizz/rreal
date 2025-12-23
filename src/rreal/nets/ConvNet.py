@@ -55,7 +55,8 @@ class ConvNet(nn.Module):
             block.append(convClass(in_channels=in_channels, out_channels=ch_num,
                               kernel_size=kernel_sizes[i],
                               stride=strides[i],
-                              padding=paddings[i], bias=False)) #Halves width and height
+                              padding=paddings[i], bias=False,
+                              padding_mode="replicate")) #Halves width and height
             if use_batchnorm:
                 block.append(nn.BatchNorm2d(ch_num))
             block.append(nn.LeakyReLU())

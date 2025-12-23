@@ -1,41 +1,37 @@
 #!/usr/bin/env python3  
 
 from __future__ import annotations
-import os
-import random
-import time
 
-import numpy as np
-import torch
-import torch as th
-from adarl.utils.async_vector_env import AsyncVectorEnvShmem
-import inspect
-import adarl.utils.session
-from adarl.envs.vector_env_logger import VectorEnvLogger
-from adarl.utils.buffers import ThDReplayBuffer
-from adarl.utils.ThDictEpReplayBuffer import ThDictEpReplayBuffer
-from adarl.utils.ThVecDictEpReplayBuffer import ThVecDictEpReplayBuffer
-import adarl.utils.sigint_handler
-from rreal.algorithms.sac import SAC, train_off_policy, SAC_init_hparams, TransitionAugmentorFunction
-from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector, SyncExperienceCollector
-import wandb 
-from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
-import gymnasium as gym
 from adarl.envs.GymEnvWrapper import GymEnvWrapper
 from adarl.envs.GymToLr import GymToLr
+from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
 from adarl.envs.lr_wrappers.ObsToDict import ObsToDict
+from adarl.envs.vec.EnvRunnerInterface import EnvRunnerInterface
+from adarl.envs.vec.Runner2VecGymWrapper import Runner2VecGymWrapper
+from adarl.envs.vector_env_checker import VectorEnvChecker
+from adarl.envs.vector_env_logger import VectorEnvLogger
+from adarl.utils.ThDictEpReplayBuffer import ThDictEpReplayBuffer
+from adarl.utils.ThVecDictEpReplayBuffer import ThVecDictEpReplayBuffer
+from adarl.utils.async_vector_env import AsyncVectorEnvShmem
+from adarl.utils.buffers import ThDReplayBuffer
+from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
+from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector, SyncExperienceCollector
+from rreal.algorithms.rl_agent import RLAgent
+from rreal.algorithms.sac import SAC, train_off_policy, SAC_init_hparams, TransitionAugmentorFunction
 from rreal.tmp.gym_transform_observation import DtypeObservation
 import adarl.utils.dbg.ggLog as ggLog
-import copy
-import typing
+import adarl.utils.session
 import adarl.utils.session as session
-from rreal.algorithms.rl_agent import RLAgent
-from adarl.envs.vector_env_checker import VectorEnvChecker
-from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
-from adarl.envs.vec.EnvRunnerInterface import EnvRunnerInterface
-from adarl.envs.vec.GymVecRunnerWrapper import GymVecRunnerWrapper
 import adarl.utils.spaces as spaces
-from typing import Literal
+import gymnasium as gym
+import inspect
+import numpy as np
+import os
+import time
+import torch as th
+import typing
+import wandb 
+import math
 
 class EnvBuilderProtocol(typing.Protocol):
     def __call__(self, seed : int, log_folder : str, is_eval : bool, env_builder_args : dict) -> tuple[gym.Env,float]:
@@ -158,7 +154,7 @@ def build_vec_env(env_builder_args,
     if logs_id is None:
         logs_id = session.default_session.run_info["run_id"]
     builders = [(lambda i: (lambda: env_builder(seed=seed+100000*i,
-                                                log_folder=log_folder,
+                                                log_folder=log_folder+f"/env_{i:003d}",
                                                 is_eval = False,
                                                 env_builder_args = env_builder_args)[0]
                                 ))(i) for i in range(num_envs)]
@@ -247,12 +243,15 @@ def build_collector(use_processes : bool,
                     collector_buffer_size : int,
                     session : adarl.utils.session.Session,
                     num_envs : int,
-                    deterministic_action_ratio : float = 0.0):
+                    deterministic_action_ratio : float = 0.0,
+                    parallelize_collection : bool = True):
     vec_env_builder_norags = lambda: vec_env_builder(env_builder_args=env_builder_args,
                                                     run_folder=run_folder,
                                                     seed=seed,
                                                     num_envs=num_envs)
-    if use_processes:
+    if not parallelize_collection:
+        raise NotImplementedError("Synchronous collection is not implemented yet") #TODO: use the synchronous collector
+    elif use_processes:
         collector = AsyncProcessExperienceCollector(
                             vec_env_builder=vec_env_builder_norags,
                             storage_torch_device=collector_device,
@@ -279,7 +278,7 @@ def wrap_with_logger(vec_env_builder : VecEnvBuilderProtocol) -> VecEnvBuilderPr
 
 def wrap_with_gym(vec_runner_builder : VecEnvRunnerBuilderProtocol) -> VecEnvBuilderProtocol:
     def wrapped_builder(seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = ""):
-        return GymVecRunnerWrapper(  runner=vec_runner_builder( seed = seed,
+        return Runner2VecGymWrapper(  runner=vec_runner_builder( seed = seed,
                                                                 run_folder = run_folder,
                                                                 env_builder_args = env_builder_args,
                                                                 num_envs = num_envs),
@@ -309,7 +308,8 @@ def sac_train(  seed : int,
                 debug_level : int = 2,
                 no_wandb : bool = False,
                 log_weights_and_grads = False,
-                transition_augmentor_builder: AugmentorBuilder | None = None):
+                transition_augmentor_builder: AugmentorBuilder | None = None,
+                parallelize_collection : bool = True):
 
     run_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
@@ -348,7 +348,8 @@ def sac_train(  seed : int,
                                 num_envs=hyperparams.parallel_envs,
                                 collector_device = collector_device,
                                 collector_buffer_size = hyperparams.train_freq_vstep*hyperparams.parallel_envs,
-                                session = session)
+                                session = session,
+                                parallelize_collection=parallelize_collection)
     collector.set_base_collector_model(lambda o,a,r: build_sac(o,a,r,hyperparams))
     observation_space = collector.observation_space()
     action_space = collector.action_space()
@@ -385,11 +386,9 @@ def sac_train(  seed : int,
                                 n_envs=hyperparams.parallel_envs,
                                 max_episode_duration=max_episode_duration,
                                 validation_buffer_size = validation_buffer_size,
-                                validation_holdout_ratio = validation_holdout_ratio,
+                                validation_episodes=math.ceil(validation_holdout_ratio*hyperparams.parallel_envs),
                                 min_episode_duration = 0,
                                 disable_validation_set = True,
-                                fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
-                                val_buffer_min_size = validation_batch_size,
                                 rewards_num=rewards_num)
     
     # rb = ThDictEpReplayBuffer(  buffer_size=hyperparams.buffer_size,

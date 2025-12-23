@@ -107,6 +107,7 @@ class ExperienceCollector(ABC):
             t_copy = 0.
             t_final_obs = 0.
             t_add = 0.
+            policy.eval()
             for step in range(vsteps_to_collect):
                 t_pre_act = time.monotonic()
                 # dbg_check_finite(self._current_obs)
@@ -148,6 +149,7 @@ class ExperienceCollector(ABC):
                 t_copy +=t_post_copy-t_post_add
                 t_final_obs += t_post_final_obs-t_post_step
                 t_add += t_post_add-t_post_final_obs
+            policy.train()
         tf = time.monotonic()
         self._collect_count += 1
         t_tot = tf-t0
@@ -372,8 +374,11 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         self._base_model_builder = CloudpickleWrapper(model_builder)
         self._pipe.send(self._base_model_builder)
         self._commander.set_command("build_model")
-        self._commander.wait_done(timeout=60)
+        ggLog.info(f"AsyncProcessExperienceCollector.set_base_collector_model: waiting state dict from worker")
         self._state_dict = self._pipe.recv()
+        ggLog.info(f"AsyncProcessExperienceCollector.set_base_collector_model: waiting for model to be built in worker")
+        self._commander.wait_done(timeout=60)
+        ggLog.info(f"AsyncProcessExperienceCollector.set_base_collector_model: got state dict from worker")
 
     def _worker(self, pipe, parent_session):
         ggLog.info(f"AsyncProcessExperienceCollector worker started with pid {os.getpid()}")
@@ -386,6 +391,8 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                 # ggLog.info(f"waiting command")
                 cmd = self._commander.wait_command()
                 # ggLog.info(f"got command {cmd}")
+                if isinstance(cmd, str):
+                    cmd = cmd.encode()
                 if cmd == b"build_env":
                     ggLog.info(f"{type(self)}: building vec env")
                     self._vec_env : gym.vector.VectorEnv = self._vec_env_builder.var()
@@ -405,7 +412,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                                     self._action_space,
                                     self._reward_space,
                                     self._num_envs))
-                if cmd == b"build_model":
+                elif cmd == b"build_model":
                     # To ensure the correctly built model is used for collection we build it
                     # directyl in the worker, to avoid any issue that may arise by sending it 
                     # throucgh the pipe. Then we update its parameters by sharing the state dict

@@ -1,14 +1,11 @@
 #!/usr/bin/env python3  
 
-from rreal.algorithms.sac_helpers import sac_train, SAC_init_hparams, gym_builder, env_builder2vec
-import copy
-
-
-
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
+    from rreal.algorithms.sac_helpers import sac_train, SAC_init_hparams, gym_builder, env_builder2vec
+    import copy
     import torch as th
     max_steps_per_episode = 1000
-    num_envs = 1 
+    num_envs = 8 
     env_builder_args = {"env_name" : "HalfCheetah-v4",
                         "gym_args" : {  "forward_reward_weight" : 1.0,
                                         "ctrl_cost_weight" : 0.1,
@@ -33,7 +30,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
         "eval_freq_ep" : num_envs*10,
         "eval_eps" : 1,
         "env_builder_args" : video_eval_env_builder_args,
-        "num_envs" : 1
+        "num_envs" : num_envs
     }
     eval_configs = [eval_conf_video_stoch]
     train_device = th.device("cuda")
@@ -56,7 +53,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     gamma = th.as_tensor(0.99),
                                                     target_tau=0.005,
                                                     buffer_size=1_000_000,
-                                                    total_steps = 100_000,
+                                                    total_steps = 10_000_000,
                                                     q_network_arch=[256,256],
                                                     policy_arch=[256,256],
                                                     learning_starts=10*num_envs*max_steps_per_episode,
@@ -69,7 +66,8 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                     validation_buffer_size = 0, #100_000,
                     validation_holdout_ratio = 0, #0.01,
                     validation_batch_size = 0,
-                    eval_configurations=eval_configs) #256)
+                    eval_configurations=eval_configs,
+                    checkpoint_freq = -1)
     # elif args["algo"].lower() == "ppo":
     #     from rreal.algorithms.ppo import ppo_train, PPO_hyperparams
     #     raise RuntimeError(f"Use ppo2, this one is bugged")

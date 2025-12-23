@@ -1,14 +1,14 @@
 #!/usr/bin/env python3  
 
-from rreal.algorithms.sac_helpers import sac_train, SAC_init_hparams, gym_builder, env_builder2vec
-import copy
 
 
 
 def runFunction(seed, folderName, resumeModelFile, run_id, args):
+    from rreal.algorithms.sac_helpers import sac_train, SAC_init_hparams, gym_builder, env_builder2vec
+    import copy
     import torch as th
     max_steps_per_episode = 1000
-    num_envs = 1 
+    num_envs = 8
     env_builder_args = {"env_name" : "InvertedPendulum-v4",
                         "gym_args" : {},
                         "max_episode_steps" : max_steps_per_episode,
@@ -23,14 +23,14 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                         "log_info_stats" : True,
                         "th_device" : th.device("cpu")}
     video_eval_env_builder_args = copy.deepcopy(env_builder_args)
-    video_eval_env_builder_args["video_save_freq"] = 1
+    video_eval_env_builder_args["video_save_freq"] = -1
     eval_conf_video_stoch = {
         "name" : "video_stoch",
         "deterministic" : False,
         "eval_freq_ep" : num_envs*10,
         "eval_eps" : 1,
         "env_builder_args" : video_eval_env_builder_args,
-        "num_envs" : 1
+        "num_envs" : num_envs
     }
     eval_configs = [eval_conf_video_stoch]
     train_device = th.device("cuda")
@@ -53,10 +53,10 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     gamma = th.as_tensor(0.99),
                                                     target_tau=0.005,
                                                     buffer_size=1_000_000,
-                                                    total_steps = 50_000,
+                                                    total_steps = 10_000_000,
                                                     q_network_arch=[256,256],
                                                     policy_arch=[256,256],
-                                                    learning_starts=2_000,
+                                                    learning_starts=10*num_envs*max_steps_per_episode,
                                                     log_freq_vstep = 1000,
                                                     reference_init_args={},
                                                     target_entropy_factor=-1.0,

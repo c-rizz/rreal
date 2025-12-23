@@ -38,6 +38,7 @@ import adarl.utils.spaces as spaces
 from typing import Protocol
 import numpy as np
 import typing
+import math
 
 th._dynamo.config.compiled_autograd = True
 
@@ -46,6 +47,7 @@ th._dynamo.config.compiled_autograd = True
 # calling a compiled function, but its deeeeeeeep
 compile_mode="max-autotune" # reduce overhead doesn't seem to reduce overhead more than max-autotune
 disable_compile = False
+fullgraph = False
 
 DictObs = dict[str, th.Tensor]
 @dataclass
@@ -175,6 +177,7 @@ class SAC_init_hparams:
     actor_weight_decay : float = 0.0
     deterministic_collection_ratio : float = 0.0
     alpha_lr_factor : float = 1.0
+    alpha_initial_value : float = 0.1
 
 class QNetwork(nn.Module):
     def __init__(self,
@@ -203,7 +206,7 @@ class QNetwork(nn.Module):
                                      hidden_activations=inner_activations,
                                      last_layer_init_func= lambda m: scale_layer_weights(m,initial_scale)).to(device=torch_device)
     
-    # @th.compile(mode=compile_mode, fullgraph=True)
+    # @th.compile(mode=compile_mode, fullgraph=fullgraph)
     def get_min_qval(self, observations, actions):
         qvals = self(observations, actions)
         # ggLog.info(f"qvals.size() = {qvals.size()}")
@@ -213,7 +216,7 @@ class QNetwork(nn.Module):
         # ggLog.info(f"min_q.size() = {min_q.size()}")
         return min_q.view(-1, self._rewards_num)
     
-    # @th.compile(mode=compile_mode, fullgraph=True)    
+    # @th.compile(mode=compile_mode, fullgraph=fullgraph)    
     def forward(self, observations, actions):
         qvals = self._q_nets(th.cat([observations, actions], 1))
         qvals = qvals.view(-1, self._nets_num, self._rewards_num)
@@ -303,7 +306,7 @@ class Actor(nn.Module):
         log_std = log_std + th.log(self.action_scale) # scale the log_std with the action scale, so that it is relative to the action range
         return mean, log_std
 
-    @th_compile_ext(mode=compile_mode, fullgraph=True, copy_outs=True, disable=disable_compile)
+    @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, copy_outs=True, disable=disable_compile)
     def sample_action(self, observation_batch, reference_action : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         mean, log_std = self(observation_batch, reference_action)
         std = log_std.exp()
@@ -518,7 +521,10 @@ class SAC(RLAgent):
         else:
             self._target_entropy_factor_annealing = annealings[init_hparams.target_entropy_factor_annealing[0]](*init_hparams.target_entropy_factor_annealing[1])
         if self._hp.auto_entropy_temperature:
-            self._log_alpha = th.zeros(1, requires_grad=True, device=init_hparams.model_th_device)
+            alpha_init = init_hparams.alpha_initial_value
+            if alpha_init <= 0.0:
+                alpha_init = 1e-8
+            self._log_alpha = th.full((1,), math.log(alpha_init), requires_grad=True, device=init_hparams.model_th_device)
             self._alpha = self._log_alpha.exp().detach()
             # self._alpha_optimizer = optim.Adam([self._log_alpha], lr=self._hp.q_lr)
         else:
@@ -768,7 +774,7 @@ class SAC(RLAgent):
         q95 = batch.quantile(0.95, dim=0)
         return th.stack([mean, min, max, q05, q95], dim=0)
 
-    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
+    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)
     def _compute_critic_loss(self, transitions : DictTransitionBatch, get_stats : bool = True):
         critic_obss = self.get_critic_subobservation(transitions.observations)
         actor_obss = self.get_actor_subobservation(transitions.observations)
@@ -859,7 +865,7 @@ class SAC(RLAgent):
         # ggLog.info(f"critic update done")
 
 
-    # @th.compile(mode=compile_mode, fullgraph=True)
+    # @th.compile(mode=compile_mode, fullgraph=fullgraph)
     def _compute_actor_loss(self, transitions : DictTransitionBatch, freeze_critic : bool = False, get_stats : bool = False):
         # self._mark_nvtx("_compute_actor_loss")
         actor_obss = self.get_actor_subobservation(transitions.observations)
@@ -904,7 +910,7 @@ class SAC(RLAgent):
             actor_stats = None
         return ((self._alpha * act_log_prob) - min_qs_pi).mean(), actor_stats
     
-    # @th.compile(mode=compile_mode, fullgraph=True)
+    # @th.compile(mode=compile_mode, fullgraph=fullgraph)
     def _alpha_loss(self, act_log_prob : th.Tensor):
         # current_entropy = -act_log_prob.mean()
         # # if current_entropy > target_entropy then alpha goes toward zero (focus on reward maximization)
@@ -912,7 +918,7 @@ class SAC(RLAgent):
         # return self._log_alpha.exp() * (current_entropy - self._target_entropy) 
         return (-self._log_alpha.exp() * (act_log_prob + self._target_entropy)).mean()
     
-    # @th.compile(mode=compile_mode, fullgraph=True)
+    # @th.compile(mode=compile_mode, fullgraph=fullgraph)
     def _alpha_stats(self, act_log_prob : th.Tensor):
         return th.stack([   act_log_prob.mean(),
                             act_log_prob.min(),
@@ -921,7 +927,7 @@ class SAC(RLAgent):
                             act_log_prob.quantile(0.05),
                             -act_log_prob.mean()] )
 
-    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
+    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)
     def _compute_alpha_loss(self, transitions : DictTransitionBatch):
         with th.no_grad():
             actor_obss = self.get_actor_subobservation(transitions.observations)
@@ -932,7 +938,7 @@ class SAC(RLAgent):
         return self._alpha_loss(act_log_prob), stats
     
 
-    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
+    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)
     def _compute_actor_and_alpha_loss(self, transitions : DictTransitionBatch):
         actor_loss, actor_stats = self._compute_actor_loss(transitions, get_stats=False)
         # self._start_range_nvtx("actor opt")
@@ -947,7 +953,7 @@ class SAC(RLAgent):
         
         return loss, actor_loss, alpha_loss, alpha_stats, actor_stats
     
-    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
+    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)
     def _compute_all_losses(self, transitions):
         q_loss, (subq_square_errs, q_stats) = self._compute_critic_loss(transitions)
         actor_loss, actor_stats = self._compute_actor_loss(transitions, freeze_critic=True, get_stats=False)
@@ -1034,7 +1040,7 @@ class SAC(RLAgent):
         else:
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
-    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)        
+    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)        
     def _update_target_nets(self):
         for param, target_param in zip(self._q_net.parameters(), self._q_net_target.parameters()):
             self._target_update(param, target_param, self._hp.target_tau)
@@ -1162,7 +1168,15 @@ class SAC(RLAgent):
             self._tot_grad_steps_count += 1
         t1 = time.monotonic()
         # q_loss, actor_loss, alpha_loss = th.as_tensor(q_act_alpha_losses).mean(dim = 0).cpu().numpy()
-        q_loss, actor_loss, alpha_loss = q_act_alpha_losses[-1]
+        if iterations > 0:
+            q_loss, actor_loss, alpha_loss = q_act_alpha_losses[-1]
+        else:
+            with th.no_grad():
+                # compute losses but don't train
+                transitions = buffer.sample(batch_size=self._hp.batch_size)
+                q_loss, (square_errs, q_stats) = self._compute_critic_loss(transitions)
+                actor_loss, _ = self._compute_actor_loss(transitions)
+                alpha_loss, _ = self._compute_alpha_loss(transitions)
         adarl.utils.session.default_session.run_info["train_iterations"].value = self._tot_grad_steps_count
         self._stats.update({"tot_grad_steps_count":self._tot_grad_steps_count,
                             "q_loss_tot":q_loss,
