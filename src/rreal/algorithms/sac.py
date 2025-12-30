@@ -232,7 +232,7 @@ class Actor(nn.Module):
                         action_max : Union[float, th.Tensor] = 1,
                         action_min : Union[float, th.Tensor] = -1,
                         log_std_max = 2,
-                        log_std_min = -6,
+                        log_std_min = -8,
                         log_std_init = -3.0,
                         init_noise = 0.001,
                         torch_device : Union[str,th.device] = "cuda",
@@ -249,8 +249,8 @@ class Actor(nn.Module):
         self._obs_size = observation_size
         self._use_weightnorm = use_weightnorm
         self._mean_bounds_ratio = mean_bounds_ratio if mean_bounds_ratio is not None else 1.0
-        ggLog.info(f"Actor mean_bounds_ratio = {self._mean_bounds_ratio}")
-        ggLog.info(f"Actor action_max = {action_max} action_min = {action_min}")
+        # ggLog.info(f"Actor mean_bounds_ratio = {self._mean_bounds_ratio}")
+        # ggLog.info(f"Actor action_max = {action_max} action_min = {action_min}")
 
         # save action scaling factors as non-trained parameters
         if isinstance(action_max, int): action_max = float(action_max)
@@ -364,13 +364,10 @@ class SAC(RLAgent):
         alpha_lr_factor : float
 
     def __init__(self,
-                 action_size : int,
                  init_hparams : SAC_init_hparams,
                  observation_space : gym.spaces.Space,
                  reward_space : gym.spaces.Space,
-                 action_init : th.Tensor | float = 0.0,
-                 action_max : Union[float, List[float]] = 1.0,
-                 action_min : Union[float, List[float]] = -1.0,
+                 action_space : gym.spaces.Box,
                  actor_feature_extractor : FeatureExtractor | None = None,
                  critic_feature_extractor : FeatureExtractor | None = None,
                  merge_actor_and_critic_updates : bool = True,
@@ -382,6 +379,10 @@ class SAC(RLAgent):
                                                         "critic_feature_extractor",
                                                         "actor_feature_extractor"])
         # ggLog.info(f"self._init_args = \n"+pprint.pformat(self._init_args))
+        action_size=int(np.prod(action_space.shape))
+        action_min = action_space.low.tolist()
+        action_max = action_space.high.tolist()
+        action_init=action_space.zero_action if isinstance(action_space,spaces.ThBox) else 0.0
         self._init_args = copy.deepcopy(self._init_args)
         if not isinstance(reward_space, spaces.gym_spaces.Box):
             raise RuntimeError(f"SAC currently only supports ThBox reward spaces, but got {type(reward_space)}")
@@ -411,6 +412,7 @@ class SAC(RLAgent):
             action_init = 0.0
 
         gammas = init_hparams.gamma
+        ggLog.info(f"reward_names = {self._reward_names}")
         if isinstance(gammas, Mapping):
             gammas = th.as_tensor([gammas[rn] for rn in self._reward_names], dtype=th.float32)
         elif isinstance(gammas, th.Tensor):
@@ -464,6 +466,7 @@ class SAC(RLAgent):
         self._agent_updates = 0
         self._share_actor_critic_feature_extractor = (actor_feature_extractor==critic_feature_extractor and
                                                       init_hparams.actor_observation_filter==init_hparams.critic_observation_filter)
+        ggLog.info(f"SAC: share_actor_critic_feature_extractor = {self._share_actor_critic_feature_extractor}")
         if self._share_actor_critic_feature_extractor:
             if critic_feature_extractor is None or actor_feature_extractor is None: # second considition is just for typing
                 self._critic_feature_extractor = StackVectorsFeatureExtractor(observation_space=critic_observation_space,
@@ -510,6 +513,7 @@ class SAC(RLAgent):
                             action_mean_init=self._hp.action_init,
                             mean_bounds_ratio=self._hp.actor_mean_bounds_ratio,
                             dtype=self._dtype)
+        initial_actor_entropy = self._hp.action_size/2 * (math.log(2*math.pi)+1) + 0.5*math.log(self._hp.log_std_init**(2*self._hp.action_size))
         # self._actor_optimizer = optim.Adam(split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay),
         #                                    lr=self._hp.policy_lr)
         self._base_target_entropy_factor = th.as_tensor(self._hp.target_entropy_factor, device=self._hp.torch_device, dtype=self._dtype)
@@ -775,20 +779,26 @@ class SAC(RLAgent):
         return th.stack([mean, min, max, q05, q95], dim=0)
 
     @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)
-    def _compute_critic_loss(self, transitions : DictTransitionBatch, get_stats : bool = True):
+    def _compute_critic_loss(self,  transitions : DictTransitionBatch,
+                                    get_stats : bool = True,
+                                    critic_enc_obss : th.Tensor | None = None,
+                                    crit_next_enc_obss : th.Tensor | None = None,
+                                    actor_next_obss_enc : th.Tensor | None = None) -> tuple[th.Tensor, tuple[th.Tensor, th.Tensor]]:
         critic_obss = self.get_critic_subobservation(transitions.observations)
-        actor_obss = self.get_actor_subobservation(transitions.observations)
-        critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
+        # actor_obss = self.get_actor_subobservation(transitions.observations)
+        if critic_enc_obss is None:
+            critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
         with th.no_grad():
+            actor_next_obss = self.get_actor_subobservation(transitions.next_observations)
             batch_size = transitions.terminated.size()[0]
-            critic_next_obss = self.get_critic_subobservation(transitions.next_observations)
-            crit_next_enc_obss = self._critic_feature_extractor.extract_features(critic_next_obss)   
+            if crit_next_enc_obss is None:
+                critic_next_obss = self.get_critic_subobservation(transitions.next_observations)
+                crit_next_enc_obss = self._critic_feature_extractor.extract_features(critic_next_obss)   
             if self._share_actor_critic_feature_extractor:
-                actor_next_obss = critic_next_obss
                 actor_next_obss_enc = crit_next_enc_obss
             else:
-                actor_next_obss = self.get_actor_subobservation(transitions.next_observations)
-                actor_next_obss_enc = self._actor_feature_extractor.extract_features(actor_next_obss)
+                if actor_next_obss_enc is None:
+                    actor_next_obss_enc = self._actor_feature_extractor.extract_features(actor_next_obss)
             reference_action = self._get_reference_action(actor_next_obss)
             
             # Compute next-values for TD
@@ -866,11 +876,16 @@ class SAC(RLAgent):
 
 
     # @th.compile(mode=compile_mode, fullgraph=fullgraph)
-    def _compute_actor_loss(self, transitions : DictTransitionBatch, freeze_critic : bool = False, get_stats : bool = False):
+    def _compute_actor_loss(self,   transitions : DictTransitionBatch,
+                                    freeze_critic : bool = False,
+                                    get_stats : bool = False,
+                                    actor_enc_obss : th.Tensor | None = None,
+                                    critic_enc_obss : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor | None]:
         # self._mark_nvtx("_compute_actor_loss")
         actor_obss = self.get_actor_subobservation(transitions.observations)
         # self._mark_nvtx("actor_enc")
-        actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
+        if actor_enc_obss is None:
+            actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
         # self._mark_nvtx("get ref")
         reference_action = self._get_reference_action(actor_obss)
         # self._mark_nvtx("sample")
@@ -881,8 +896,9 @@ class SAC(RLAgent):
         if self._share_actor_critic_feature_extractor:
             critic_enc_obss = actor_enc_obss
         else:
-            critic_obss = self.get_critic_subobservation(transitions.observations)
-            critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
+            if critic_enc_obss is None:
+                critic_obss = self.get_critic_subobservation(transitions.observations)
+                critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
         # self._mark_nvtx("get_q")
         if freeze_critic: 
             # Needed if we are updating actor and critic together, if done separately we just ignore these grads at optimizer time
@@ -928,10 +944,12 @@ class SAC(RLAgent):
                             -act_log_prob.mean()] )
 
     @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)
-    def _compute_alpha_loss(self, transitions : DictTransitionBatch):
+    def _compute_alpha_loss(self, transitions : DictTransitionBatch,
+                            actor_enc_obss : th.Tensor | None = None):
         with th.no_grad():
             actor_obss = self.get_actor_subobservation(transitions.observations)
-            actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
+            if actor_enc_obss is None:
+                actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
             reference_action = self._get_reference_action(actor_obss)
             _, act_log_prob, _, _ = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
             stats = self._alpha_stats(act_log_prob)
@@ -940,12 +958,16 @@ class SAC(RLAgent):
 
     @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)
     def _compute_actor_and_alpha_loss(self, transitions : DictTransitionBatch):
-        actor_loss, actor_stats = self._compute_actor_loss(transitions, get_stats=False)
+        # precompute actor encodings to save time
+        actor_enc_obss = self._actor_feature_extractor.extract_features(self.get_actor_subobservation(transitions.observations))
+        actor_loss, actor_stats = self._compute_actor_loss(transitions, get_stats=False,
+                                                           actor_enc_obss=actor_enc_obss)
         # self._start_range_nvtx("actor opt")
         
         # self._start_range_nvtx("_update_alpha")
         if self._hp.auto_entropy_temperature:
-            alpha_loss, alpha_stats = self._compute_alpha_loss(transitions)
+            alpha_loss, alpha_stats = self._compute_alpha_loss(transitions,
+                                                               actor_enc_obss=actor_enc_obss)
             loss = actor_loss + alpha_loss
         else:
             alpha_loss, alpha_stats = None, None
@@ -953,15 +975,35 @@ class SAC(RLAgent):
         
         return loss, actor_loss, alpha_loss, alpha_stats, actor_stats
     
+    def _compute_encodings(self, transitions : DictTransitionBatch):
+        critic_enc_obss = self._critic_feature_extractor.extract_features(self.get_critic_subobservation(transitions.observations))
+        if self._share_actor_critic_feature_extractor:
+            actor_enc_obss = critic_enc_obss
+        else:
+            actor_enc_obss = self._actor_feature_extractor.extract_features(self.get_actor_subobservation(transitions.observations))
+        with th.no_grad():
+            critic_enc_next_obss = self._critic_feature_extractor.extract_features( self.get_critic_subobservation(transitions.next_observations))   
+            if self._share_actor_critic_feature_extractor:
+                actor_enc_next_obss = critic_enc_next_obss
+            else:
+                actor_enc_next_obss = self._actor_feature_extractor.extract_features(self.get_actor_subobservation(transitions.next_observations))
+        return actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss
+    
     @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)
     def _compute_all_losses(self, transitions):
-        q_loss, (subq_square_errs, q_stats) = self._compute_critic_loss(transitions)
-        actor_loss, actor_stats = self._compute_actor_loss(transitions, freeze_critic=True, get_stats=False)
-        # self._start_range_nvtx("actor opt")
+        # Precompute encodings to save time
+        actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss = self._compute_encodings(transitions)
+        q_loss, (subq_square_errs, q_stats) = self._compute_critic_loss(transitions,
+                                                                        critic_enc_obss=critic_enc_obss,
+                                                                        crit_next_enc_obss=critic_enc_next_obss,
+                                                                        actor_next_obss_enc=actor_enc_next_obss)
+        actor_loss, actor_stats = self._compute_actor_loss(transitions, freeze_critic=True, get_stats=False,
+                                                            actor_enc_obss=actor_enc_obss,
+                                                            critic_enc_obss=critic_enc_obss)
         
-        # self._start_range_nvtx("_update_alpha")
         if self._hp.auto_entropy_temperature:
-            alpha_loss, alpha_stats = self._compute_alpha_loss(transitions)
+            alpha_loss, alpha_stats = self._compute_alpha_loss(transitions,
+                                                               actor_enc_obss=actor_enc_obss)
             loss = actor_loss + alpha_loss + q_loss
         else:
             alpha_loss, alpha_stats = None, None
@@ -1177,7 +1219,6 @@ class SAC(RLAgent):
                 q_loss, (square_errs, q_stats) = self._compute_critic_loss(transitions)
                 actor_loss, _ = self._compute_actor_loss(transitions)
                 alpha_loss, _ = self._compute_alpha_loss(transitions)
-        adarl.utils.session.default_session.run_info["train_iterations"].value = self._tot_grad_steps_count
         self._stats.update({"tot_grad_steps_count":self._tot_grad_steps_count,
                             "q_loss_tot":q_loss,
                             "q_loss":q_loss,
@@ -1232,9 +1273,9 @@ def train_off_policy(collector : ExperienceCollector,
     start_time = time.monotonic()
     last_log_steps = float("-inf")
 
-
+    session = adarl.utils.session.default_session
     # th.cuda.memory._record_memory_history(max_entries=100_000)
-    while global_exp_step < total_timesteps and not adarl.utils.session.default_session.is_shutting_down():
+    while global_exp_step < total_timesteps and not session.is_shutting_down():
         s0b = buffer.collected_frames()
         t0 = time.monotonic()
 
@@ -1257,6 +1298,8 @@ def train_off_policy(collector : ExperienceCollector,
                 trained = True
                 q_loss, actor_loss, alpha_loss = model.train_model(global_exp_step, iterations, buffer)
                 grad_steps_done += iterations
+                session.run_info["train_iterations"].value = session.run_info["train_iterations"].value + iterations
+
             train_count += 1
         t_after_train = time.monotonic()
         if trained and validation_freq>0 and train_count%validation_freq==0:
@@ -1270,8 +1313,8 @@ def train_off_policy(collector : ExperienceCollector,
         ep_counter = tmp_buff.added_completed_episodes()
         step_counter = tmp_buff.added_frames()
         t_coll_sl += collector.collection_duration()
-        adarl.utils.session.default_session.run_info["collected_episodes"].value = ep_counter
-        adarl.utils.session.default_session.run_info["collected_steps"].value = step_counter
+        session.run_info["collected_episodes"].value = ep_counter
+        session.run_info["collected_steps"].value = step_counter
         # callbacks._callbacks[0].set_model(model)
         callbacks.on_collection_end(collected_steps=vsteps_to_collect*num_envs,
                                    collected_episodes=new_episodes,

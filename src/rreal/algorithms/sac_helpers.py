@@ -226,10 +226,7 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, reward_space : gym.S
                f"    reward_space: {reward_space}")
     agent = SAC(observation_space=obs_space,
                 reward_space=reward_space,
-                action_size=int(np.prod(act_space.shape)),
-                action_min = act_space.low.tolist(),
-                action_max = act_space.high.tolist(),
-                action_init=act_space.zero_action if isinstance(act_space,spaces.ThBox) else 0.0,
+                action_space=act_space,
                 init_hparams=hyperparams)
     agent = th.compile(agent, mode="max-autotune", fullgraph=True)
     return agent
@@ -349,7 +346,8 @@ def sac_train(  seed : int,
                                 collector_device = collector_device,
                                 collector_buffer_size = hyperparams.train_freq_vstep*hyperparams.parallel_envs,
                                 session = session,
-                                parallelize_collection=parallelize_collection)
+                                parallelize_collection=parallelize_collection,
+                                deterministic_action_ratio=hyperparams.deterministic_collection_ratio)
     collector.set_base_collector_model(lambda o,a,r: build_sac(o,a,r,hyperparams))
     observation_space = collector.observation_space()
     action_space = collector.action_space()

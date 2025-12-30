@@ -96,7 +96,7 @@ class ExperienceCollector(ABC):
             self._current_obs = copy.deepcopy(self._current_obs) # make a copy of it to avoid inplace issues, this will be then in-place written during the steps
 
     def collect_experience(self, policy : RLAgent, vsteps_to_collect, global_vstep_count, random_vsteps, policy_device,
-                           buffer : BasicStorage, deterministic_ratio = 0.0):
+                           buffer : BasicStorage, deterministic_ratio = 0.0, random_ratio = 0.0):
         t0 = time.monotonic()
         with th.no_grad(): #just to be sure
             if  self._current_obs is None:
@@ -121,10 +121,13 @@ class ExperienceCollector(ABC):
                     else:
                         deterministic = False
                     actions = policy.predict_action(th_obs, deterministic=deterministic)
+                    if random_ratio>0:
+                        random = th.rand(actions.size(0),1) < random_ratio
+                        random_actions = th.stack([th.as_tensor(self._vec_env.unwrapped.single_action_space.sample()) for _ in range(num_envs)])
+                        actions = th.where(random, random_actions, actions)
                     if not self._vecenv_is_torch:
                         actions = actions.detach().cpu().numpy()
                 t_post_act = time.monotonic()
-
                 next_input_obss, rewards, terminations, truncations, infos = self._vec_env.step(actions)
                 t_post_step = time.monotonic()
 

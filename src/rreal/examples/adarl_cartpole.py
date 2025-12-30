@@ -118,7 +118,10 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                    sparse_reward=env_builder_args.pop("sparse_reward"),
                                    img_obs=env_builder_args.pop("img_obs"),
                                    img_obs_resolution=env_builder_args.pop("img_obs_resolution"),
-                                   img_obs_frame_stacking_size=env_builder_args.pop("img_obs_frame_stacking_size"))
+                                   img_obs_frame_stacking_size=env_builder_args.pop("img_obs_frame_stacking_size"),
+                                   camera_offset_xyz=_sample_cam_offset(seed=seed,
+                                                                        grid_size_meters=env_builder_args.pop("cam_pos_randomization_grid_size_meters"),
+                                                                        grid_steps=env_builder_args.pop("cam_pos_randomization_grid_steps")))
     env = ObsToDict(env=env)
     vrunner = EnvRunner(env=env, verbose=False, quiet=quiet, episodeInfoLogFile=run_folder+"/vec_runner.log",
                         render_envs=[0], autoreset=autoreset,
@@ -229,7 +232,28 @@ def sac_sb3_train(vec_env_builder,
     model = SAC("MultiInputPolicy", venv, verbose=1)
     model.learn(total_timesteps=10000, log_interval=4)
 
+def signed_mod(a,d):
+    return abs(a)%d*((a>0)*2-1)
 
+def alternating_range(i):
+    """ Generates an alternating sequence: 0, -1, 1, -2, 2, -3, 3, ..."""
+    i = i+1
+    return (((i+1)%2)*2-1)*(i//2)
+
+def _sample_cam_offset(seed: int, grid_size_meters : float = 1.0, grid_steps = 5.0) -> tuple[float,float,float]:
+    if grid_size_meters == 0.0:
+        return (0.0,0.0,0.0)
+    resolution = grid_size_meters / (grid_steps - 1)
+    steps = grid_steps**2
+    i = (signed_mod(alternating_range(seed),steps) + steps//2)%steps # start from the center and progress back and forth
+    # e.g. for grid_steps = 4, -> steps = 16 -> i follows 8,9,7,10,6,11,5,...
+    ix = i % grid_steps
+    iz = (i // grid_steps) % grid_steps
+    off_x = -grid_size_meters/2 + ix * resolution
+    off_y = 0.0
+    off_z = -grid_size_meters/2 + iz * resolution
+    # print(f"Sampled camera offset: ({off_x}, {off_y}, {off_z}) for seed {seed}")
+    return (off_x, off_y, off_z)
 
 
 
