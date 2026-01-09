@@ -1,8 +1,8 @@
 import torch as th
 import torch.nn as nn
-from typing import Tuple
+from typing import Tuple, Callable
 
-from autoencoding_rl.utils import build_mlp_net
+from rreal.utils.utils import build_mlp_net
 from rreal.nets.ConvNet import ConvNet
 from rreal.nets.BigConvNet import BigConvNet
 import adarl.utils.dbg.ggLog as ggLog
@@ -15,11 +15,11 @@ class Image_encoder(nn.Module):
                         net_input_height : int = 64,
                         backbone : str = "conv",
                         checkDimensions : bool = True,
-                        torchDevice : str = "cuda",
+                        torchDevice : str | th.device = "cuda",
                         use_coord_conv : bool = False,
                         fc_net_arch = "identity",
                         output_size = None,
-                        last_activation_class = th.nn.Identity,
+                        last_activation_class : Callable[[], nn.Module] = th.nn.Identity,
                         layerNorm : bool = False,
                         use_batchnorm = True,
                         use_weightnorm = True):
@@ -57,11 +57,11 @@ class Image_encoder(nn.Module):
             else:
                 raise NotImplementedError(f"Currently only 64x64 or 128x128 network input is supported with convnet backbone. You asked for height={self._input_height}, width={self._input_width}")
             encoder_head = ConvNet( image_channels = self._input_channels,
-                                                    image_width = self._input_width,
-                                                    image_height = self._input_height,
-                                                    filters_number = enc_layers_channels_num,
-                                                    torchDevice = torchDevice,
-                                                    use_coord_conv = use_coord_conv)
+                                    image_width = self._input_width,
+                                    image_height = self._input_height,
+                                    filters_number = enc_layers_channels_num,
+                                    torchDevice = torchDevice,
+                                    use_coord_conv = use_coord_conv)
         elif self._backbone=="conv_small":
             enc_layers_strides = None
             if self._input_height==64 or self._input_width==64:
@@ -77,12 +77,13 @@ class Image_encoder(nn.Module):
             else:
                 raise NotImplementedError(f"Resolution not supported by {self._backbone}. You asked for height={self._input_height}, width={self._input_width}")
             encoder_head = ConvNet( image_channels = self._input_channels,
-                                                    image_width = self._input_width,
-                                                    image_height = self._input_height,
-                                                    filters_number = enc_layers_channels_num,
-                                                    strides = enc_layers_strides,
-                                                    use_coord_conv = use_coord_conv,
-                                                    use_batchnorm = use_batchnorm)        
+                                    image_width = self._input_width,
+                                    image_height = self._input_height,
+                                    filters_number = enc_layers_channels_num,
+                                    strides = enc_layers_strides,
+                                    use_coord_conv = use_coord_conv,
+                                    use_batchnorm = use_batchnorm,
+                                    torchDevice = torchDevice)        
         elif self._backbone=="conv_small2":
             enc_layers_strides = None
             if self._input_height==84 or self._input_width==84:
@@ -97,12 +98,13 @@ class Image_encoder(nn.Module):
             else:
                 raise NotImplementedError(f"Resolution not supported by {self._backbone}. You asked for height={self._input_height}, width={self._input_width}")
             encoder_head = ConvNet( image_channels = self._input_channels,
-                                                    image_width = self._input_width,
-                                                    image_height = self._input_height,
-                                                    filters_number = enc_layers_channels_num,
-                                                    strides = enc_layers_strides,
-                                                    use_coord_conv = use_coord_conv,
-                                                    use_batchnorm = use_batchnorm)
+                                    image_width = self._input_width,
+                                    image_height = self._input_height,
+                                    filters_number = enc_layers_channels_num,
+                                    strides = enc_layers_strides,
+                                    use_coord_conv = use_coord_conv,
+                                    use_batchnorm = use_batchnorm,
+                                    torchDevice = torchDevice)
         elif self._backbone=="conv_extrasmall":
             enc_layers_strides = None
             if self._input_height==84 or self._input_width==84:
@@ -123,7 +125,8 @@ class Image_encoder(nn.Module):
                                     kernel_sizes = enc_layers_kernel_sizes,
                                     strides = enc_layers_strides,
                                     use_coord_conv = use_coord_conv,
-                                    use_batchnorm = use_batchnorm)
+                                    use_batchnorm = use_batchnorm,
+                                    torchDevice = torchDevice)
         elif self._backbone=="bigconv":
             encoder_head =BigConvNet( image_channels = self._input_channels,
                                                     image_width = self._input_width,
@@ -182,7 +185,7 @@ class Image_encoder(nn.Module):
         if self._checkDimensions:
             assert x.size() == (x.size()[0],self._input_channels,self._input_height, self._input_width), f"Image batch should have size {(x.size()[0],self._input_channels,self._input_height, self._input_width)}, but it is {x.size()}"
 
-        # ggLog.info(f"VAE_encoder.forward(): x.size() = {x.size()}")
+        # ggLog.info(f"Image_encoder.forward(): x.size() = {x.size()}")
         enc_out = self._net(x)
         if self._checkDimensions:
             batch_size = x.size()[0]

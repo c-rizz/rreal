@@ -1,4 +1,4 @@
-from typing import Final
+from typing import Final, Iterable
 import torch as th
 import torch.nn as nn
 from typing import List
@@ -40,8 +40,23 @@ class Parallel(nn.ModuleList):
     Parallelly runs provided modules. Returns one batch containig an ensemble of outputs in each element.
     E.g.: You have 3 submodules, each returning an output of size (5,), you input a (1024,10) batch, you get a (1024,3,5) output
     """
-    def __init__(self, modules, return_mean : bool = False, return_std = False, return_concat : bool = False,
+    def __init__(self, modules : Iterable[nn.Module], return_mean : bool = False, return_std = False, return_concat : bool = False,
                         use_jit_fork : bool = False):
+        """
+
+        Parameters
+        ----------
+        modules : Iterable[nn.Module]
+            Modules to run in parallel            
+        return_mean : bool, optional
+            Return the mean of the outputs, by default False
+        return_std : bool, optional
+            Return the standard deviation of the outputs, by default False
+        return_concat : bool, optional
+            Return the concatenation of the outputs, instead of stacking, by default False
+        use_jit_fork : bool, optional
+            Use torch.jit.fork for parallel execution, by default False
+        """
         super().__init__( modules )
         self._modules_num = len(modules)
         self._output_mean : Final[bool] = return_mean

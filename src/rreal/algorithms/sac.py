@@ -14,7 +14,7 @@ from rreal.algorithms.rl_agent import RLAgent
 from rreal.feature_extractors import get_feature_extractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
-from rreal.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay, simplified_clip_grad_norm_
+from rreal.utils.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay, simplified_clip_grad_norm_
 from typing import List, Union, Literal, Mapping, Callable
 import adarl.utils.callbacks
 import adarl.utils.dbg.ggLog as ggLog
@@ -179,6 +179,35 @@ class SAC_init_hparams:
     alpha_lr_factor : float = 1.0
     alpha_initial_value : float = 0.1
 
+
+class SignedELUBounding(nn.Module):
+    """Bounds vector entries to positive-only or negative-only ranges using ELU."""
+
+    def __init__(self, q_bounds_minmax: th.Tensor):
+        super().__init__()
+        if q_bounds_minmax.dim() != 2 or q_bounds_minmax.size(0) != 2:
+            raise NotImplementedError("SignedELUBounding expects bounds shaped [2, N]")
+        self._vector_size = q_bounds_minmax.shape[1]
+        self._bounded_positive_mask = q_bounds_minmax[0] >= 0
+        self._bounded_negative_mask = q_bounds_minmax[1] <= 0
+        self._needs_positive_bounding = bool(th.any(self._bounded_positive_mask).item())
+        self._needs_negative_bounding = bool(th.any(self._bounded_negative_mask).item())
+        self._needs_bounding = self._needs_positive_bounding or self._needs_negative_bounding
+
+    def forward(self, q_values: th.Tensor) -> th.Tensor:
+        # if q_values.size(-1) != self._vector_size:
+        #     raise NotImplementedError("SignedELUBounding expects last dimension to match bounds size")
+        if not self._needs_bounding:
+            return q_values
+        
+        if self._needs_positive_bounding:
+            bounded_positive = F.elu(q_values) + 1.0
+            q_values = th.where(self._bounded_positive_mask, bounded_positive, q_values)
+        if self._needs_negative_bounding:
+            bounded_negative = - (F.elu(-q_values) + 1.0)
+            q_values = th.where(self._bounded_negative_mask, bounded_negative, q_values)
+        return q_values
+
 class QNetwork(nn.Module):
     def __init__(self,
                  action_size : int,
@@ -188,16 +217,27 @@ class QNetwork(nn.Module):
                  nets_num : int = 1,
                  initial_scale = 0.003,
                  use_weightnorm : bool = True,
-                 rewards_num : int = 1,
+                 reward_space : spaces.ThBox | None = None,
                  inner_activations : Callable[[],nn.Module] = nn.Tanh):
         super().__init__()
         self._nets_num = nets_num
         self._obs_size = observation_size
         self._use_weightnorm = use_weightnorm
-        self._rewards_num = rewards_num
+        if reward_space is not None:
+            self._rewards_num = spaces.get_1d_space_size(reward_space) if reward_space is not None else 1
+            has_negative_rewards = th.as_tensor(reward_space.low, device=torch_device) < 0
+            has_positive_rewards = th.as_tensor(reward_space.high, device=torch_device) > 0
+            ones = th.ones((self._rewards_num,), device=torch_device, dtype=th.float32)
+            zeros = th.zeros((self._rewards_num,), device=torch_device, dtype=th.float32)
+            q_bounds_minmax = th.stack([th.where(has_negative_rewards, float("-inf")*ones, zeros),
+                                        th.where(has_positive_rewards, float("+inf")*ones, zeros)],
+                                dim=0).view(2,self._rewards_num)
+        else:
+            self._rewards_num = 1
+            q_bounds_minmax = th.as_tensor([float("-inf"), float("+inf")]).view(2,1)
         self._q_nets = build_mlp_net(arch=q_network_arch,
                                      input_size=action_size + observation_size,
-                                     output_size=rewards_num,
+                                     output_size=self._rewards_num,
                                      ensemble_size=self._nets_num,
                                      return_ensemble_mean=False,
                                      use_weightnorm=self._use_weightnorm,
@@ -205,6 +245,7 @@ class QNetwork(nn.Module):
                                      use_jit_fork=False,
                                      hidden_activations=inner_activations,
                                      last_layer_init_func= lambda m: scale_layer_weights(m,initial_scale)).to(device=torch_device)
+        self._bounding_layer = SignedELUBounding(q_bounds_minmax).to(device=torch_device)
     
     # @th.compile(mode=compile_mode, fullgraph=fullgraph)
     def get_min_qval(self, observations, actions):
@@ -220,6 +261,7 @@ class QNetwork(nn.Module):
     def forward(self, observations, actions):
         qvals = self._q_nets(th.cat([observations, actions], 1))
         qvals = qvals.view(-1, self._nets_num, self._rewards_num)
+        qvals = self._bounding_layer(qvals)
         # ggLog.info(f"QNetwork.forward: qvals.size() = {qvals.size()}")
         return qvals
 
@@ -362,6 +404,7 @@ class SAC(RLAgent):
         actor_mean_bounds_ratio : float
         rewards_num : int
         alpha_lr_factor : float
+        reward_space : spaces.ThBox
 
     def __init__(self,
                  init_hparams : SAC_init_hparams,
@@ -455,7 +498,8 @@ class SAC(RLAgent):
                                    actor_mean_bounds_ratio = init_hparams.actor_mean_bounds_ratio,
                                    rewards_num = rewards_num,
                                    gamma_reward_scaling = True,
-                                   alpha_lr_factor=init_hparams.alpha_lr_factor)
+                                   alpha_lr_factor=init_hparams.alpha_lr_factor,
+                                   reward_space = reward_space)
         self._transition_augmentation_func = None
         self._default_reward_weights = th.ones(rewards_num, dtype=self._dtype, device=self._hp.torch_device)
         self._obs_space_sizes = sizetree_from_space(observation_space)
@@ -494,13 +538,13 @@ class SAC(RLAgent):
                                 q_network_arch=init_hparams.q_network_arch,
                                 torch_device=self._hp.torch_device,
                                 nets_num=2,
-                                rewards_num=rewards_num)
+                                reward_space=reward_space)
         self._q_net_target = QNetwork(  observation_size=critic_input_size,
                                         action_size=self._hp.action_size,
                                         q_network_arch=init_hparams.q_network_arch,
                                         torch_device=self._hp.torch_device,
                                         nets_num=2,
-                                        rewards_num=rewards_num)
+                                        reward_space=reward_space)
         self._q_net_target.load_state_dict(self._q_net.state_dict())
         self._q_optimizer = optim.AdamW(split_params_for_weight_decay(self._q_net, self._hp.critic_weight_decay), lr=self._hp.q_lr)
         self._actor = Actor(policy_arch=init_hparams.policy_arch,

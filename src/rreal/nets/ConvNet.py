@@ -13,7 +13,7 @@ class ConvNet(nn.Module):
                         strides : List[int] = None,
                         kernel_sizes : List[int] = None,
                         paddings : List[int] = None,
-                        torchDevice : str = "cuda",
+                        torchDevice : str | th.device = "cuda",
                         use_coord_conv = True,
                         use_batchnorm = True):
         super().__init__()
@@ -47,7 +47,7 @@ class ConvNet(nn.Module):
             if use_coord_conv and i==0:
                 convClass = lambda **kwargs : CoordConv(**kwargs,
                                                         image_size_chw=(self._image_channels,self._image_height, self._image_width),
-                                                        torchDevice=torchDevice)
+                                                        torchDevice=self._torchDevice)
             else:
                 convClass = nn.Conv2d
             ch_num = filters_number[i]
@@ -63,11 +63,11 @@ class ConvNet(nn.Module):
             modules.append(nn.Sequential(*block))
             in_channels = ch_num
 
-        self._encoder = nn.Sequential(*modules).to(torchDevice)
+        self._encoder = nn.Sequential(*modules).to(self._torchDevice)
 
         # summary(self._encoder, (9,84,84))
         with th.no_grad():
-            testImg = th.zeros(size=(1,image_channels,image_height,image_width), device=torchDevice)
+            testImg = th.zeros(size=(1,image_channels,image_height,image_width), device=self._torchDevice)
             outImg = self._encoder(testImg)
         enc_out_shape = outImg.size()
         conv_net_output_width = enc_out_shape[3]

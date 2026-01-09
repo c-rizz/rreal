@@ -26,7 +26,7 @@ from adarl.utils.tensor_trees import map_tensor_tree
 import adarl.utils.dbg.ggLog as ggLog
 import numpy as np
 from adarl.utils.wandb_wrapper import wandb_log
-from rreal.utils import build_mlp_net
+from rreal.utils.utils import build_mlp_net
 import jax.profiler 
 
 def layer_init(layer, std=2.0, bias_const=0.0):

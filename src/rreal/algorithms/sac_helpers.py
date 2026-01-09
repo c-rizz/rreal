@@ -206,7 +206,8 @@ def build_eval_callbacks(eval_configurations : list[dict],
                                     eval_freq_ep=eval_conf["eval_freq_ep"],
                                     deterministic=eval_conf["deterministic"],
                                     eval_name=eval_conf["name"],
-                                    output_folder=run_folder+f"/eval_"+eval_conf["name"]+"/results"))
+                                    output_folder=run_folder+f"/eval_"+eval_conf["name"]+"/results",
+                                    skip_first_eval=eval_conf.get("skip_first_eval", False)))
         ggLog.info(f"Built eval config '{eval_conf['name']}'")
     return callbacks
 
