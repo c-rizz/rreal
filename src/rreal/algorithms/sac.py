@@ -6,7 +6,7 @@ from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch, BaseBuffer, Ba
 from adarl.utils.callbacks import TrainingCallback, CallbackList
 from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree
 from adarl.utils.wandb_wrapper import wandb_log
-from adarl.utils.dbg.dbg_checks import dbg_check_finite
+from adarl.utils.dbg.dbg_checks import dbg_check_finite, dbg_check_size
 from adarl.utils.utils import get_func_input_args, th_compile_ext
 from dataclasses import dataclass, asdict
 from rreal.algorithms.collectors import ExperienceCollector
@@ -178,6 +178,7 @@ class SAC_init_hparams:
     deterministic_collection_ratio : float = 0.0
     alpha_lr_factor : float = 1.0
     alpha_initial_value : float = 0.1
+    independent_entropy_q : bool = False
 
 
 class SignedELUBounding(nn.Module):
@@ -218,26 +219,35 @@ class QNetwork(nn.Module):
                  initial_scale = 0.003,
                  use_weightnorm : bool = True,
                  reward_space : spaces.ThBox | None = None,
-                 inner_activations : Callable[[],nn.Module] = nn.Tanh):
+                 inner_activations : Callable[[],nn.Module] = nn.Tanh,
+                 independent_entropy_q : bool = False):
         super().__init__()
         self._nets_num = nets_num
         self._obs_size = observation_size
         self._use_weightnorm = use_weightnorm
+        self._independent_entropy_q = independent_entropy_q
         if reward_space is not None:
-            self._rewards_num = spaces.get_1d_space_size(reward_space) if reward_space is not None else 1
+            rewards_num = spaces.get_1d_space_size(reward_space) if reward_space is not None else 1
             has_negative_rewards = th.as_tensor(reward_space.low, device=torch_device) < 0
             has_positive_rewards = th.as_tensor(reward_space.high, device=torch_device) > 0
-            ones = th.ones((self._rewards_num,), device=torch_device, dtype=th.float32)
-            zeros = th.zeros((self._rewards_num,), device=torch_device, dtype=th.float32)
+            ones = th.ones((rewards_num,), device=torch_device, dtype=th.float32)
+            zeros = th.zeros((rewards_num,), device=torch_device, dtype=th.float32)
             q_bounds_minmax = th.stack([th.where(has_negative_rewards, float("-inf")*ones, zeros),
                                         th.where(has_positive_rewards, float("+inf")*ones, zeros)],
-                                dim=0).view(2,self._rewards_num)
+                                dim=0).view(2,rewards_num)
         else:
-            self._rewards_num = 1
+            rewards_num = 1
             q_bounds_minmax = th.as_tensor([float("-inf"), float("+inf")]).view(2,1)
+        if self._independent_entropy_q:
+            q_bounds_minmax = th.cat([q_bounds_minmax,
+                                      th.as_tensor([[float("-inf")],[float("+inf")]], device=torch_device)],
+                                     dim=1)
+            self._q_size = rewards_num + 1
+        else:
+            self._q_size = rewards_num
         self._q_nets = build_mlp_net(arch=q_network_arch,
                                      input_size=action_size + observation_size,
-                                     output_size=self._rewards_num,
+                                     output_size=self._q_size,
                                      ensemble_size=self._nets_num,
                                      return_ensemble_mean=False,
                                      use_weightnorm=self._use_weightnorm,
@@ -255,12 +265,12 @@ class QNetwork(nn.Module):
         min_q = th.amin(qvals,dim=1)
         # min_q = min_q.squeeze(1)
         # ggLog.info(f"min_q.size() = {min_q.size()}")
-        return min_q.view(-1, self._rewards_num)
+        return min_q.view(-1, self._q_size)
     
     # @th.compile(mode=compile_mode, fullgraph=fullgraph)    
     def forward(self, observations, actions):
         qvals = self._q_nets(th.cat([observations, actions], 1))
-        qvals = qvals.view(-1, self._nets_num, self._rewards_num)
+        qvals = qvals.view(-1, self._nets_num, self._q_size)
         qvals = self._bounding_layer(qvals)
         # ggLog.info(f"QNetwork.forward: qvals.size() = {qvals.size()}")
         return qvals
@@ -291,6 +301,7 @@ class Actor(nn.Module):
         self._obs_size = observation_size
         self._use_weightnorm = use_weightnorm
         self._mean_bounds_ratio = mean_bounds_ratio if mean_bounds_ratio is not None else 1.0
+        self._action_size = action_size
         # ggLog.info(f"Actor mean_bounds_ratio = {self._mean_bounds_ratio}")
         # ggLog.info(f"Actor action_max = {action_max} action_min = {action_min}")
 
@@ -350,6 +361,7 @@ class Actor(nn.Module):
 
     @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, copy_outs=True, disable=disable_compile)
     def sample_action(self, observation_batch, reference_action : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        batch_size = observation_batch.shape[0]
         mean, log_std = self(observation_batch, reference_action)
         std = log_std.exp()
         x_t = mean + th.empty_like(mean).normal_(mean=0.0, std=1.0)*std # rsample has issues with torch.compile
@@ -363,9 +375,11 @@ class Actor(nn.Module):
         action = y_t * self.action_scale + self.action_bias
 
         log_prob = log_prob - th.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6) # correct the probability for the squashing and scaling
-        log_prob = log_prob.sum(1, keepdim=True) # get probability per each multidimensional action, not for each action component
+        log_prob = log_prob.sum(dim=1) # get probability per each multidimensional action, not for each action component
 
         dbg_check_finite(action, async_assert=True, assert_msg="sac.Actor.sample_action: action is not finite")
+        dbg_check_size(action,   (batch_size, self._action_size), f"sac.Actor.sample_action: action has incorrect size {action.size()}")
+        dbg_check_size(log_prob, (batch_size, ), f"sac.Actor.sample_action: log_prob has incorrect size {log_prob.size()}")
         return action, log_prob, mean, log_std
 
 class SAC(RLAgent):
@@ -405,6 +419,7 @@ class SAC(RLAgent):
         rewards_num : int
         alpha_lr_factor : float
         reward_space : spaces.ThBox
+        independent_entropy_q : bool
 
     def __init__(self,
                  init_hparams : SAC_init_hparams,
@@ -413,7 +428,7 @@ class SAC(RLAgent):
                  action_space : gym.spaces.Box,
                  actor_feature_extractor : FeatureExtractor | None = None,
                  critic_feature_extractor : FeatureExtractor | None = None,
-                 merge_actor_and_critic_updates : bool = True,
+                 merge_actor_and_critic_updates : bool = True
                  ):
         super().__init__()
         self._init_args = get_func_input_args(exclude=[ "self",
@@ -431,9 +446,9 @@ class SAC(RLAgent):
             raise RuntimeError(f"SAC currently only supports ThBox reward spaces, but got {type(reward_space)}")
         self._reward_space = reward_space
         rewards_num = spaces.get_1d_space_size(reward_space)
-        self._reward_names = reward_space.labels if isinstance(reward_space, spaces.ThBox) else np.array([f"reward_r{i:03d}" for i in range(rewards_num)], dtype=object)
-        if self._reward_names.ndim == 0:
-            self._reward_names = np.expand_dims(self._reward_names, axis=0)
+        reward_names = reward_space.labels if isinstance(reward_space, spaces.ThBox) else np.array([f"reward_r{i:03d}" for i in range(rewards_num)], dtype=object)
+        if reward_names.ndim == 0:
+            reward_names = np.expand_dims(reward_names, axis=0)
         init_hparams = copy.deepcopy(init_hparams)
         if init_hparams.target_entropy_factor is None:
             init_hparams.target_entropy_factor = -1.0
@@ -455,9 +470,9 @@ class SAC(RLAgent):
             action_init = 0.0
 
         gammas = init_hparams.gamma
-        ggLog.info(f"reward_names = {self._reward_names}")
+        ggLog.info(f"reward_names = {reward_names}")
         if isinstance(gammas, Mapping):
-            gammas = th.as_tensor([gammas[rn] for rn in self._reward_names], dtype=th.float32)
+            gammas = th.as_tensor([gammas[rn] for rn in reward_names], dtype=th.float32)
         elif isinstance(gammas, th.Tensor):
             gammas = gammas.expand(rewards_num).to(device=init_hparams.model_th_device)
         elif isinstance(gammas, float):
@@ -465,10 +480,17 @@ class SAC(RLAgent):
         else:
             raise RuntimeError(f"Invalid gamma type {type(init_hparams.gamma)}, must be float or th.Tensor or dict")
         
+        self._q_names = reward_names.tolist()
+        if init_hparams.independent_entropy_q:
+            entropy_gamma = th.mean(gammas) # Is this a reasonable choice? maybe expose it as a hyperparameter?
+            gammas = th.cat([gammas, entropy_gamma.unsqueeze(0)], dim=0)
+            self._q_names.append("entropy")
+        dbg_check_size(gammas, (len(self._q_names),), msg=f"SAC: gammas size mismatch with rewards_num, is {gammas.size()} should be {len(self._q_names)}")
+
         self._dtype = th.float32
         self._hp = SAC.Hyperparams(q_lr=init_hparams.q_lr,
                                    policy_lr = init_hparams.policy_lr,
-                                   gamma=gammas.expand(rewards_num).to(device=init_hparams.model_th_device),
+                                   gamma=gammas,
                                    auto_entropy_temperature=init_hparams.auto_entropy_temperature,
                                    constant_entropy_temperature=init_hparams.constant_entropy_temperature,
                                    action_init=action_init,
@@ -499,7 +521,8 @@ class SAC(RLAgent):
                                    rewards_num = rewards_num,
                                    gamma_reward_scaling = True,
                                    alpha_lr_factor=init_hparams.alpha_lr_factor,
-                                   reward_space = reward_space)
+                                   reward_space = reward_space,
+                                   independent_entropy_q = init_hparams.independent_entropy_q)
         self._transition_augmentation_func = None
         self._default_reward_weights = th.ones(rewards_num, dtype=self._dtype, device=self._hp.torch_device)
         self._obs_space_sizes = sizetree_from_space(observation_space)
@@ -510,7 +533,7 @@ class SAC(RLAgent):
         self._agent_updates = 0
         self._share_actor_critic_feature_extractor = (actor_feature_extractor==critic_feature_extractor and
                                                       init_hparams.actor_observation_filter==init_hparams.critic_observation_filter)
-        ggLog.info(f"SAC: share_actor_critic_feature_extractor = {self._share_actor_critic_feature_extractor}")
+        ggLog.info(f"SAC: independent_entropy_q = {self._hp.independent_entropy_q}")
         if self._share_actor_critic_feature_extractor:
             if critic_feature_extractor is None or actor_feature_extractor is None: # second considition is just for typing
                 self._critic_feature_extractor = StackVectorsFeatureExtractor(observation_space=critic_observation_space,
@@ -533,21 +556,23 @@ class SAC(RLAgent):
         critic_input_size = self._critic_feature_extractor.encoding_size()
         actor_input_size = self._actor_feature_extractor.encoding_size()
         # ggLog.info(f"SAC: inner critic_input_size = {critic_input_size}, inner actor_input_size = {actor_input_size}")
-        self._q_net = QNetwork( observation_size=critic_input_size,
-                                action_size=self._hp.action_size,
-                                q_network_arch=init_hparams.q_network_arch,
-                                torch_device=self._hp.torch_device,
+        self._q_net = QNetwork( observation_size = critic_input_size,
+                                action_size = self._hp.action_size,
+                                q_network_arch = self._hp.q_network_arch,
+                                torch_device = self._hp.torch_device,
                                 nets_num=2,
-                                reward_space=reward_space)
+                                reward_space=self._hp.reward_space,
+                                independent_entropy_q=self._hp.independent_entropy_q)
         self._q_net_target = QNetwork(  observation_size=critic_input_size,
                                         action_size=self._hp.action_size,
-                                        q_network_arch=init_hparams.q_network_arch,
+                                        q_network_arch=self._hp.q_network_arch,
                                         torch_device=self._hp.torch_device,
                                         nets_num=2,
-                                        reward_space=reward_space)
+                                        reward_space=self._hp.reward_space,
+                                        independent_entropy_q=self._hp.independent_entropy_q)
         self._q_net_target.load_state_dict(self._q_net.state_dict())
         self._q_optimizer = optim.AdamW(split_params_for_weight_decay(self._q_net, self._hp.critic_weight_decay), lr=self._hp.q_lr)
-        self._actor = Actor(policy_arch=init_hparams.policy_arch,
+        self._actor = Actor(policy_arch=self._hp.policy_arch,
                             observation_size=actor_input_size,
                             action_size = self._hp.action_size,
                             action_min = self._hp.action_min,
@@ -557,7 +582,7 @@ class SAC(RLAgent):
                             action_mean_init=self._hp.action_init,
                             mean_bounds_ratio=self._hp.actor_mean_bounds_ratio,
                             dtype=self._dtype)
-        initial_actor_entropy = self._hp.action_size/2 * (math.log(2*math.pi)+1) + 0.5*math.log(self._hp.log_std_init**(2*self._hp.action_size))
+        # initial_actor_entropy = self._hp.action_size/2 * (math.log(2*math.pi)+1) + 0.5*math.log(self._hp.log_std_init**(2*self._hp.action_size))
         # self._actor_optimizer = optim.Adam(split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay),
         #                                    lr=self._hp.policy_lr)
         self._base_target_entropy_factor = th.as_tensor(self._hp.target_entropy_factor, device=self._hp.torch_device, dtype=self._dtype)
@@ -635,7 +660,7 @@ class SAC(RLAgent):
                                     "avg_action_logstd", "min_action_logstd", "max_action_logstd", "q95_action_logstd", "q05_action_logstd"]
         self._alpha_stats_names = ["avg_log_prob", "min_log_prob", "max_log_prob", "q95_log_prob", "q05_log_prob", "current_entropy"]
         self._stats.update({n:0.0 for n in self._actor_stats_names})
-        example_q_stats = th.zeros((5, self._hp.rewards_num), device=self.device)
+        example_q_stats = th.zeros((5, len(self._q_names)), device=self.device)
         self._update_q_stats(example_q_stats)
     
     def _nvtx_startup(self):
@@ -833,10 +858,18 @@ class SAC(RLAgent):
         if critic_enc_obss is None:
             critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
         with th.no_grad():
-            actor_next_obss = self.get_actor_subobservation(transitions.next_observations)
-            batch_size = transitions.terminated.size()[0]
+            rewards     = transitions.rewards
+            terminateds = transitions.terminated
+            next_observations = transitions.next_observations
+            actions = transitions.actions
+            batch_size = terminateds.size()[0]
+            dbg_check_size(rewards, (batch_size, self._hp.rewards_num), "sac._compute_critic_loss: rewards has incorrect size")
+            dbg_check_size(terminateds, (batch_size, self._hp.rewards_num), "sac._compute_critic_loss: terminateds has incorrect size")
+            actor_next_obss = self.get_actor_subobservation(next_observations)
+
+            q_size = self._hp.rewards_num+1 if self._hp.independent_entropy_q else self._hp.rewards_num
             if crit_next_enc_obss is None:
-                critic_next_obss = self.get_critic_subobservation(transitions.next_observations)
+                critic_next_obss = self.get_critic_subobservation(next_observations)
                 crit_next_enc_obss = self._critic_feature_extractor.extract_features(critic_next_obss)   
             if self._share_actor_critic_feature_extractor:
                 actor_next_obss_enc = crit_next_enc_obss
@@ -847,24 +880,35 @@ class SAC(RLAgent):
             
             # Compute next-values for TD
             next_state_actions, next_state_log_pi, _, _ = self._actor.sample_action(actor_next_obss_enc, reference_action = reference_action)
-            q_next = self._q_net_target.get_min_qval(crit_next_enc_obss, next_state_actions).view(batch_size,self._hp.rewards_num) # shape: batch x rewards_num
-            soft_q_next = q_next - self._alpha/self._hp.rewards_num * next_state_log_pi
+            q_next = self._q_net_target.get_min_qval(crit_next_enc_obss, next_state_actions)
             
-            soft_q_next = soft_q_next.view(batch_size,self._hp.rewards_num) # shape: batch x rewards_num
-            rewards     = transitions.rewards.view(batch_size, self._hp.rewards_num)
-            terminateds = transitions.terminated.expand(batch_size,self._hp.rewards_num)
-
+            dbg_check_size(q_next, (batch_size, q_size), "sac._compute_critic_loss: q_next has incorrect size")
+            dbg_check_size(next_state_log_pi, (batch_size, ), "sac._compute_critic_loss: next_state_log_pi has incorrect size")
             if self._hp.gamma_reward_scaling:
                 # rewards = rewards * (1 - self._hp.gamma)
                 rewards = rewards * (1 - self._hp.gamma)/(1-th.amax(self._hp.gamma)) # scale to keep similar reward magnitudes when using multiple
-            td_q_values = rewards + (1 - terminateds) * self._hp.gamma * soft_q_next
+
+            # ggLog.info(f"sac._compute_critic_loss: independent_entropy_q = {self._hp.independent_entropy_q}")
+            # ggLog.info(f"sac._compute_critic_loss: next_state_log_pi size = {next_state_log_pi.size()}")
+            if not self._hp.independent_entropy_q:
+                soft_q_next = q_next - self._alpha/self._hp.rewards_num * next_state_log_pi.view(batch_size,1)
+                dbg_check_size(soft_q_next, (batch_size, self._hp.rewards_num), "sac._compute_critic_loss: soft_q_next has incorrect size")
+
+                td_q_values = rewards + (1 - terminateds) * self._hp.gamma * soft_q_next
+            else:
+                # Keep the q normal, and put the entropy term separately in the last q element
+                # so the only thing we must do is add the entropy term to the last q
+                q_next[:, -1] += -self._alpha*next_state_log_pi
+                td_q_values = rewards + (1 - terminateds) * self._hp.gamma * q_next
+
+
 
         # ggLog.info(f"td_q_values.size() = {td_q_values.size()}")
-        q_values = self._q_net(critic_enc_obss, transitions.actions).view(batch_size,2,self._hp.rewards_num)
+        q_values = self._q_net(critic_enc_obss, actions).view(batch_size,2,q_size)
 
         # ggLog.info(f"q_values.size() = {q_values.size()}")
-        td_q_values = td_q_values.view(batch_size,1,self._hp.rewards_num)
-        td_q_values = td_q_values.expand(batch_size,2,self._hp.rewards_num)
+        td_q_values = td_q_values.view(batch_size,1,q_size)
+        td_q_values = td_q_values.expand(batch_size,2,q_size)
         # ggLog.info(f"td_q_values.size() = {td_q_values.size()}")
         square_errs = (q_values - td_q_values)**2
         per_reward_square_errs : th.Tensor = square_errs.mean(dim=(0,1)) # mean over batch and nets, batch x nets x rewards_num -> rewards_num
@@ -889,7 +933,7 @@ class SAC(RLAgent):
 
     def _update_q_stats(self, q_val_stats : th.Tensor):
         if q_val_stats is not None:
-            q_stat_by_rew = {self._reward_names[i]: q_val_stats[:,i] for i in range(self._hp.rewards_num)}
+            q_stat_by_rew = {self._q_names[i]: q_val_stats[:,i] for i in range(len(self._q_names))}
             for rew_name, stats in q_stat_by_rew.items():
                 self._stats.update({f"q_val_{stat_name}_{rew_name}":stat_value for stat_name, stat_value in zip( ["avg", "min", "max", "q05", "q95"], stats.detach().clone())})
         
@@ -911,7 +955,7 @@ class SAC(RLAgent):
             self._critic_opt_step(q_loss)
         
         if subq_errs is not None:            
-            self._stats.update({f"q_loss_r_{self._reward_names[i]}":err for i,err in enumerate(subq_errs.detach().clone())})
+            self._stats.update({f"q_loss_r_{self._q_names[i]}":err for i,err in enumerate(subq_errs.detach().clone())})
         self._update_q_stats(q_stats)
         # self._nvtx_end_range()
         self._critic_updates += 1
@@ -926,23 +970,26 @@ class SAC(RLAgent):
                                     actor_enc_obss : th.Tensor | None = None,
                                     critic_enc_obss : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor | None]:
         # self._mark_nvtx("_compute_actor_loss")
+        batch_size = transitions.rewards.shape[0]
         actor_obss = self.get_actor_subobservation(transitions.observations)
         # self._mark_nvtx("actor_enc")
         if actor_enc_obss is None:
             actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
         # self._mark_nvtx("get ref")
-        reference_action = self._get_reference_action(actor_obss)
-        # self._mark_nvtx("sample")
-        act, act_log_prob, act_mean, act_logstd = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
-        # act, act_log_prob = act.clone(), act_log_prob.clone() # prevent issues with cuda graphs
-        # with th.no_grad():
-        # self._mark_nvtx("crit_enc")
         if self._share_actor_critic_feature_extractor:
             critic_enc_obss = actor_enc_obss
         else:
             if critic_enc_obss is None:
                 critic_obss = self.get_critic_subobservation(transitions.observations)
                 critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
+        
+        reference_action = self._get_reference_action(actor_obss)
+        
+        # self._mark_nvtx("sample")
+        act, act_log_prob, act_mean, act_logstd = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
+        # act, act_log_prob = act.clone(), act_log_prob.clone() # prevent issues with cuda graphs
+        # with th.no_grad():
+        # self._mark_nvtx("crit_enc")
         # self._mark_nvtx("get_q")
         if freeze_critic: 
             # Needed if we are updating actor and critic together, if done separately we just ignore these grads at optimizer time
@@ -950,10 +997,11 @@ class SAC(RLAgent):
             min_qs_pi = th.amin(th.func.functional_call(self._q_net, {k:t.detach() for k,t in dict(self._q_net.named_parameters()).items()}, (critic_enc_obss, act)), dim = 1) 
         else:    
             min_qs_pi = self._q_net.get_min_qval(critic_enc_obss, act)
-        min_qs_pi = min_qs_pi.sum(dim=1, keepdim=True) # Sum all the qvalues for the different rewards
+        min_qs_pi = min_qs_pi.sum(dim=1) # Sum all the qvalues for the different rewards
         
-        # ggLog.info(f"min_q_pi.size() = {min_q_pi.size()}")
-        # ggLog.info(f"act_log_prob.size() = {act_log_prob.size()}")
+        dbg_check_size(min_qs_pi, (batch_size,), f"sac._compute_actor_loss: min_qs_pi has incorrect size {min_qs_pi.size()}")
+        dbg_check_size(act_log_prob, (batch_size,), f"sac._compute_actor_loss: act_log_prob has incorrect size {act_log_prob.size()}")
+
         # self._mark_nvtx("ret_q")
         if get_stats:
             actor_stats = th.stack([act_mean.mean(),
@@ -1112,7 +1160,7 @@ class SAC(RLAgent):
         if actor_stats is not None:
             self._stats.update({k:v for k,v in zip(self._actor_stats_names,actor_stats.detach().clone())})
         if subq_errs is not None:
-            self._stats.update({f"q_loss_r_{self._reward_names[i]}":err for i,err in enumerate(subq_errs.detach().clone())})
+            self._stats.update({f"q_loss_r_{self._q_names[i]}":err for i,err in enumerate(subq_errs.detach().clone())})
         self._update_q_stats(q_stats)
         self._critic_updates += 1
         self._alpha_updates += 1

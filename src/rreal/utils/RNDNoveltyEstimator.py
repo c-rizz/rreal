@@ -98,7 +98,24 @@ class RNDNoveltyEstimator(th.nn.Module):
         self._optimizer = th.optim.Adam(self._predictor_net.parameters(), lr = self._hyperparams.learning_rate)
         self._optimizer.zero_grad()
 
-    def forward(self, dict_obs_batch : dict[str|int,th.Tensor] | None = None, vector_obs_batch : th.Tensor | None = None, img_obs_batch : th.Tensor | None = None) -> th.Tensor:
+    def _compute_error(self, dict_obs_batch : dict[str|int,th.Tensor] | None = None, vector_obs_batch : th.Tensor | None = None, img_obs_batch : th.Tensor | None = None) -> th.Tensor:
+        """ Returns a signed novelty estimate, where the sign is determined by whether the predictor underestimates or overestimates the target features.
+            This can be useful when using novelty estimates as loss weights, as it allows to upweight or downweight samples.
+
+        Parameters
+        ----------
+        dict_obs_batch : dict[str|int,th.Tensor] | None, optional
+            _description_, by default None
+        vector_obs_batch : th.Tensor | None, optional
+            _description_, by default None
+        img_obs_batch : th.Tensor | None, optional
+            _description_, by default None
+
+        Returns
+        -------
+        th.Tensor
+            Signed novelty estimates for each sample in the batch.
+        """
         if self._hyperparams.img_encoding_size == 0:
             if isinstance(dict_obs_batch, dict):
                 vector_obs_batch = dict_obs_batch[self._hyperparams.dict_obs_vector_key]
@@ -116,11 +133,15 @@ class RNDNoveltyEstimator(th.nn.Module):
             with th.no_grad():
                 target_features = self._target_net(dict_obs_batch)
             predicted_features = self._predictor_net(dict_obs_batch)
+        return target_features - predicted_features
+
+    def forward(self, dict_obs_batch : dict[str|int,th.Tensor] | None = None, vector_obs_batch : th.Tensor | None = None, img_obs_batch : th.Tensor | None = None) -> th.Tensor:
+        error = self._compute_error(dict_obs_batch=dict_obs_batch, vector_obs_batch=vector_obs_batch, img_obs_batch=img_obs_batch)
         # we now have two [batch_size, ensemble_size, feature_size] tensors
         # we do the mean across both feature_size and ensemble_size.
         #     as the diffs are squared ensembles cannot compensate each other
         # we return a [batch_size] tensor. i.e. we return the novelty for each sample
-        return th.mean(th.square(target_features-predicted_features),dim=(1,2)) 
+        return th.mean(th.square(error),dim=(1,2)) 
 
 
     def train_model(self, dict_obs_batch : dict[str|int,th.Tensor] | None = None, vector_obs_batch : th.Tensor | None = None, img_obs_batch : th.Tensor | None = None):
@@ -207,7 +228,7 @@ class NoveltyScaler():
         # HYPERPARAMETERS
         self._avgs_alpha_th = th.as_tensor(avg_alpha, device=th_device) # stats exponential moving average alpha
         self._reward_bonus_weight = th.as_tensor(reward_bonus_weight, device=th_device) # weight of the novelty-based reward bonus
-        self._epsilon = 1e-8 # to avoid numerical issues
+        self._epsilon = 1e-12 # to avoid numerical issues, carefule here, don't set it too big, losses easily get close to 1e-8
         # Normalization and scaling hyperparameters:
         self._novelty_interest_std_threshold = reward_novelty_interest_std_threshold # We consider 'interesting' novelties that are at this multiple of std in the novelty distribution..
         self._novelty_std_squash = reward_novelty_std_squash # We squash the normalized novelty at this multiple of std (sigma), to reduce the impact of outliers
@@ -300,6 +321,11 @@ class NoveltyScaler():
         _type_
             _description_
         """
+
+        # We do as if the novelty is gaussian, but it is more of a Chi-squared distribution, as it 
+        # is the mean of squared errors.
+        # it would make more sense to use chi-square quantiles as std thresholds and normalization factors.
+
         if update_stats:
             self.update_stats(raw_novelty_batch, raw_reward_batch)
         # novelty_mean = th.mean(raw_novelty_batch)
@@ -369,12 +395,12 @@ class NoveltyScaler():
         # novelty_mean = th.mean(raw_novelty_batch)
         # novelty_std = th.std(raw_novelty_batch)
         novelty_mean = self._avg_novelty
-        novelty_kurtosis = th.mean(self._avg_novelty_mean_of_fourth_residual)/th.square(th.mean(self._avg_novelty_mean_of_second_residual))
+        novelty_kurtosis = self._current_kurtosis
 
 
-        base_novelty_weights = raw_novelty_batch / (novelty_mean + self._epsilon) # base weight multiplier
-        squashed_novelty_weights = th.tanh((base_novelty_weights - 1.0)/self._novelty_weight_squash)*self._novelty_weight_squash + 1.0 # squash at _novelty_std_squash
+        novelty_weights = raw_novelty_batch / (novelty_mean + self._epsilon) # base weight multiplier
+        novelty_weights = th.tanh((novelty_weights - 1.0)/self._novelty_weight_squash)*self._novelty_weight_squash + 1.0 # squash at _novelty_std_squash
         kurtosis_factor = th.clamp((novelty_kurtosis - self._kurtosis_min)/(self._kurtosis_max-self._kurtosis_min), min=0, max=1) # scale from 0 to 1 based on kurtosis
-        novelty_weights = 1.0 + (squashed_novelty_weights - 1.0)*kurtosis_factor # scale towards 1.0 as kurtosis goes down
+        novelty_weights = 1.0 + (novelty_weights - 1.0)*kurtosis_factor # scale towards 1.0 as kurtosis goes down
 
         return novelty_weights

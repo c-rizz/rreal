@@ -328,7 +328,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                     env_builder_args = env_builder_args,
                     vec_env_builder=cartpole_venv_builder,
                     hyperparams = SAC_init_hparams( train_freq_vstep=16,
-                                                    grad_steps=32,
+                                                    grad_steps=5,
                                                     parallel_envs = num_envs,
                                                     batch_size = 512,
                                                     q_lr=0.0005,
