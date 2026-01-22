@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 from gc import freeze
-
 from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch, BaseBuffer, BaseValidatingBuffer
 from adarl.utils.callbacks import TrainingCallback, CallbackList
 from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree
@@ -41,6 +40,7 @@ import typing
 import math
 
 th._dynamo.config.compiled_autograd = True
+th._dynamo.config.allow_unspec_int_on_nn_module = True
 
 # There seems to be a BIG overhead in entering end exiting compiled functions
 # I tried to dig a bit in the torch/dynamo/inductor code to understand at the end what is being ran when
@@ -664,23 +664,31 @@ class SAC(RLAgent):
         self._update_q_stats(example_q_stats)
     
     def _nvtx_startup(self):
-        if self._enable_nvtx and self._agent_updates == 10:
+        if self._enable_nvtx and self._agent_updates == 20:
             th.cuda.cudart().cudaProfilerStart() #type: ignore
 
     def _nvtx_stop(self):
-        if self._enable_nvtx and self._agent_updates > 100:
+        if self._enable_nvtx and self._agent_updates > 30:
             th.cuda.cudart().cudaProfilerStop() #type: ignore
 
-    def _mark_nvtx(self, name : str):
-        if self._enable_nvtx and self._agent_updates >10:
+    def _nvtx_mark(self, name : str):
+        if self._enable_nvtx:
             th.cuda.nvtx.mark(name)
 
     def _nvtx_start_range(self, name : str):
-        if self._enable_nvtx and self._agent_updates >10:
+        if not hasattr(self, "_nvtx_range_stack"):
+            self._stack_nvtx_range = []
+        self._stack_nvtx_range.append(name)
+        if self._enable_nvtx:
             th.cuda.nvtx.range_push(name)
 
-    def _nvtx_end_range(self):
-        if self._enable_nvtx and self._agent_updates >10:
+    def _nvtx_end_range(self, name : str):
+        if not hasattr(self, "_stack_nvtx_range") or len(self._stack_nvtx_range) == 0:
+            raise RuntimeError("nvtx range stack is empty")
+        last_name = self._stack_nvtx_range.pop()
+        if last_name != name:
+            raise RuntimeError(f"nvtx range stack mismatch, closing {name} currently in {last_name}")
+        if self._enable_nvtx:
             th.cuda.nvtx.range_pop()
 
     def get_actor_subobservation(self, observation : DictObs)  -> DictObs:
@@ -929,6 +937,10 @@ class SAC(RLAgent):
     def _critic_opt_step(self, q_loss : th.Tensor):
         simplified_clip_grad_norm_(list(self._q_net.parameters()), self._hp.max_grad_norm)
         self._q_optimizer.step()
+        if self._critic_updates % self._hp.targets_update_freq == 0:
+            # self._nvtx_start_range("_update_target_nets")
+            self._update_target_nets()
+            # self._nvtx_end_range("_update_target_nets")
         self._last_q_loss.copy_(q_loss.detach())
 
     def _update_q_stats(self, q_val_stats : th.Tensor):
@@ -946,10 +958,10 @@ class SAC(RLAgent):
         # ggLog.info(f"compute_critic_loss...")
         q_loss, (subq_errs, q_stats) = self._compute_critic_loss(transitions)
         # ggLog.info(f"compute_critic_loss done")
-        # self._nvtx_end_range()
+        # self._nvtx_end_range("critic forward")
         # self._nvtx_start_range("critic backward")
         q_loss.backward()
-        # self._nvtx_end_range()
+        # self._nvtx_end_range("critic backward")
         # self._nvtx_start_range("critic opt")
         with th.no_grad():
             self._critic_opt_step(q_loss)
@@ -957,9 +969,9 @@ class SAC(RLAgent):
         if subq_errs is not None:            
             self._stats.update({f"q_loss_r_{self._q_names[i]}":err for i,err in enumerate(subq_errs.detach().clone())})
         self._update_q_stats(q_stats)
-        # self._nvtx_end_range()
+        # self._nvtx_end_range("critic opt")
         self._critic_updates += 1
-        # self._nvtx_end_range()
+        # self._nvtx_end_range("_update_critic")
         # ggLog.info(f"critic update done")
 
 
@@ -969,13 +981,13 @@ class SAC(RLAgent):
                                     get_stats : bool = False,
                                     actor_enc_obss : th.Tensor | None = None,
                                     critic_enc_obss : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor | None]:
-        # self._mark_nvtx("_compute_actor_loss")
+        # self._nvtx_mark("_compute_actor_loss")
         batch_size = transitions.rewards.shape[0]
         actor_obss = self.get_actor_subobservation(transitions.observations)
-        # self._mark_nvtx("actor_enc")
+        # self._nvtx_mark("actor_enc")
         if actor_enc_obss is None:
             actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
-        # self._mark_nvtx("get ref")
+        # self._nvtx_mark("get ref")
         if self._share_actor_critic_feature_extractor:
             critic_enc_obss = actor_enc_obss
         else:
@@ -985,12 +997,12 @@ class SAC(RLAgent):
         
         reference_action = self._get_reference_action(actor_obss)
         
-        # self._mark_nvtx("sample")
+        # self._nvtx_mark("sample")
         act, act_log_prob, act_mean, act_logstd = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
         # act, act_log_prob = act.clone(), act_log_prob.clone() # prevent issues with cuda graphs
         # with th.no_grad():
-        # self._mark_nvtx("crit_enc")
-        # self._mark_nvtx("get_q")
+        # self._nvtx_mark("crit_enc")
+        # self._nvtx_mark("get_q")
         if freeze_critic: 
             # Needed if we are updating actor and critic together, if done separately we just ignore these grads at optimizer time
             # In torch compile we cannot change requires grad, so we detach the weights, using this functional thing
@@ -1002,7 +1014,7 @@ class SAC(RLAgent):
         dbg_check_size(min_qs_pi, (batch_size,), f"sac._compute_actor_loss: min_qs_pi has incorrect size {min_qs_pi.size()}")
         dbg_check_size(act_log_prob, (batch_size,), f"sac._compute_actor_loss: act_log_prob has incorrect size {act_log_prob.size()}")
 
-        # self._mark_nvtx("ret_q")
+        # self._nvtx_mark("ret_q")
         if get_stats:
             actor_stats = th.stack([act_mean.mean(),
                                     act_mean.min(),
@@ -1098,11 +1110,11 @@ class SAC(RLAgent):
                                                                actor_enc_obss=actor_enc_obss)
             loss = actor_loss + alpha_loss + q_loss
         else:
-            alpha_loss, alpha_stats = None, None
+            alpha_loss, alpha_stats = 0, None
             loss = actor_loss + q_loss
         return loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, (subq_square_errs, q_stats)
     
-    @th.compile(mode=compile_mode, fullgraph=False, disable=disable_compile)
+    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
     def _actor_and_alpha_opt_step(self, actor_loss : th.Tensor, alpha_loss : th.Tensor | None):
         simplified_clip_grad_norm_(list(self._actor.parameters()), self._hp.max_grad_norm)
         simplified_clip_grad_norm_([self._log_alpha], self._hp.max_grad_norm)
@@ -1112,28 +1124,35 @@ class SAC(RLAgent):
         if alpha_loss is not None:
             self._last_alpha_loss.copy_(alpha_loss.detach())
 
+
+    @th.compile(mode=compile_mode, fullgraph=False, disable=disable_compile)
+    def _all_opt_step(self, q_loss : th.Tensor,
+                            actor_loss : th.Tensor,
+                            alpha_loss : th.Tensor):
+        self._critic_opt_step(q_loss)
+        self._actor_and_alpha_opt_step(actor_loss, alpha_loss)
+
     def _update_actor_and_alpha(self, transitions : DictTransitionBatch):
         # We aggregate actor and alpha to join the two compilation regions and cuda graphs, so to reduce overhead
         # self._nvtx_start_range("_update_actor_and_alpha")
         self._actor_and_alpha_optimizer.zero_grad(set_to_none=True)
         # self._nvtx_start_range("_compute_actor_and_alpha_loss")
         actor_alpha_loss, actor_loss, alpha_loss, alpha_stats, actor_stats = self._compute_actor_and_alpha_loss(transitions)
-        # self._nvtx_end_range()
+        # self._nvtx_end_range("_compute_actor_and_alpha_loss")
         # self._nvtx_start_range("actor_alpha backward")
         actor_alpha_loss.backward()
-        # self._nvtx_end_range()
-        # self._nvtx_start_range("actor_alpha opt")
+        # self._nvtx_end_range("actor_alpha backward")
+        # self._nvtx_start_range("actor_alpha_opt")
         with th.no_grad():
             self._actor_and_alpha_opt_step(actor_loss, alpha_loss)
-        # self._nvtx_end_range()
-
+        # self._nvtx_end_range("actor_alpha_opt")
         if alpha_stats is not None:
             self._stats.update({k:v for k,v in zip(self._alpha_stats_names,alpha_stats.detach().clone())})
         if actor_stats is not None:
             self._stats.update({k:v for k,v in zip(self._actor_stats_names,actor_stats.detach().clone())})      
         self._alpha_updates += 1
         self._actor_updates += 1
-        # self._nvtx_end_range()
+        # self._nvtx_end_range("_update_actor_and_alpha")
 
     def _update_all(self, transitions):
         # self._nvtx_start_range("_update_all")
@@ -1143,17 +1162,15 @@ class SAC(RLAgent):
 
         # self._nvtx_start_range("_compute_all_losses")
         loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, (subq_errs, q_stats) = self._compute_all_losses(transitions)
-        # self._nvtx_end_range()
-        # self._nvtx_start_range("all backward")
+        # self._nvtx_end_range("_compute_all_losses")
+        # self._nvtx_start_range("all_backward")
         loss.backward()
-        # self._nvtx_end_range()
+        # self._nvtx_end_range("all_backward")
 
-        # self._nvtx_start_range("all opt")
+        # self._nvtx_start_range("all_opt")
         with th.no_grad():
-            #TODO: merge the optimizers?
-            self._critic_opt_step(q_loss)
-            self._actor_and_alpha_opt_step(actor_loss, alpha_loss)
-        # self._nvtx_end_range()
+            self._all_opt_step(q_loss, actor_loss, alpha_loss)
+        # self._nvtx_end_range("all_opt")
 
         if alpha_stats is not None:
             self._stats.update({k:v for k,v in zip(self._alpha_stats_names,alpha_stats.detach().clone())})
@@ -1165,7 +1182,7 @@ class SAC(RLAgent):
         self._critic_updates += 1
         self._alpha_updates += 1
         self._actor_updates += 1
-        # self._nvtx_end_range()
+        # self._nvtx_end_range("_update_all")
         
     @staticmethod
     def _target_update(param, target_param, tau):
@@ -1192,7 +1209,8 @@ class SAC(RLAgent):
     def _update_full_merged(self, transitions : DictTransitionBatch):
         th.compiler.cudagraph_mark_step_begin()
         # self._nvtx_startup()
-        # self._nvtx_start_range(f"iteration{self._critic_updates}")
+        nvtx_range_name = f"iteration{self._critic_updates}"
+        # self._nvtx_start_range(nvtx_range_name)
         if self._enable_feature_extractor_training:
             if self._critic_feature_extractor_optimizer is not None:
                 self._critic_feature_extractor_optimizer.zero_grad(set_to_none=True)
@@ -1206,14 +1224,10 @@ class SAC(RLAgent):
         else:
             self._update_critic(transitions)
 
-        if self._critic_updates % self._hp.targets_update_freq == 0:
-            # self._nvtx_start_range("_update_target_nets")
-            self._update_target_nets()
-            # self._nvtx_end_range()
         if self._enable_feature_extractor_training:
             self._update_feature_extractor()
         self._agent_updates += 1
-        # self._nvtx_end_range()
+        # self._nvtx_end_range(nvtx_range_name)
         # self._nvtx_stop()
         return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
 
@@ -1228,7 +1242,8 @@ class SAC(RLAgent):
         # should be helpful
         # th.compiler.cudagraph_mark_step_begin()
         # self._nvtx_startup()
-        # self._nvtx_start_range(f"iteration{self._critic_updates}")
+        nvtx_range_name = f"iteration{self._critic_updates}"
+        # self._nvtx_start_range(nvtx_range_name)
 
         if self._enable_feature_extractor_training:
             if self._critic_feature_extractor_optimizer is not None:
@@ -1240,13 +1255,9 @@ class SAC(RLAgent):
         if self._critic_updates % self._hp.policy_update_freq == 0:
             for _ in range(self._hp.policy_update_freq):
                 self._update_actor_and_alpha(transitions=transitions) # TODO: is it good to update twice with the same batch
-        if self._critic_updates % self._hp.targets_update_freq == 0:
-            # self._nvtx_start_range("_update_target_nets")
-            self._update_target_nets()
-            # self._nvtx_end_range()
         if self._enable_feature_extractor_training:
             self._update_feature_extractor()
-        # self._nvtx_end_range()
+        # self._nvtx_end_range(nvtx_range_name)
         self._agent_updates += 1
         # self._nvtx_stop()      
         # th.cuda.set_sync_debug_mode(sync_dbg_mode)
@@ -1295,7 +1306,7 @@ class SAC(RLAgent):
             transitions : DictTransitionBatch = buffer.sample(self._hp.batch_size) #TODO: maybe add a check that does this cast better
 
             transitions = self._augment_transitions(transitions)
-            # self._nvtx_end_range()
+            # self._nvtx_end_range("sample")
             # transitions = map_tensor_tree(transitions, lambda t : t.to(device=self.device, non_blocking=self.device.type=="cuda"))
             # th.cuda.synchronize(self.device)
             q_act_alpha_losses[i] = self._update(transitions = transitions)
@@ -1338,7 +1349,8 @@ def train_off_policy(collector : ExperienceCollector,
                     log_freq_vstep : int = -1,
                     callbacks : Union[TrainingCallback, List[TrainingCallback]] | None = None,
                     validation_freq : int = 1,
-                    validation_batch_size : int = 256):
+                    validation_batch_size : int = 256,
+                    parallelize_experience_collection : bool = True):
     if validation_freq>0 and not isinstance(buffer, BaseValidatingBuffer):
         raise RuntimeError(f"validation_freq>0 but buffer is not a BaseValidatingBuffer")
     if log_freq_vstep == -1: log_freq_vstep = train_freq
@@ -1379,7 +1391,8 @@ def train_off_policy(collector : ExperienceCollector,
                                             vsteps_to_collect=vsteps_to_collect,
                                             global_vstep_count=global_exp_step//num_envs,
                                             random_vsteps=learning_start_step//num_envs)
-
+        if not parallelize_experience_collection:
+            tmp_buff = collector.wait_collection(timeout = 300.0)
         # ------------------             Train             ------------------
         t_before_train = time.monotonic()
         trained = False
@@ -1399,7 +1412,8 @@ def train_off_policy(collector : ExperienceCollector,
         t_after_val = time.monotonic()
         
         # ------------------   Store collected experience  ------------------
-        tmp_buff = collector.wait_collection(timeout = 300.0)
+        if parallelize_experience_collection:
+            tmp_buff = collector.wait_collection(timeout = 300.0)
         t_after_wait = time.monotonic()
         new_episodes = tmp_buff.added_completed_episodes() - ep_counter
         ep_counter = tmp_buff.added_completed_episodes()

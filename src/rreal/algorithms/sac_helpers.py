@@ -241,15 +241,12 @@ def build_collector(use_processes : bool,
                     collector_buffer_size : int,
                     session : adarl.utils.session.Session,
                     num_envs : int,
-                    deterministic_action_ratio : float = 0.0,
-                    parallelize_collection : bool = True):
+                    deterministic_action_ratio : float = 0.0):
     vec_env_builder_norags = lambda: vec_env_builder(env_builder_args=env_builder_args,
                                                     run_folder=run_folder,
                                                     seed=seed,
                                                     num_envs=num_envs)
-    if not parallelize_collection:
-        raise NotImplementedError("Synchronous collection is not implemented yet") #TODO: use the synchronous collector
-    elif use_processes:
+    if use_processes:
         collector = AsyncProcessExperienceCollector(
                             vec_env_builder=vec_env_builder_norags,
                             storage_torch_device=collector_device,
@@ -347,7 +344,6 @@ def sac_train(  seed : int,
                                 collector_device = collector_device,
                                 collector_buffer_size = hyperparams.train_freq_vstep*hyperparams.parallel_envs,
                                 session = session,
-                                parallelize_collection=parallelize_collection,
                                 deterministic_action_ratio=hyperparams.deterministic_collection_ratio)
     collector.set_base_collector_model(lambda o,a,r: build_sac(o,a,r,hyperparams))
     observation_space = collector.observation_space()
@@ -431,6 +427,7 @@ def sac_train(  seed : int,
             log_freq_vstep=hyperparams.log_freq_vstep,
             callbacks=callbacks,
             validation_freq= 1 if validation_enabled else 0,
-            validation_batch_size=validation_batch_size)
+            validation_batch_size=validation_batch_size,
+            parallelize_experience_collection=parallelize_collection)
     finally:
         collector.close()

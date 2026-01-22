@@ -28,7 +28,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
         "name" : "video_stoch",
         "deterministic" : False,
         "eval_freq_ep" : num_envs*10,
-        "eval_eps" : 1,
+        "eval_eps" : 8,
         "env_builder_args" : video_eval_env_builder_args,
         "num_envs" : num_envs
     }
@@ -68,7 +68,8 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                     validation_holdout_ratio = 0, #0.01,
                     validation_batch_size = 0,
                     eval_configurations=eval_configs,
-                    checkpoint_freq = -1)
+                    checkpoint_freq = -1,
+                    parallelize_collection=True)
     # elif args["algo"].lower() == "ppo":
     #     from rreal.algorithms.ppo import ppo_train, PPO_hyperparams
     #     raise RuntimeError(f"Use ppo2, this one is bugged")

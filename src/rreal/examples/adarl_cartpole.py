@@ -72,7 +72,7 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                 log_freq_joints_trajectories = int(stepLength_sec/sim_dt),
                                 log_folder=run_folder,
                                 safe_revolute_dof_armature=0.01,
-                                opt_preset="fast",
+                                opt_preset="fastest",
                                 add_ground=False
                                 )
     elif mode == "mjx_jimp":
@@ -100,6 +100,12 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                             add_sky=False,
                                             reference_filter_cutoff_frequency=40.0,
                                             reference_filter_mode="none")
+    elif mode=="mj_jimp":
+        from adarl.adapters.MujocoJointImpedanceAdapter import MujocoJointImpedanceAdapter
+        adapter = MujocoJointImpedanceAdapter(  step_length_sec=stepLength_sec,
+                                                sim_step_dt=1/2048,
+                                                output_th_device=th_device,
+                                                reference_filter_cutoff_frequency=20.0)
     else:
         raise NotImplementedError(f"Requested unknown adapter '{mode}'")
     # env = CartpoleContinuousVecEnv(adapter=adapter,
@@ -304,7 +310,9 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                         "sparse_reward" :  True,
                         "img_obs" : False,
                         "img_obs_resolution" : (64,64),
-                        "img_obs_frame_stacking_size" : 3}
+                        "img_obs_frame_stacking_size" : 3,
+                        "cam_pos_randomization_grid_size_meters" : 0.0,
+                        "cam_pos_randomization_grid_steps" : 1}
     
     # Define the arguments for the evaluation environment(s)
     video_eval_env_builder_args = copy.deepcopy(env_builder_args)
@@ -314,9 +322,9 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
         "name" : "video_stoch",
         "deterministic" : False, # If using the policy as deterministic or not
         "eval_freq_ep" : num_envs*10, # How often perform evaluation runs are performed
-        "eval_eps" : 1, # how many episodes to run for each evaluation run
+        "eval_eps" : 16, # how many episodes to run for each evaluation run
         "env_builder_args" : video_eval_env_builder_args, # env args for the eval
-        "num_envs" : 32, # number of parallel eval envs
+        "num_envs" : 16, # number of parallel eval envs
     }
     eval_configs = [eval_conf_video_stoch]
     
@@ -328,7 +336,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                     env_builder_args = env_builder_args,
                     vec_env_builder=cartpole_venv_builder,
                     hyperparams = SAC_init_hparams( train_freq_vstep=16,
-                                                    grad_steps=5,
+                                                    grad_steps=32,
                                                     parallel_envs = num_envs,
                                                     batch_size = 512,
                                                     q_lr=0.0005,
@@ -337,7 +345,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                                                     gamma = th.as_tensor(0.99),
                                                     target_tau=0.005,
                                                     buffer_size=num_envs*max_steps_per_episode*100,
-                                                    total_steps = num_envs*max_steps_per_episode*50,
+                                                    total_steps = num_envs*max_steps_per_episode*500,
                                                     q_network_arch=[256,256],
                                                     policy_arch=[256,256],
                                                     learning_starts=max(2_000, num_envs*10),

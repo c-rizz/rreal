@@ -228,7 +228,7 @@ class NoveltyScaler():
         # HYPERPARAMETERS
         self._avgs_alpha_th = th.as_tensor(avg_alpha, device=th_device) # stats exponential moving average alpha
         self._reward_bonus_weight = th.as_tensor(reward_bonus_weight, device=th_device) # weight of the novelty-based reward bonus
-        self._epsilon = 1e-12 # to avoid numerical issues, carefule here, don't set it too big, losses easily get close to 1e-8
+        self._epsilon = 1e-14 # to avoid numerical issues, carefule here, don't set it too big, losses easily get close to 1e-8
         # Normalization and scaling hyperparameters:
         self._novelty_interest_std_threshold = reward_novelty_interest_std_threshold # We consider 'interesting' novelties that are at this multiple of std in the novelty distribution..
         self._novelty_std_squash = reward_novelty_std_squash # We squash the normalized novelty at this multiple of std (sigma), to reduce the impact of outliers
@@ -392,10 +392,12 @@ class NoveltyScaler():
         """
         if update_stats:
             self.update_stats(raw_novelty_batch, None)
-        # novelty_mean = th.mean(raw_novelty_batch)
+        novelty_mean = th.mean(raw_novelty_batch)
         # novelty_std = th.std(raw_novelty_batch)
-        novelty_mean = self._avg_novelty
+        # novelty_mean = self._avg_novelty
         novelty_kurtosis = self._current_kurtosis
+
+        #TODO: Could actually perform the weighting with better metrics, like trying to see if it is actually a proper chi squared with some metric
 
 
         novelty_weights = raw_novelty_batch / (novelty_mean + self._epsilon) # base weight multiplier
