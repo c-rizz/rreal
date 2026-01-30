@@ -38,6 +38,8 @@ from typing import Protocol
 import numpy as np
 import typing
 import math
+# from torch.optim import AdamW
+from rreal.utils.FixedAdamW import AdamW
 
 th._dynamo.config.compiled_autograd = True
 th._dynamo.config.allow_unspec_int_on_nn_module = True
@@ -47,6 +49,7 @@ th._dynamo.config.allow_unspec_int_on_nn_module = True
 # calling a compiled function, but its deeeeeeeep
 compile_mode="max-autotune" # reduce overhead doesn't seem to reduce overhead more than max-autotune
 disable_compile = False
+dynamic_compile = False
 fullgraph = False
 
 DictObs = dict[str, th.Tensor]
@@ -359,7 +362,7 @@ class Actor(nn.Module):
         log_std = log_std + th.log(self.action_scale) # scale the log_std with the action scale, so that it is relative to the action range
         return mean, log_std
 
-    @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, copy_outs=True, disable=disable_compile)
+    @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, copy_outs=True, disable=disable_compile,  dynamic=dynamic_compile)
     def sample_action(self, observation_batch, reference_action : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         batch_size = observation_batch.shape[0]
         mean, log_std = self(observation_batch, reference_action)
@@ -531,6 +534,8 @@ class SAC(RLAgent):
         self._alpha_updates = 0
         self._actor_updates = 0
         self._agent_updates = 0
+        self._needs_target_update = True
+
         self._share_actor_critic_feature_extractor = (actor_feature_extractor==critic_feature_extractor and
                                                       init_hparams.actor_observation_filter==init_hparams.critic_observation_filter)
         ggLog.info(f"SAC: independent_entropy_q = {self._hp.independent_entropy_q}")
@@ -571,7 +576,7 @@ class SAC(RLAgent):
                                         reward_space=self._hp.reward_space,
                                         independent_entropy_q=self._hp.independent_entropy_q)
         self._q_net_target.load_state_dict(self._q_net.state_dict())
-        self._q_optimizer = optim.AdamW(split_params_for_weight_decay(self._q_net, self._hp.critic_weight_decay), lr=self._hp.q_lr)
+        self._q_optimizer = AdamW(split_params_for_weight_decay(self._q_net, self._hp.critic_weight_decay), lr=self._hp.q_lr)
         self._actor = Actor(policy_arch=self._hp.policy_arch,
                             observation_size=actor_input_size,
                             action_size = self._hp.action_size,
@@ -604,14 +609,14 @@ class SAC(RLAgent):
             self._alpha = th.as_tensor(self._hp.constant_entropy_temperature).to(device=self._hp.torch_device, non_blocking=self._hp.torch_device.type=="cuda")
             self._log_alpha = self._alpha.log().detach()
         alpha_lr = self._hp.q_lr * self._hp.alpha_lr_factor
-        self._actor_and_alpha_optimizer = optim.AdamW([{ "params":[self._log_alpha], "lr":alpha_lr}]+
+        self._actor_and_alpha_optimizer = AdamW([{ "params":[self._log_alpha], "lr":alpha_lr}]+
                                                       split_params_for_weight_decay(self._actor,self._hp.actor_weight_decay,
                                                                                     extra_kwargs={"lr":self._hp.policy_lr}))
 
         if self._hp.feature_extractor_lr > 0:
             critic_extractor_params = list(self._critic_feature_extractor.parameters())
             if len(critic_extractor_params) > 0:
-                self._critic_feature_extractor_optimizer = optim.AdamW(critic_extractor_params, lr=self._hp.feature_extractor_lr)
+                self._critic_feature_extractor_optimizer = AdamW(critic_extractor_params, lr=self._hp.feature_extractor_lr)
             else:
                 self._critic_feature_extractor_optimizer = None
 
@@ -620,7 +625,7 @@ class SAC(RLAgent):
             else:
                 actor_extractor_params = list(self._actor_feature_extractor.parameters())
                 if len(actor_extractor_params) > 0:
-                    self._actor_feature_extractor_optimizer = optim.AdamW(actor_extractor_params, lr=self._hp.feature_extractor_lr)
+                    self._actor_feature_extractor_optimizer = AdamW(actor_extractor_params, lr=self._hp.feature_extractor_lr)
                 else:
                     self._actor_feature_extractor_optimizer = None
         else:
@@ -855,7 +860,7 @@ class SAC(RLAgent):
         q95 = batch.quantile(0.95, dim=0)
         return th.stack([mean, min, max, q05, q95], dim=0)
 
-    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)
+    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)
     def _compute_critic_loss(self,  transitions : DictTransitionBatch,
                                     get_stats : bool = True,
                                     critic_enc_obss : th.Tensor | None = None,
@@ -933,11 +938,11 @@ class SAC(RLAgent):
         #     stats = (None, None)
         return th.sum(per_reward_square_errs), stats
 
-    @th.compile(mode=compile_mode, fullgraph=False, disable=disable_compile)
+    @th.compile(mode=compile_mode, fullgraph=False, disable=disable_compile,  dynamic=dynamic_compile)
     def _critic_opt_step(self, q_loss : th.Tensor):
         simplified_clip_grad_norm_(list(self._q_net.parameters()), self._hp.max_grad_norm)
         self._q_optimizer.step()
-        if self._critic_updates % self._hp.targets_update_freq == 0:
+        if self._needs_target_update:
             # self._nvtx_start_range("_update_target_nets")
             self._update_target_nets()
             # self._nvtx_end_range("_update_target_nets")
@@ -1043,11 +1048,11 @@ class SAC(RLAgent):
         return th.stack([   act_log_prob.mean(),
                             act_log_prob.min(),
                             act_log_prob.max(),
-                            act_log_prob.quantile(0.95),
+                            act_log_prob.quantile(0.95), # has issues with dynamic compiles (which torch may decide to do sometimes)
                             act_log_prob.quantile(0.05),
                             -act_log_prob.mean()] )
 
-    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)
+    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)
     def _compute_alpha_loss(self, transitions : DictTransitionBatch,
                             actor_enc_obss : th.Tensor | None = None):
         with th.no_grad():
@@ -1060,7 +1065,7 @@ class SAC(RLAgent):
         return self._alpha_loss(act_log_prob), stats
     
 
-    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)
+    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile, dynamic=dynamic_compile)
     def _compute_actor_and_alpha_loss(self, transitions : DictTransitionBatch):
         # precompute actor encodings to save time
         actor_enc_obss = self._actor_feature_extractor.extract_features(self.get_actor_subobservation(transitions.observations))
@@ -1093,7 +1098,7 @@ class SAC(RLAgent):
                 actor_enc_next_obss = self._actor_feature_extractor.extract_features(self.get_actor_subobservation(transitions.next_observations))
         return actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss
     
-    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)
+    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)
     def _compute_all_losses(self, transitions):
         # Precompute encodings to save time
         actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss = self._compute_encodings(transitions)
@@ -1114,7 +1119,7 @@ class SAC(RLAgent):
             loss = actor_loss + q_loss
         return loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, (subq_square_errs, q_stats)
     
-    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile)
+    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
     def _actor_and_alpha_opt_step(self, actor_loss : th.Tensor, alpha_loss : th.Tensor | None):
         simplified_clip_grad_norm_(list(self._actor.parameters()), self._hp.max_grad_norm)
         simplified_clip_grad_norm_([self._log_alpha], self._hp.max_grad_norm)
@@ -1125,7 +1130,7 @@ class SAC(RLAgent):
             self._last_alpha_loss.copy_(alpha_loss.detach())
 
 
-    @th.compile(mode=compile_mode, fullgraph=False, disable=disable_compile)
+    @th.compile(mode=compile_mode, fullgraph=False, disable=disable_compile,  dynamic=dynamic_compile)
     def _all_opt_step(self, q_loss : th.Tensor,
                             actor_loss : th.Tensor,
                             alpha_loss : th.Tensor):
@@ -1191,7 +1196,7 @@ class SAC(RLAgent):
         else:
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
-    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile)        
+    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)        
     def _update_target_nets(self):
         for param, target_param in zip(self._q_net.parameters(), self._q_net_target.parameters()):
             self._target_update(param, target_param, self._hp.target_tau)
@@ -1216,7 +1221,7 @@ class SAC(RLAgent):
                 self._critic_feature_extractor_optimizer.zero_grad(set_to_none=True)
             if self._actor_feature_extractor_optimizer is not None:
                 self._actor_feature_extractor_optimizer.zero_grad(set_to_none=True)
-        update_actor_and_alpha = self._critic_updates % self._hp.policy_update_freq == 0
+        update_actor_and_alpha = self._agent_updates % self._hp.policy_update_freq == 0
         if update_actor_and_alpha:
             self._update_all(transitions)
             for _ in range(self._hp.policy_update_freq-1): # do the remaining updates
@@ -1227,6 +1232,7 @@ class SAC(RLAgent):
         if self._enable_feature_extractor_training:
             self._update_feature_extractor()
         self._agent_updates += 1
+        self._needs_target_update = self._critic_updates % self._hp.targets_update_freq == 0
         # self._nvtx_end_range(nvtx_range_name)
         # self._nvtx_stop()
         return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss

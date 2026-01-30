@@ -298,7 +298,7 @@ def sac_train(  seed : int,
                 validation_batch_size : int,
                 eval_configurations : list[dict] = [],
                 checkpoint_freq : int = 100,
-                collector_device : th.device | None = None,
+                collector_device : th.device | str | None = None,
                 buffer_device : th.device | str | None = None,
                 debug_level : int = 2,
                 no_wandb : bool = False,
@@ -331,6 +331,11 @@ def sac_train(  seed : int,
         collector_device = device
     if buffer_device is None:
         buffer_device = device
+
+    if isinstance(collector_device, str):
+        collector_device = th.device(collector_device)
+    if isinstance(buffer_device, str):
+        buffer_device = th.device(buffer_device) 
     if vec_env_builder is None:
         raise RuntimeError(f"You must specify either vec_env_builder")
     vec_env_builder = wrap_with_logger(vec_env_builder)

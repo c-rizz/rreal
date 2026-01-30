@@ -217,11 +217,12 @@ class NoveltyScaler():
         novelty_weight_squash : float, optional
             Squash factor for the novelty weights to reduce outlier impact, used when computing weights, by default 10.0
         """
-        self._n_updates = 0
-        self._avg_novelty : th.Tensor
-        self._avg_novelty_mean_of_square : th.Tensor
-        self._avg_novelty_mean_of_fourth_residual : th.Tensor
-        self._avg_novelty_mean_of_second_residual : th.Tensor
+        # self._n_updates = 0
+        self._stats_initialized = False
+        self._avg_novelty = th.as_tensor(float("nan"), device=th_device)
+        self._avg_novelty_mean_of_square = th.as_tensor(float("nan"), device=th_device)
+        self._avg_novelty_mean_of_fourth_residual = th.as_tensor(float("nan"), device=th_device)
+        self._avg_novelty_mean_of_second_residual = th.as_tensor(float("nan"), device=th_device)
         self._avg_raw_reward : th.Tensor
         self._current_kurtosis = th.as_tensor(float("nan"), device=th_device)
 
@@ -270,23 +271,26 @@ class NoveltyScaler():
         novelty_batch_mean_of_square = th.mean(th.square(raw_novelty_batch))
         novelty_batch_mean_of_fourth_residual = th.mean(th.pow(raw_novelty_batch - novelty_batch_mean, 4.0))
         novelty_batch_mean_of_second_residual = th.mean(th.pow(raw_novelty_batch - novelty_batch_mean, 2.0))
-        if self._n_updates == 0:
-            self._avg_novelty = novelty_batch_mean
-            self._avg_novelty_mean_of_square = novelty_batch_mean_of_square
-            self._avg_novelty_mean_of_fourth_residual = novelty_batch_mean_of_fourth_residual
-            self._avg_novelty_mean_of_second_residual = novelty_batch_mean_of_second_residual
-            if raw_reward_batch is not None:
-                self._avg_raw_reward = th.mean(raw_reward_batch)
+        if raw_reward_batch is not None:
+            avg_raw_reward = th.mean(raw_reward_batch)
+        if not self._stats_initialized:
+            self._stats_initialized = True
         else:
-            alpha = self._avgs_alpha_th
-            self._avg_novelty =                         alpha * self._avg_novelty +                         (1-alpha)*novelty_batch_mean
-            self._avg_novelty_mean_of_square =          alpha * self._avg_novelty_mean_of_square +          (1-alpha)*novelty_batch_mean_of_square
-            self._avg_novelty_mean_of_fourth_residual = alpha * self._avg_novelty_mean_of_fourth_residual + (1-alpha)*novelty_batch_mean_of_fourth_residual
-            self._avg_novelty_mean_of_second_residual = alpha * self._avg_novelty_mean_of_second_residual + (1-alpha)*novelty_batch_mean_of_second_residual
+            a = self._avgs_alpha_th            
+            novelty_batch_mean = a * self._avg_novelty + (1-a)*novelty_batch_mean
+            novelty_batch_mean_of_square = a * self._avg_novelty_mean_of_square + (1-a)*novelty_batch_mean_of_square
+            novelty_batch_mean_of_fourth_residual = a * self._avg_novelty_mean_of_fourth_residual + (1-a)*novelty_batch_mean_of_fourth_residual
+            novelty_batch_mean_of_second_residual = a * self._avg_novelty_mean_of_second_residual + (1-a)*novelty_batch_mean_of_second_residual
             if raw_reward_batch is not None:
-                self._avg_raw_reward =                      alpha * self._avg_raw_reward +                      (1-alpha)*th.mean(raw_reward_batch)
+                avg_raw_reward = a * self._avg_raw_reward + (1-a)*avg_raw_reward
+        self._avg_novelty.copy_(novelty_batch_mean)
+        self._avg_novelty_mean_of_square.copy_(novelty_batch_mean_of_square)
+        self._avg_novelty_mean_of_fourth_residual.copy_(novelty_batch_mean_of_fourth_residual)
+        self._avg_novelty_mean_of_second_residual.copy_(novelty_batch_mean_of_second_residual)
+        if raw_reward_batch is not None:
+            self._avg_raw_reward.copy_(avg_raw_reward)
         self._current_kurtosis = th.mean(self._avg_novelty_mean_of_fourth_residual)/th.square(th.mean(self._avg_novelty_mean_of_second_residual))
-        self._n_updates += 1
+        # self._n_updates += 1
 
     def current_kurtosis_estimate(self) -> th.Tensor:
         return self._current_kurtosis

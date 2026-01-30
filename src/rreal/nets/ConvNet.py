@@ -21,6 +21,7 @@ class ConvNet(nn.Module):
         self._image_height = image_height
         self._image_channels = image_channels
         self._torchDevice = torchDevice
+        padding_mode = "reflect" # It was "replicate" in the past, but it does not work nice with th.compile (tried patching it but no easy success)
 
         # self._output_width = 4
 
@@ -56,7 +57,7 @@ class ConvNet(nn.Module):
                               kernel_size=kernel_sizes[i],
                               stride=strides[i],
                               padding=paddings[i], bias=False,
-                              padding_mode="replicate")) #Halves width and height
+                              padding_mode=padding_mode)) #Halves width and height
             if use_batchnorm:
                 block.append(nn.BatchNorm2d(ch_num))
             block.append(nn.LeakyReLU())
