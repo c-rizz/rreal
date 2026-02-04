@@ -105,6 +105,28 @@ class Image_encoder(nn.Module):
                                     use_coord_conv = use_coord_conv,
                                     use_batchnorm = use_batchnorm,
                                     torchDevice = torchDevice)
+        elif self._backbone=="conv_smaller":
+            enc_layers_strides = None
+            if self._input_height==84 or self._input_width==84:
+                enc_layers_channels_num = [16, 32, 32, 32]
+                enc_layers_strides      = [2,  2,  2,  2]
+                enc_layers_paddings     = [0,       1,           1,           1]
+                #                          84x84 -> 41x41 + 2 -> 21x21 + 2 -> 11x11 -> 6x6
+            elif self._input_height==64 or self._input_width==64:
+                enc_layers_channels_num = [16, 32, 32, 32]
+                enc_layers_strides      = [2,  2,  2,  1]
+            else:
+                raise NotImplementedError(f"Resolution not supported by {self._backbone}. You asked for height={self._input_height}, width={self._input_width}")
+            encoder_head = ConvNet( image_channels = self._input_channels,
+                                    image_width = self._input_width,
+                                    image_height = self._input_height,
+                                    filters_number = enc_layers_channels_num,
+                                    paddings = enc_layers_paddings,
+                                    kernel_sizes = enc_layers_kernel_sizes,
+                                    strides = enc_layers_strides,
+                                    use_coord_conv = use_coord_conv,
+                                    use_batchnorm = use_batchnorm,
+                                    torchDevice = torchDevice)
         elif self._backbone=="conv_extrasmall":
             enc_layers_strides = None
             if self._input_height==84 or self._input_width==84:
@@ -113,7 +135,7 @@ class Image_encoder(nn.Module):
                 enc_layers_paddings     = [0,       1,           1,           1]
                 #                          84x84 -> 41x41 + 2 -> 21x21 + 2 -> 11x11 -> 6x6
             elif self._input_height==64 or self._input_width==64:
-                enc_layers_channels_num = [8, 16, 16, 32]
+                enc_layers_channels_num = [8, 16, 16, 16]
                 enc_layers_strides      = [2,  2,  2,  1]
             else:
                 raise NotImplementedError(f"Resolution not supported by {self._backbone}. You asked for height={self._input_height}, width={self._input_width}")

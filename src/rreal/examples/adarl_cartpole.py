@@ -72,7 +72,7 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                 log_freq_joints_trajectories = int(stepLength_sec/sim_dt),
                                 log_folder=run_folder,
                                 safe_revolute_dof_armature=0.01,
-                                opt_preset="fastest",
+                                opt_preset="faster",
                                 add_ground=False
                                 )
     elif mode == "mjx_jimp":

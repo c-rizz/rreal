@@ -493,7 +493,7 @@ class SAC(RLAgent):
         self._dtype = th.float32
         self._hp = SAC.Hyperparams(q_lr=init_hparams.q_lr,
                                    policy_lr = init_hparams.policy_lr,
-                                   gamma=gammas,
+                                   gamma=gammas.to(device=init_hparams.model_th_device),
                                    auto_entropy_temperature=init_hparams.auto_entropy_temperature,
                                    constant_entropy_temperature=init_hparams.constant_entropy_temperature,
                                    action_init=action_init,
@@ -877,7 +877,7 @@ class SAC(RLAgent):
             actions = transitions.actions
             batch_size = terminateds.size()[0]
             dbg_check_size(rewards, (batch_size, self._hp.rewards_num), "sac._compute_critic_loss: rewards has incorrect size")
-            dbg_check_size(terminateds, (batch_size, self._hp.rewards_num), "sac._compute_critic_loss: terminateds has incorrect size")
+            dbg_check_size(terminateds, (batch_size, 1), "sac._compute_critic_loss: terminateds has incorrect size")
             actor_next_obss = self.get_actor_subobservation(next_observations)
 
             q_size = self._hp.rewards_num+1 if self._hp.independent_entropy_q else self._hp.rewards_num
@@ -897,9 +897,11 @@ class SAC(RLAgent):
             
             dbg_check_size(q_next, (batch_size, q_size), "sac._compute_critic_loss: q_next has incorrect size")
             dbg_check_size(next_state_log_pi, (batch_size, ), "sac._compute_critic_loss: next_state_log_pi has incorrect size")
+            
+            reward_gammas = self._hp.gamma[:-1] if self._hp.independent_entropy_q else self._hp.gamma
             if self._hp.gamma_reward_scaling:
                 # rewards = rewards * (1 - self._hp.gamma)
-                rewards = rewards * (1 - self._hp.gamma)/(1-th.amax(self._hp.gamma)) # scale to keep similar reward magnitudes when using multiple
+                rewards = rewards * (1 - reward_gammas)/(1-th.amax(reward_gammas)) # scale to keep similar reward magnitudes when using multiple
 
             # ggLog.info(f"sac._compute_critic_loss: independent_entropy_q = {self._hp.independent_entropy_q}")
             # ggLog.info(f"sac._compute_critic_loss: next_state_log_pi size = {next_state_log_pi.size()}")
@@ -912,7 +914,10 @@ class SAC(RLAgent):
                 # Keep the q normal, and put the entropy term separately in the last q element
                 # so the only thing we must do is add the entropy term to the last q
                 q_next[:, -1] += -self._alpha*next_state_log_pi
-                td_q_values = rewards + (1 - terminateds) * self._hp.gamma * q_next
+                r = th.zeros_like(q_next)
+                r[:, :-1] = rewards
+                r[:, -1] = 0.0
+                td_q_values = r + (1 - terminateds) * self._hp.gamma * q_next
 
 
 

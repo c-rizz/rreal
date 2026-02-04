@@ -3,6 +3,7 @@ from rreal.utils.utils import build_mlp_net, Parallel
 from dataclasses import dataclass
 from typing import Literal
 from adarl.utils.dbg import ggLog
+from rreal.utils.FixedAdamW import AdamW
 
 class RNDNoveltyEstimator(th.nn.Module):
 
@@ -34,7 +35,8 @@ class RNDNoveltyEstimator(th.nn.Module):
                         ensemble_size : int = 3,
                         th_device : th.device = th.device("cuda"),
                         dict_obs_image_key : str | int = "image",
-                        dict_obs_vector_key : str | int = "vector"):
+                        dict_obs_vector_key : str | int = "vector",
+                        use_torch_compile : bool = False):
         super().__init__()
         self._hyperparams = self.Hyperparams(   vec_encoder_arch=vec_encoder_arch,
                                                 vec_encoding_size=vec_encoding_size,
@@ -50,6 +52,9 @@ class RNDNoveltyEstimator(th.nn.Module):
                                                 dict_obs_image_key=dict_obs_image_key,
                                                 dict_obs_vector_key=dict_obs_vector_key)
         self.build_models()
+        if use_torch_compile:
+            self._compute_loss = th.compile(self._compute_loss)
+            self._optimizer_step = th.compile(self._optimizer_step)
 
     def _build_net(self):
         if self._hyperparams.img_encoding_size == 0:
@@ -95,7 +100,7 @@ class RNDNoveltyEstimator(th.nn.Module):
             p.requires_grad_(False)
         self._predictor_net = self._build_net()
 
-        self._optimizer = th.optim.Adam(self._predictor_net.parameters(), lr = self._hyperparams.learning_rate)
+        self._optimizer = AdamW(self._predictor_net.parameters(), lr = self._hyperparams.learning_rate)
         self._optimizer.zero_grad()
 
     def _compute_error(self, dict_obs_batch : dict[str|int,th.Tensor] | None = None, vector_obs_batch : th.Tensor | None = None, img_obs_batch : th.Tensor | None = None) -> th.Tensor:
@@ -143,6 +148,13 @@ class RNDNoveltyEstimator(th.nn.Module):
         # we return a [batch_size] tensor. i.e. we return the novelty for each sample
         return th.mean(th.square(error),dim=(1,2)) 
 
+    def _compute_loss(self, dict_obs_batch : dict[str|int,th.Tensor] | None = None, vector_obs_batch : th.Tensor | None = None, img_obs_batch : th.Tensor | None = None) -> th.Tensor:
+        square_errors = self(dict_obs_batch=dict_obs_batch, vector_obs_batch=vector_obs_batch, img_obs_batch=img_obs_batch)
+        loss = th.mean(square_errors)
+        return loss
+
+    def _optimizer_step(self):
+        self._optimizer.step()
 
     def train_model(self, dict_obs_batch : dict[str|int,th.Tensor] | None = None, vector_obs_batch : th.Tensor | None = None, img_obs_batch : th.Tensor | None = None):
         # ggLog.info("RNDNoveltyEstimator.train_model(): Training RND predictor")
@@ -150,10 +162,10 @@ class RNDNoveltyEstimator(th.nn.Module):
         # ggLog.info(f"RNDNoveltyEstimator.train_model(): dict_obs_batch[{self._hyperparams.dict_obs_vector_key}].size() = {dict_obs_batch[self._hyperparams.dict_obs_vector_key].size()}")          
         self.train() # Put module in train mode
         self._optimizer.zero_grad(set_to_none=True)
-        square_errors = self(dict_obs_batch=dict_obs_batch, vector_obs_batch=vector_obs_batch, img_obs_batch=img_obs_batch)
-        loss = th.mean(square_errors)
+        loss = self._compute_loss(dict_obs_batch=dict_obs_batch, vector_obs_batch=vector_obs_batch, img_obs_batch=img_obs_batch)
         loss.backward()
-        self._optimizer.step()
+        with th.no_grad():
+            self._optimizer_step()
         return loss
         
 
