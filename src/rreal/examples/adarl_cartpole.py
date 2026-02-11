@@ -130,7 +130,7 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                                                         grid_steps=env_builder_args.pop("cam_pos_randomization_grid_steps")))
     env = ObsToDict(env=env)
     vrunner = EnvRunner(env=env, verbose=False, quiet=quiet, episodeInfoLogFile=run_folder+"/vec_runner.log",
-                        render_envs=[0], autoreset=autoreset,
+                        ui_render_envs=[0], autoreset=autoreset,
                         log_freq = max_steps)
     vrunner = EnvRunnerRecorderWrapper(vrunner,
                                     fps = 1/stepLength_sec,

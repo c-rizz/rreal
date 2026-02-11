@@ -87,6 +87,23 @@ def compare_dicts(d1 : dict, d2 : dict) -> tuple[bool, str]:
 def nop_func(arg1):
     pass
 
+def safe_quantile(x : th.Tensor, q : float, dim : int = 0) -> th.Tensor:
+    """Quantile keeps giving issues with torch compile, this function tries to go around the problem
+
+    Parameters
+    ----------
+    x : th.Tensor
+        The input tensor.
+    q : float
+        The quantile to compute, should be between 0 and 1.
+    dim : int, optional
+        The dimension along which to compute the quantile, by default 0
+    Returns
+    -------
+    th.Tensor
+        The computed quantile values.
+    """
+    return th.kthvalue(x, k=int(q * x.size(dim)), dim=dim).values
 
 
 @typing.runtime_checkable
@@ -856,8 +873,8 @@ class SAC(RLAgent):
         mean = batch.mean(dim=0)
         min = batch.amin(dim=0)
         max = batch.amax(dim=0)
-        q05 = batch.quantile(0.05, dim=0)
-        q95 = batch.quantile(0.95, dim=0)
+        q05 = safe_quantile(batch, 0.05)
+        q95 = safe_quantile(batch, 0.95)
         return th.stack([mean, min, max, q05, q95], dim=0)
 
     @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)
@@ -1029,13 +1046,13 @@ class SAC(RLAgent):
             actor_stats = th.stack([act_mean.mean(),
                                     act_mean.min(),
                                     act_mean.max(),
-                                    act_mean.quantile(0.95),
-                                    act_mean.quantile(0.05),
+                                    safe_quantile(act_mean, 0.95),
+                                    safe_quantile(act_mean, 0.05),
                                     act_logstd.mean(),
                                     act_logstd.min(),
                                     act_logstd.max(),
-                                    act_logstd.quantile(0.95),
-                                    act_logstd.quantile(0.05)])
+                                    safe_quantile(act_logstd, 0.95),
+                                    safe_quantile(act_logstd, 0.05)])
         else:
             actor_stats = None
         return ((self._alpha * act_log_prob) - min_qs_pi).mean(), actor_stats
@@ -1053,8 +1070,8 @@ class SAC(RLAgent):
         return th.stack([   act_log_prob.mean(),
                             act_log_prob.min(),
                             act_log_prob.max(),
-                            act_log_prob.quantile(0.95), # has issues with dynamic compiles (which torch may decide to do sometimes)
-                            act_log_prob.quantile(0.05),
+                            safe_quantile(act_log_prob, 0.95), # has issues with dynamic compiles (which torch may decide to do sometimes)
+                            safe_quantile(act_log_prob, 0.05),
                             -act_log_prob.mean()] )
 
     @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)

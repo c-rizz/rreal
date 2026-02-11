@@ -144,6 +144,8 @@ class ExperienceCollector(ABC):
                 t_post_add = time.monotonic()
 
                 map2_tensor_tree(self._current_obs,next_input_obss, lambda l1, l2: l1.copy_(l2))
+                global_vstep_count += num_envs
+                
                 t_post_copy = time.monotonic()
 
                 next_input_obss, rewards, terminations, truncations, infos = None, None, None, None, None # to avoid inadvertly using them
