@@ -106,3 +106,54 @@ def simplified_clip_grad_norm_(
     return total_norm
 
 
+def copy_net_state(src : th.nn.Module, dst : th.nn.Module, strict = True):
+    if strict:
+        param_mapping = {}
+        buff_mapping = {}
+        for name, src_param in src.named_parameters():
+            dst_param = dst.get_parameter(name)
+            param_mapping[name] = (src_param, dst_param)
+        for name, src_buffer in src.named_buffers():
+            dst_buffer = dst.get_buffer(name)
+            buff_mapping[name] = (src_buffer, dst_buffer)
+        for name, dst_param in dst.named_parameters():
+            if name not in param_mapping:
+                raise KeyError(f"Key {name} found in destination state dict but not in source state dict")
+        for name, dst_buffer in dst.named_buffers():
+            if name not in buff_mapping:
+                raise KeyError(f"Key {name} found in destination state dict but not in source state dict")
+        for _,(src_tensor, dst_tensor) in param_mapping.items():
+            dst_tensor.data.copy_(src_tensor.data)
+        for _,(src_tensor, dst_tensor) in buff_mapping.items():
+            dst_tensor.data.copy_(src_tensor.data)
+    else:
+        for name, src_param in src.named_parameters():
+            dst.get_parameter(name).data.copy_(src_param.data)
+        for name, src_buffer in src.named_buffers():
+            dst.get_buffer(name).data.copy_(src_buffer.data)
+
+def update_net_state(src : th.nn.Module, dst : th.nn.Module, strict = True, tau = 0.005):
+    if strict:
+        param_mapping = {}
+        buff_mapping = {}
+        for name, src_param in src.named_parameters():
+            dst_param = dst.get_parameter(name)
+            param_mapping[name] = (src_param, dst_param)
+        for name, src_buffer in src.named_buffers():
+            dst_buffer = dst.get_buffer(name)
+            buff_mapping[name] = (src_buffer, dst_buffer)
+        for name, dst_param in dst.named_parameters():
+            if name not in param_mapping:
+                raise KeyError(f"Key {name} found in destination state dict but not in source state dict")
+        for name, dst_buffer in dst.named_buffers():
+            if name not in buff_mapping:
+                raise KeyError(f"Key {name} found in destination state dict but not in source state dict")
+        for _,(src_tensor, dst_tensor) in param_mapping.items():
+            dst_tensor.data.copy_(tau * src_tensor.data + (1-tau) * dst_tensor.data)
+        for _,(src_tensor, dst_tensor) in buff_mapping.items():
+            dst_tensor.data.copy_(tau * src_tensor.data + (1-tau) * dst_tensor.data)
+    else:
+        for name, src_param in src.named_parameters():
+            dst.get_parameter(name).data.copy_(src_param.data * tau + dst.get_parameter(name).data * (1-tau))
+        for name, src_buffer in src.named_buffers():
+            dst.get_buffer(name).data.copy_(src_buffer.data * tau + dst.get_buffer(name).data * (1-tau))

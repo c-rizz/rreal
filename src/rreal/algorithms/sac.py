@@ -491,6 +491,7 @@ class SAC(RLAgent):
 
         gammas = init_hparams.gamma
         ggLog.info(f"reward_names = {reward_names}")
+        
         if isinstance(gammas, Mapping):
             gammas = th.as_tensor([gammas[rn] for rn in reward_names], dtype=th.float32)
         elif isinstance(gammas, th.Tensor):
@@ -960,7 +961,7 @@ class SAC(RLAgent):
         #     stats = (None, None)
         return th.sum(per_reward_square_errs), stats
 
-    @th.compile(mode=compile_mode, fullgraph=False, disable=disable_compile,  dynamic=dynamic_compile)
+    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
     def _critic_opt_step(self, q_loss : th.Tensor):
         simplified_clip_grad_norm_(list(self._q_net.parameters()), self._hp.max_grad_norm)
         self._q_optimizer.step()
@@ -1152,7 +1153,7 @@ class SAC(RLAgent):
             self._last_alpha_loss.copy_(alpha_loss.detach())
 
 
-    @th.compile(mode=compile_mode, fullgraph=False, disable=disable_compile,  dynamic=dynamic_compile)
+    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
     def _all_opt_step(self, q_loss : th.Tensor,
                             actor_loss : th.Tensor,
                             alpha_loss : th.Tensor):
