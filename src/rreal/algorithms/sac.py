@@ -760,7 +760,7 @@ class SAC(RLAgent):
             self._actor_feature_extractor.save_to_archive(archive, name="actor_feature_extractor")
             # th.save( self._feature_extractor.state_dict(), path+".fe_state.pth")
         
-    def _check_feature_extractor(self, current_featur_extractor, loaded_fe_name, loaded_fe_args):
+    def _check_feature_extractor(self, current_featur_extractor : FeatureExtractor, loaded_fe_name, loaded_fe_args):
         if current_featur_extractor.__class__.__name__ != loaded_fe_name:
             ggLog.warn(f"feature_extractor_class_name of loaded model differs from that of self.\n"
                        f"loaded = {loaded_fe_name}, self's = {self._critic_feature_extractor.__class__.__name__}")

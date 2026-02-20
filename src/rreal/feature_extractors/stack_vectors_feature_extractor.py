@@ -12,6 +12,8 @@ from typing_extensions import override
 import zipfile
 from adarl.utils.running_mean_std import RunningNormalizer
 from adarl.utils.utils import get_func_input_args
+import hashlib
+import pickle
 
 class StackVectorsFeatureExtractor(FeatureExtractor):
     def __init__(self,  observation_space : gym.spaces.Space,
@@ -69,6 +71,7 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         extra = {}
         extra["init_args"] = self._init_args
         extra["class_name"] = self.__class__.__name__
+        extra["hashes"] = get_model_hashes(self)
         # ggLog.info(f"saving extra={extra}")
         with archive.open(f"{name}.extra.fe.yaml", "w") as init_args_yamlfile:
             init_args_yamlfile.write(yaml.dump(extra,default_flow_style=None).encode("utf-8"))
@@ -81,3 +84,7 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
     
 
 register_feature_extractor_class(StackVectorsFeatureExtractor)
+
+
+def get_model_hashes(model : nn.Module):
+    return {n:hashlib.sha256(pickle.dumps(v.cpu().numpy().tobytes())).hexdigest() for n,v in model.state_dict().items()}
