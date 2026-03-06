@@ -556,7 +556,7 @@ class SAC(RLAgent):
 
         self._share_actor_critic_feature_extractor = (actor_feature_extractor==critic_feature_extractor and
                                                       init_hparams.actor_observation_filter==init_hparams.critic_observation_filter)
-        ggLog.info(f"SAC: independent_entropy_q = {self._hp.independent_entropy_q}")
+        # ggLog.info(f"SAC: independent_entropy_q = {self._hp.independent_entropy_q}")
         if self._share_actor_critic_feature_extractor:
             if critic_feature_extractor is None or actor_feature_extractor is None: # second considition is just for typing
                 self._critic_feature_extractor = StackVectorsFeatureExtractor(observation_space=critic_observation_space,

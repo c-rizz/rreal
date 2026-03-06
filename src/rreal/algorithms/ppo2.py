@@ -3,8 +3,8 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from tracemalloc import start
 
-import gymnasium as gym
 import torch as th
 import torch.nn as nn
 import torch.optim as optim
@@ -30,6 +30,10 @@ from rreal.utils.utils import build_mlp_net
 import jax.profiler 
 from rreal.utils.FixedAdamW import AdamW
 from rreal.utils.utils import simplified_clip_grad_norm_
+import wandb
+from adarl.utils.tensor_trees import TensorTree
+import hdf5plot.save
+import adarl.utils.spaces as spaces
 
 th._dynamo.config.compiled_autograd = True
 
@@ -44,7 +48,7 @@ def ortho_layer_init_(layer, std=2.0, bias_const=0.0):
 
 
 class PPORolloutBuffer():
-    def __init__(self, num_steps, num_envs, obs_space : gym.spaces.Dict, act_space_shape, device):
+    def __init__(self, num_steps, num_envs, obs_space : spaces.gym_spaces.Dict, act_space_shape, device):
         self.num_steps = num_steps
         self.num_envs = num_envs
         self._storage_th_device = device
@@ -158,7 +162,7 @@ class PPO(RLAgent):
         minibatch_num: int | None
         th_device : th.device
         action_len : int
-        observation_space : gym.spaces.Space
+        observation_space : spaces.gym_spaces.Space
         action_min : th.Tensor
         action_max : th.Tensor
         q_lr : float
@@ -196,18 +200,20 @@ class PPO(RLAgent):
         """Subset of observation keys visible to the actor. Requires Dict observations."""
         critic_observation_filter : list[str] | None = None
         """Subset of observation keys visible to the critic. Requires Dict observations."""
+        init_actor_logstd : float = 0.0
+        """The initial value for the actor log standard deviation parameters"""
 
     _hp : Final[Hyperparams]
 
     def _get_filtered_observation_space(self,
-                                        observation_space : gym.spaces.Space,
+                                        observation_space : spaces.gym_spaces.Space,
                                         obs_filter : list[str] | None,
-                                        role : str) -> gym.spaces.Space:
+                                        role : str) -> spaces.gym_spaces.Space:
         if obs_filter is None:
             return observation_space
-        if not isinstance(observation_space, gym.spaces.Dict):
+        if not isinstance(observation_space, spaces.gym_spaces.Dict):
             raise RuntimeError(f"observation space must be a Dict to use {role}_observation_filter, but it's a {type(observation_space)}")
-        return gym.spaces.Dict({k:v for k,v in observation_space.spaces.items() if k in obs_filter})
+        return spaces.ThDict({k:v for k,v in observation_space.spaces.items() if k in obs_filter})
 
     def __init__(self, hyperparams : Hyperparams,
                  feature_extractor : FeatureExtractor | None = None,
@@ -262,7 +268,7 @@ class PPO(RLAgent):
                                     layer_init_func=lambda m: ortho_layer_init_(m,1),
                                     last_layer_init_func=lambda m: ortho_layer_init_(m,0.01)).to(device=self._hp.th_device)
         
-        self.actor_logstd = nn.Parameter(th.zeros(1, self._hp.action_len, device=self._hp.th_device))
+        self.actor_logstd = nn.Parameter(th.full((1, self._hp.action_len), self._hp.init_actor_logstd, device=self._hp.th_device))
         if self._hp.q_lr is not None and self._hp.q_lr!=self._hp.policy_lr:
             raise NotImplementedError("Different learning rates for Q and policy are not supported yet.")
         self._optimizer = AdamW(self.parameters(), lr=self._hp.policy_lr, eps=1e-8)
@@ -288,13 +294,24 @@ class PPO(RLAgent):
         self._policy_losses_sum = th.zeros((), device=self._hp.th_device)
         self._value_losses_sum = th.zeros((), device=self._hp.th_device)
         self._entropy_losses_sum = th.zeros((), device=self._hp.th_device)
+        self._last_iter_policy_losses = th.zeros((self.__minibatch_num,), device=self._hp.th_device)
+        self._last_iter_value_losses = th.zeros((self.__minibatch_num,), device=self._hp.th_device)
+        self._last_iter_entropy_losses = th.zeros((self.__minibatch_num,), device=self._hp.th_device)
         self.__stats = {"tot_grad_steps_count":th.as_tensor(0, device=self._hp.th_device),
                         "q_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
                         "actor_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
                         "entropy_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
+                        # "all_q_losses":[],
+                        # "all_policy_losses":[],
+                        # "all_entropy_losses":[],
                         "avg_q_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
                         "avg_actor_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
-                        "avg_entropy_loss":th.as_tensor(float("nan"), device=self._hp.th_device)}
+                        "avg_entropy_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
+                        "avg_actor_logstd":th.as_tensor(float("nan"), device=self._hp.th_device),}
+        self._log_full_loss_curve = False
+        self._log_highest_q_loss_obss = False
+        self._loss_table = wandb.Table(columns=["ppo_grad_step", "policy_loss", "value_loss", "entropy_loss", "loss"], log_mode="MUTABLE")
+        
 
     @override
     def input_device(self):
@@ -340,7 +357,7 @@ class PPO(RLAgent):
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(enc_critic_obs_batch), action_mean
 
     @th.compile(fullgraph=True, mode="max-autotune")
-    def _compute_losses(self, iteration, b_inds, b_actor_encobs, b_critic_encobs, b_actions, b_logprobs, b_values, b_advantages, b_returns):
+    def _compute_losses(self, iteration, b_inds, b_actor_encobs, b_critic_encobs, b_actions, b_logprobs, b_values, b_advantages, b_returns) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor | None]:
 
         # extract minibatch from batch
         start = iteration*self._hp.minibatch_size
@@ -379,21 +396,27 @@ class PPO(RLAgent):
             )
             v_loss_clipped = (v_clipped - mb_returns) ** 2
             v_loss_max = th.max(v_loss_unclipped, v_loss_clipped)
-            value_loss = 0.5 * v_loss_max.mean()
+            vec_value_loss = 0.5 * v_loss_max
         else:
-            value_loss = 0.5 * ((newvalues - mb_returns) ** 2).mean()
+            vec_value_loss = 0.5 * ((newvalues - mb_returns) ** 2)
+        value_loss = vec_value_loss.mean()
+        if not self._log_highest_q_loss_obss:
+            vec_value_loss = None
 
-        entropy_loss = entropies.mean()
-        loss = policy_loss - self._hp.loss_entropy_weight * entropy_loss + value_loss * self._hp.loss_value_weight
+        entropy_loss = - entropies.mean()
+        loss = policy_loss + self._hp.loss_entropy_weight * entropy_loss + value_loss * self._hp.loss_value_weight
 
         with th.no_grad():
             self._policy_losses_sum += policy_loss
             self._value_losses_sum += value_loss
             self._entropy_losses_sum += entropy_loss
-        return loss, policy_loss, value_loss, entropy_loss
+        self._last_iter_policy_losses[iteration] = policy_loss.detach()
+        self._last_iter_value_losses[iteration] = value_loss.detach()
+        self._last_iter_entropy_losses[iteration] = entropy_loss.detach()
+        return loss, policy_loss, value_loss, entropy_loss, vec_value_loss
 
     def _compute_encoded_obss(self, raw_obss, num_steps, num_envs):
-        raw_obss = map_tensor_tree(raw_obss, lambda l: l.flatten(0,1))
+        raw_obss = map_tensor_tree(raw_obss, lambda l: l.flatten(0,1)) # flattn the first two dimensions (num_steps+1, num_envs)
         actor_obss = self.get_actor_subobservation(raw_obss)
         critic_obss = self.get_critic_subobservation(raw_obss)
         enc_actor_obss = self._actor_feature_extractor.extract_features(actor_obss)
@@ -416,7 +439,13 @@ class PPO(RLAgent):
         returns = advantages + values[:-1]
         return returns, advantages
 
-    def _reshape_batch_data(self, enc_actor_obss, enc_critic_obss, actions, logprobs, values, advantages, returns):
+    def _reshape_batch_data(self,   enc_actor_obss : TensorTree[th.Tensor],
+                                    enc_critic_obss : TensorTree[th.Tensor],
+                                    actions : th.Tensor,
+                                    logprobs : th.Tensor,
+                                    values : th.Tensor,
+                                    advantages : th.Tensor,
+                                    returns : th.Tensor) -> tuple[TensorTree[th.Tensor], TensorTree[th.Tensor], th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         b_actor_encobs  = enc_actor_obss[:self._hp.num_steps].view((self.__batch_size,) + enc_actor_obss.size()[2:])
         b_critic_encobs = enc_critic_obss[:self._hp.num_steps].view((self.__batch_size,) + enc_critic_obss.size()[2:])
         b_logprobs      = logprobs[:self._hp.num_steps].view(self.__batch_size)
@@ -441,11 +470,45 @@ class PPO(RLAgent):
         simplified_clip_grad_norm_(list(self.parameters()), self._hp.max_grad_norm)
         self._optimizer.step()
 
+    def _save_worst_observations(self, vec_value_loss, raw_obss, mb_inds, worst_num=5):
+        with th.no_grad():
+            folder = adarl.utils.session.default_session.log_folder()+"/ppo_logs"
+            os.makedirs(folder, exist_ok=True)
+            ggLog.info(f"Saving worst {worst_num} obs with value loss of size {vec_value_loss.shape}...")
+            top_indices = th.argsort(vec_value_loss, dim=0, descending=True)[:worst_num]
+            for i in range(worst_num):
+                index : int = top_indices[i].item()
+                # observations are trajectories of shape (num_steps+1, num_envs, ...)
+                # The value losses, correspond to obs-action pairs in the trajectories, however, the last observation
+                # in each trajectory has been dropped and then, they have been shuffled and cut in minibatches.
+                #  we have (num_steps, num_envs) value_losses.
+                # So to get the raw_obs for a specific loss, we have num_step=index//num_envs and env_index=index%numenvs
+                # We want to save the whole trajectory, together with the loss trajectory
+                b_index = mb_inds[index]
+                env_index = b_index % self._hp.num_envs
+                step_index = b_index // self._hp.num_envs
+                obs_traj = {k:v[:-1, env_index] for k,v in raw_obss.items()} # we save the obs at t and t+1, to have the obs corresponding to the action that generated the loss, and the next obs to see if it's a terminal state or not
+                # loss_traj = vec_value_loss.view((self._hp.num_steps, self._hp.num_envs))[:, env_index]
+                bad_loss_mask = th.zeros((self._hp.num_steps,), device=vec_value_loss.device)
+                bad_loss_mask[step_index] = 1.0
+                vl = vec_value_loss[index].item()
+                if isinstance(self._critic_observation_space, spaces.ThDict):
+                    obs_labels = {k:v.labels for k,v in self._critic_observation_space.spaces.items()}
+                else:
+                    obs_labels = None
+                data = {"obs_traj": obs_traj,
+                        # "loss_traj": loss_traj,
+                        "bad_loss_mask": bad_loss_mask}
+                data = map_tensor_tree(data, lambda t: t.cpu().numpy())
+                hdf5plot.save.save_dict(folder+f"/worst_obs_{self._grad_step_count}_{i}_{vl}.hdf5",
+                                        data=data,
+                                        labels={"obs_traj": obs_labels})
+
     @override
     def train_model(self, buff : PPORolloutBuffer):
         # t_0 = time.monotonic()
         raw_obss, actions, rewards, dones, logprobs, values = buff.get_rollout_data()
-        # flatten the batch
+        # prepare encoded observations, returns and advantages, and flatten the numenv and trajectory dimensions together
         (b_actor_encobs,
          b_critic_encobs,
          b_logprobs,
@@ -459,6 +522,9 @@ class PPO(RLAgent):
         self._policy_losses_sum.fill_(0)
         self._value_losses_sum.fill_(0)
         self._entropy_losses_sum.fill_(0)
+        self._last_iter_policy_losses.fill_(0)
+        self._last_iter_value_losses.fill_(0)
+        self._last_iter_entropy_losses.fill_(0)
         for epoch in range(self._hp.update_epochs):
             th.randperm(self.__batch_size, out=b_inds, device=self._hp.th_device)
             # t_it0 = time.monotonic()
@@ -470,7 +536,7 @@ class PPO(RLAgent):
                 #     approx_kl = ((ratio - 1) - logratio).mean()
                 #     clipfracs += [((ratio - 1.0).abs() > self._hp.clip_coef).float().mean().item()]
 
-                loss, policy_loss, value_loss, entropy_loss = self._compute_losses( i,
+                loss, policy_loss, value_loss, entropy_loss, vec_value_losses = self._compute_losses( i,
                                                                                     b_inds,
                                                                                     b_actor_encobs,
                                                                                     b_critic_encobs,
@@ -481,22 +547,35 @@ class PPO(RLAgent):
                                                                                     b_returns)
                 self._optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-
+                if self._log_full_loss_curve:
+                    self._loss_table.add_data(self._grad_step_count, policy_loss.detach().clone(), value_loss.detach().clone(), entropy_loss.detach().clone(), loss.detach().clone())
                 with th.no_grad():
                     self._opt_step()
+                if self._log_highest_q_loss_obss:
+                    if self._grad_step_count % 1000 == 10:
+                        start = i*self._hp.minibatch_size
+                        end = start + self._hp.minibatch_size
+                        mb_inds = b_inds[start:end]
+                        self._save_worst_observations(vec_value_losses, raw_obss, mb_inds)
                 self._grad_step_count_th += 1
-                self._grad_step_count += 1        
+                self._grad_step_count += 1
             # if self._hp.target_kl is not None and approx_kl > self._hp.target_kl:
             #     break
-
+        if self._log_full_loss_curve:
+            wandb.log({"ppo_losses": wandb.plot.line(self._loss_table, "ppo_grad_step", "loss", title="Custom Y vs X Line Plot 2")})
         tot_iterations = self._hp.update_epochs * self.__minibatch_num
         self.__stats.update({"tot_grad_steps_count":self._grad_step_count_th,
                             "q_loss":value_loss,
                             "actor_loss":policy_loss,
                             "entropy_loss":entropy_loss,
+                            # "all_q_losses":self._last_iter_value_losses,
+                            # "all_policy_losses":self._last_iter_policy_losses,
+                            # "all_entropy_losses":self._last_iter_entropy_losses,
                             "avg_q_loss":self._value_losses_sum/tot_iterations,
                             "avg_actor_loss":self._policy_losses_sum/tot_iterations,
-                            "avg_entropy_loss":self._entropy_losses_sum/tot_iterations})        # t_f = time.monotonic()
+                            "avg_entropy_loss":self._entropy_losses_sum/tot_iterations,
+                            "avg_actor_logstd":self.actor_logstd.mean()})
+        # t_f = time.monotonic()
         # ggLog.info(f"took {t_f-t_0}, train={t_f-t_pretrain}, adv={t_postadv-t_postenc}, its={tit/self._hp.update_epochs}, samp={tit_sample} net={tit_net} comp={tit_comp} back={tit_back} op={tit_op}")
         # y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         # var_y = np.var(y_true)
@@ -563,10 +642,10 @@ class Collector():
         obs_space = self._vec_env.unwrapped.single_observation_space
         self._num_envs = self._vec_env.unwrapped.num_envs
 
-        if not isinstance(action_space, (gym.spaces.Box, gym.spaces.box.Box)):
+        if not isinstance(action_space, (spaces.gym_spaces.Box, spaces.gym_spaces.box.Box)):
             raise NotImplementedError(f"unsupported action space {action_space} of type {type(action_space)}")
         self._single_action_space = action_space
-        # if not isinstance(obs_space, gym.spaces.Dict):
+        # if not isinstance(obs_space, spaces.gym_spaces.Dict):
         #     raise NotImplementedError(f"unsupported observation space {obs_space}")
         self._single_observation_space = obs_space
 
@@ -594,9 +673,13 @@ class Collector():
             step_start_obs = map_tensor_tree(self._latest_obs, lambda a: th.as_tensor(a, device = agent.input_device()))
             prev_done = self._latest_done
             for step in range(0, vsteps_to_collect):
+                # print(f"collecting step {step}/{vsteps_to_collect}")
                 th.compiler.cudagraph_mark_step_begin()
                 # ALGO LOGIC: action logic
                 action, logprob, _, value, _ = agent.get_action_logprob_entropy_critic_mean(obs_batch=step_start_obs)
+                value = value.clone()
+                action = action.clone()
+                logprob = logprob.clone()
 
                 # TRY NOT TO MODIFY: execute the game and log data.
                 action = action.to(device=self._env_device)
@@ -619,6 +702,8 @@ class Collector():
 
             self._latest_done = done
             self._latest_obs = next_obs
+
+            th.compiler.cudagraph_mark_step_begin()
 
             self._latest_obs = map_tensor_tree(self._latest_obs, lambda a: th.as_tensor(a, device = agent.input_device()))
             action, logprob, _, value, _ = agent.get_action_logprob_entropy_critic_mean(obs_batch=self._latest_obs)
@@ -664,20 +749,21 @@ def train_on_policy(collector : Collector,
     last_log_steps = float("-inf")
     start_time = time.monotonic()
     while global_step < train_steps and not adarl.utils.session.default_session.is_shutting_down():
-        callback.on_collection_start()
-        t0 = time.monotonic()
-        terminated_eps = collector.collect(buffer=buffer, vsteps_to_collect=num_steps, agent=model)
-        t_post_coll = time.monotonic()
-        t_coll_sl += t_post_coll-t0
-        global_step += num_steps*collector.num_envs()
-        steps_sl += num_steps*collector.num_envs()
-        ep_counter += terminated_eps
-        adarl.utils.session.default_session.run_info["collected_episodes"].value = ep_counter
-        adarl.utils.session.default_session.run_info["collected_steps"].value = global_step
-        callback.on_collection_end(collected_episodes=int(terminated_eps.item()),
-                                   collected_steps=num_steps,
-                                   collected_data=None)
-        t_post_cb = time.monotonic()
+        with th.no_grad():
+            callback.on_collection_start()
+            t0 = time.monotonic()
+            terminated_eps = collector.collect(buffer=buffer, vsteps_to_collect=num_steps, agent=model)
+            t_post_coll = time.monotonic()
+            t_coll_sl += t_post_coll-t0
+            global_step += num_steps*collector.num_envs()
+            steps_sl += num_steps*collector.num_envs()
+            ep_counter += terminated_eps
+            adarl.utils.session.default_session.run_info["collected_episodes"].value = ep_counter
+            adarl.utils.session.default_session.run_info["collected_steps"].value = global_step
+            callback.on_collection_end(collected_episodes=int(terminated_eps.item()),
+                                    collected_steps=num_steps,
+                                    collected_data=None)
+            t_post_cb = time.monotonic()
         # import torch._dynamo as dynamo
         # explanation = dynamo.explain(model.train_model)(buffer)
         # print(explanation)
@@ -746,6 +832,7 @@ class PPO_hyperparams():
     th_device : th.device
     total_steps : int
     update_epochs : int
+    init_actor_logstd : float
     actor_observation_filter : list[str] | None = None
     critic_observation_filter : list[str] | None = None
 
@@ -832,7 +919,8 @@ def ppo_train(  seed : int,
                                 epsilon_value_clip_epsilon=agent_hyperparams.epsilon_value_clip_epsilon,
                                 clip_vloss=agent_hyperparams.epsilon_value_clip_epsilon < float("+inf"),
                                 gae_lambda=agent_hyperparams.gae_lambda,
-                                max_grad_norm=agent_hyperparams.max_grad_norm))
+                                max_grad_norm=agent_hyperparams.max_grad_norm,
+                                init_actor_logstd=agent_hyperparams.init_actor_logstd))
     ggLog.info(f"Compiling PPO model...")
     t0 = time.monotonic()
     agent = th.compile(agent, fullgraph=True, mode="max-autotune")

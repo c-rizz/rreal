@@ -29,13 +29,15 @@ class Mixed_VAE_encoder(nn.Module):
                         fcs_arch = [64],
                         encoders_activation = th.nn.LeakyReLU,
                         use_batchnorm = True,
-                        use_weightnorm : bool = False):
+                        use_weightnorm : bool = False,
+                        concatenate_mulogvar : bool= False):
         super().__init__()
         self._checkDimensions = checkDimensions
         self._latent_space_size = latent_space_size
         self._mu_activation_class = mu_activation_class
         self._fcs_arch = fcs_arch
         self._fcs_ensemble_size = 1
+        self._concatenate_mulogvar = concatenate_mulogvar
 
         if type(combiner_arch)==str and combiner_arch.lower().strip() == "identity":
             combined_size = img_encoding_size + vec_encoding_size
@@ -92,7 +94,7 @@ class Mixed_VAE_encoder(nn.Module):
     def input_vec_size(self):
         return self.encoder.input_vec_size()
     
-    def forward(self, image: th.Tensor, vector: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
+    def forward(self, image: th.Tensor, vector: th.Tensor) -> Tuple[th.Tensor, th.Tensor] | th.Tensor:
 
         batch_size = image.size()[0]
 
@@ -105,7 +107,10 @@ class Mixed_VAE_encoder(nn.Module):
             assert mu.size() == (batch_size, self._latent_space_size)
             assert logvar.size() == (batch_size, self._latent_space_size)
 
-        return mu, logvar
+        if self._concatenate_mulogvar:
+            return th.cat([mu, logvar], dim=1)
+        else:
+            return mu, logvar
             
     def sample(self, mu : th.Tensor, logvar : th.Tensor):
         std = th.exp(0.5 * logvar) # std = sqrt(var) = sqrt(e^logvar) = e^(0.5*logvar)
