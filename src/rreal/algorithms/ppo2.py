@@ -227,6 +227,9 @@ class PPO(RLAgent):
         self._critic_observation_space = self._get_filtered_observation_space(self._hp.observation_space,
                                                                               self._hp.critic_observation_filter,
                                                                               "critic")
+        ggLog.info(f"PPO Actor observation space labels: "+str({k:v.labels for k,v in self._actor_observation_space.spaces.items()}))
+        ggLog.info(f"PPO Critic observation space labels: "+str({k:v.labels for k,v in self._critic_observation_space.spaces.items()}))
+        time.sleep(5)
         if feature_extractor is not None and (actor_feature_extractor is not None or critic_feature_extractor is not None):
             raise RuntimeError("Provide either feature_extractor or actor/critic_feature_extractor, not both.")
         share_observation_filter = self._hp.actor_observation_filter == self._hp.critic_observation_filter
@@ -309,7 +312,7 @@ class PPO(RLAgent):
                         "avg_entropy_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
                         "avg_actor_logstd":th.as_tensor(float("nan"), device=self._hp.th_device),}
         self._log_full_loss_curve = False
-        self._log_highest_q_loss_obss = False
+        self._log_highest_q_loss_obss = True
         self._loss_table = wandb.Table(columns=["ppo_grad_step", "policy_loss", "value_loss", "entropy_loss", "loss"], log_mode="MUTABLE")
         
 
@@ -435,7 +438,8 @@ class PPO(RLAgent):
             nextnonterminal = 1.0 - dones[t + 1]
             nextvalues = values[t + 1]
             delta = rewards[t] + self._hp.gamma * nextvalues * nextnonterminal - values[t]
-            advantages[t] = lastgaelam = delta + self._hp.gamma * self._hp.gae_lambda * nextnonterminal * lastgaelam
+            lastgaelam = delta + self._hp.gamma * self._hp.gae_lambda * nextnonterminal * lastgaelam
+            advantages[t] = lastgaelam
         returns = advantages + values[:-1]
         return returns, advantages
 
@@ -492,10 +496,7 @@ class PPO(RLAgent):
                 bad_loss_mask = th.zeros((self._hp.num_steps,), device=vec_value_loss.device)
                 bad_loss_mask[step_index] = 1.0
                 vl = vec_value_loss[index].item()
-                if isinstance(self._critic_observation_space, spaces.ThDict):
-                    obs_labels = {k:v.labels for k,v in self._critic_observation_space.spaces.items()}
-                else:
-                    obs_labels = None
+                obs_labels = {k:v.labels for k,v in self._critic_observation_space.spaces.items()}
                 data = {"obs_traj": obs_traj,
                         # "loss_traj": loss_traj,
                         "bad_loss_mask": bad_loss_mask}

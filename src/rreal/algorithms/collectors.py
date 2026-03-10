@@ -438,8 +438,9 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                                             deterministic_ratio=self._deterministic_action_ratio)
                     self._last_collect_wall_duration.value = time.monotonic() - t0
                 elif cmd == b"close":
-                    ggLog.warn(f"{type(self)}: closing")
+                    ggLog.info(f"{type(self)}: closing")
                     self._vec_env.close()
+                    self._commander.mark_done()
                     self._running.value = ctypes.c_bool(False)
                 elif cmd is None:
                     ggLog.warn(f"Worker timed out waiting for command. Will retry.")
@@ -448,7 +449,11 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                 if cmd is not None: # if a command was actually received
                     self._commander.mark_done()
                 # ggLog.info(f" {cmd} done")
-        ggLog.info(f"Collector worker terminating")
+        ggLog.info(f"{type(self)}: Collector worker terminated")
+        # Check if there are subtreads still running
+        for t in threading.enumerate():
+            if t is not threading.current_thread() and not t.daemon:
+                ggLog.warn(f"Collector worker still has non-daemonic thread {t.name} alive at termination.")
 
     def start_collection(self, model_state_dict, vsteps_to_collect, global_vstep_count, random_vsteps):
         for n,t in model_state_dict.items():
@@ -473,7 +478,9 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         self._commander.set_command("close")
         self._collector_process.join(timeout=120)
         if self._collector_process.is_alive():
+            ggLog.warn(f"Collector process did not stop, terminating.")
             self._collector_process.terminate()
             self._collector_process.join(timeout=30)
             if self._collector_process.is_alive():
+                ggLog.warn(f"Collector process did not terminate, killing.")
                 self._collector_process.kill()

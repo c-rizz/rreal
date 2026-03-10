@@ -330,6 +330,8 @@ class Actor(nn.Module):
         if isinstance(action_min, int): action_min = float(action_min)
         if isinstance(action_max,float): action_max = th.as_tensor([action_max]*action_size, dtype=self.dtype)
         if isinstance(action_min,float): action_min = th.as_tensor([action_min]*action_size, dtype=self.dtype)
+        action_max = action_max.to(device=torch_device)
+        action_min = action_min.to(device=torch_device)
         self.action_bias : th.Tensor
         self.action_scale : th.Tensor
         self.register_buffer("action_scale", th.as_tensor((action_max - action_min) / 2.0, dtype=self.dtype, device=torch_device))
@@ -342,6 +344,12 @@ class Actor(nn.Module):
                                     hidden_activations=inner_activations,
                                     use_weightnorm=self._use_weightnorm).to(device=torch_device)
         action_mean_init = th.as_tensor(action_mean_init, dtype=self.dtype).to(device=torch_device)
+        if th.any((action_mean_init > action_max) | (action_mean_init < action_min)):
+            ggLog.warn( f"action_mean_init has values outside bounds:\n"
+                        f"action_mean_init : {action_mean_init}\n"
+                        f"action_max : {action_max}\n"
+                        f"action_min : {action_min}\n")
+            action_mean_init = th.clamp(action_mean_init, min=action_min*0.99, max=action_max*0.99)
         mean_init = th.atanh((action_mean_init-self.action_bias)/self.action_scale).to("cpu")
         self.act_fc_mean = build_mlp_net(arch=[],
                                          input_size=policy_arch[-1],
@@ -369,9 +377,7 @@ class Actor(nn.Module):
         eps = 1e-6
         mean_scales = th.atanh(th.clamp(mean_scales, min=-1+eps, max=1-eps)) # because it gets squashed again later
         mean_biases = self.action_bias
-        # ggLog.info(f"mean unsquash = {mean.min()} to {mean.max()}")
         mean = th.tanh(mean/mean_scales)*mean_scales + mean_biases
-        # ggLog.info(f"mean_scales = {mean_scales}")
         # ggLog.info(f"mean = {mean.min()} to {mean.max()}")
 
         log_std = self.act_fc_logstd(hidden_batch)
@@ -381,6 +387,8 @@ class Actor(nn.Module):
 
     @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, copy_outs=True, disable=disable_compile,  dynamic=dynamic_compile)
     def sample_action(self, observation_batch, reference_action : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        dbg_check_finite(observation_batch, async_assert=True, assert_msg="sac.Actor.sample_action: observation is not finite")
+        # observation_batch = map_tensor_tree(observation_batch, lambda t: t.fill_(0.0))
         batch_size = observation_batch.shape[0]
         mean, log_std = self(observation_batch, reference_action)
         std = log_std.exp()
@@ -1520,4 +1528,7 @@ def train_off_policy(collector : ExperienceCollector,
         # jax.profiler.save_device_memory_profile(f"jax_memory_{t}.prof")
         # th.cuda.memory._dump_snapshot(f"memory_{t}_th.pickle")
         adarl.utils.sigint_handler.haltOnSigintReceived()
+    ggLog.info(f"Off-policy train terminating...")
     callbacks.on_training_end()
+    ggLog.info(f"Off-policy train terminated.")
+
