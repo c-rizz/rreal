@@ -440,7 +440,7 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
                 elif cmd == b"close":
                     ggLog.info(f"{type(self)}: closing")
                     self._vec_env.close()
-                    self._commander.mark_done()
+                    session.default_session.mark_shutting_down() # in case the session is not already shutting down
                     self._running.value = ctypes.c_bool(False)
                 elif cmd is None:
                     ggLog.warn(f"Worker timed out waiting for command. Will retry.")
