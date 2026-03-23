@@ -42,9 +42,10 @@ def layer_init(layer, std=2.0, bias_const=0.0):
     th.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-def ortho_layer_init_(layer, std=2.0, bias_const=0.0):
+def ortho_layer_init_(layer, std=2.0, bias_const : th.Tensor | float = 0.0):
     th.nn.init.orthogonal_(layer.weight, std)
-    th.nn.init.constant_(layer.bias, bias_const)
+    th.nn.init.constant_(layer.bias, 0.0)
+    layer.bias += bias_const.to(device=layer.bias.device) if isinstance(bias_const, th.Tensor) else bias_const
 
 
 class PPORolloutBuffer():
@@ -61,30 +62,29 @@ class PPORolloutBuffer():
         self._actions = th.zeros((num_steps, num_envs) + act_space_shape, device=device)
         self._logprobs = th.zeros((num_steps+1, num_envs), device=device)
         self._rewards = th.zeros((num_steps, num_envs), device=device)
-        self._dones = th.zeros((num_steps+1, num_envs), device=device)
+        self._terminateds = th.zeros((num_steps+1, num_envs), device=device)
+        self._truncateds = th.zeros((num_steps+1, num_envs), device=device)
         self._values = th.zeros((num_steps+1, num_envs), device=device)
+        self._consequent_values = th.zeros((num_steps+1, num_envs), device=device)
         self._pos = 0
-        tot_bytes = self._actions.nbytes + self._logprobs.nbytes + self._rewards.nbytes + self._dones.nbytes + self._values.nbytes
+        tot_bytes = self._actions.nbytes + self._logprobs.nbytes + self._rewards.nbytes + self._terminateds.nbytes + self._truncateds.nbytes + self._values.nbytes + self._consequent_values.nbytes
         ggLog.info(f"PPO Rollout buffer will occupy {tot_bytes/1024/1024}MiB")
     
     @th.compile(fullgraph=True, mode="max-autotune")
-    def add(self, start_obss, actions, logprobs, rewards, prev_dones, values):
+    def add(self, start_obss, actions, logprobs, rewards, prev_terminateds, prev_truncateds, start_obss_values, consequent_obss_values):
         for k in start_obss.keys():
             self._obs[k][self._pos] = start_obss[k]
         self._actions[self._pos] = actions
         self._rewards[self._pos] = rewards
-        self._dones[self._pos] = prev_dones
-        self._values[self._pos] = values
+        self._terminateds[self._pos] = prev_terminateds
+        self._truncateds[self._pos] = prev_truncateds
+        self._values[self._pos] = start_obss_values
+        self._consequent_values[self._pos] = consequent_obss_values
         self._logprobs[self._pos] = logprobs
         self._pos += 1
 
-    
-    def set_logprobs_values(self, logprobs, values):
-        self._values[self._pos] = values
-        self._logprobs[self._pos] = logprobs
-
-
-    def set(self, start_obss=None, actions=None, logprobs=None, rewards=None, prev_dones=None, values=None):
+    def set(self, start_obss=None, actions=None, logprobs=None, rewards=None, prev_terminateds=None, prev_truncateds=None, start_obss_values=None,
+                consequent_obss_values=None):
         if start_obss is not None:
             for k in start_obss.keys():
                 self._obs[k][self._pos] = start_obss[k]
@@ -92,10 +92,14 @@ class PPORolloutBuffer():
             self._actions[self._pos] = actions
         if rewards is not None:
             self._rewards[self._pos] = rewards
-        if prev_dones is not None:
-            self._dones[self._pos] = prev_dones
-        if values is not None:
-            self._values[self._pos] = values
+        if prev_terminateds is not None:
+            self._terminateds[self._pos] = prev_terminateds
+        if prev_truncateds is not None:
+            self._truncateds[self._pos] = prev_truncateds
+        if start_obss_values is not None:
+            self._values[self._pos] = start_obss_values
+        if consequent_obss_values is not None:
+            self._consequent_values[self._pos] = consequent_obss_values
         if logprobs is not None:
             self._logprobs[self._pos] = logprobs
 
@@ -106,9 +110,11 @@ class PPORolloutBuffer():
         return (self._obs, #[:self._pos+1],
                 self._actions, #[:self._pos],
                 self._rewards, #[:self._pos],
-                self._dones, #[:self._pos+1],
+                self._terminateds, #[:self._pos+1],
+                self._truncateds, #[:self._pos+1],
                 self._logprobs, #[:self._pos+1])
-                self._values) #[:self._pos+1],
+                self._values,
+                self._consequent_values) #[:self._pos+1],
     
 
 # # From https://github.com/pytorch/pytorch/issues/79197#issuecomment-1434511798
@@ -161,7 +167,7 @@ class PPO(RLAgent):
         minibatch_size: int | None
         minibatch_num: int | None
         th_device : th.device
-        action_len : int
+        action_space : spaces.ThBox
         observation_space : spaces.gym_spaces.Space
         action_min : th.Tensor
         action_max : th.Tensor
@@ -221,6 +227,8 @@ class PPO(RLAgent):
                  critic_feature_extractor : FeatureExtractor | None = None):
         super().__init__()
         self._hp = copy.deepcopy(hyperparams)
+        action_mean_init=self._hp.action_space.zero_action.to(device=self._hp.th_device) if isinstance(self._hp.action_space,spaces.ThBox) else 0.0
+        self._action_len = int(np.prod(self._hp.action_space.shape))
         self._actor_observation_space = self._get_filtered_observation_space(self._hp.observation_space,
                                                                              self._hp.actor_observation_filter,
                                                                              "actor")
@@ -260,18 +268,19 @@ class PPO(RLAgent):
                                     # use_weightnorm=True,
                                     use_torchscript=True,
                                     # hidden_activations=th.nn.Tanh,
-                                    layer_init_func=lambda m: ortho_layer_init_(m,1)).to(device=self._hp.th_device)
+                                    layer_init_func=lambda m: ortho_layer_init_(m,1**0.5),
+                                    last_layer_init_func=lambda m: ortho_layer_init_(m,0.01)).to(device=self._hp.th_device)
         self.actor_mean = build_mlp_net(arch=self._hp.actor_network_arch,
                                     input_size=self._actor_feature_extractor.encoding_size(),
-                                    output_size=self._hp.action_len,
+                                    output_size=self._action_len,
                                     # use_weightnorm=True,
                                     use_torchscript=True,
                                     # weight_init_multiplier=0.01,
                                     # hidden_activations=th.nn.Tanh,
-                                    layer_init_func=lambda m: ortho_layer_init_(m,1),
-                                    last_layer_init_func=lambda m: ortho_layer_init_(m,0.01)).to(device=self._hp.th_device)
+                                    layer_init_func=lambda m: ortho_layer_init_(m,1**0.5),
+                                    last_layer_init_func=lambda m: ortho_layer_init_(m,0.01,action_mean_init)).to(device=self._hp.th_device)
         
-        self.actor_logstd = nn.Parameter(th.full((1, self._hp.action_len), self._hp.init_actor_logstd, device=self._hp.th_device))
+        self.actor_logstd = nn.Parameter(th.full((1, self._action_len), self._hp.init_actor_logstd, device=self._hp.th_device))
         if self._hp.q_lr is not None and self._hp.q_lr!=self._hp.policy_lr:
             raise NotImplementedError("Different learning rates for Q and policy are not supported yet.")
         self._optimizer = AdamW(self.parameters(), lr=self._hp.policy_lr, eps=1e-8)
@@ -320,8 +329,11 @@ class PPO(RLAgent):
     def input_device(self):
         return self._hp.th_device
 
-    def get_value(self, x):
-        return self.critic(x)
+    @th.compile(fullgraph=True, mode="max-autotune")
+    def get_value(self, obs_batch):
+        actor_obs = self.get_actor_subobservation(obs_batch)
+        enc_actor_obs_batch = self._actor_feature_extractor.extract_features(actor_obs)
+        return self.critic(enc_actor_obs_batch)
 
     def get_actor_subobservation(self, observation):
         if self._hp.actor_observation_filter is None:
@@ -362,6 +374,9 @@ class PPO(RLAgent):
     @th.compile(fullgraph=True, mode="max-autotune")
     def _compute_losses(self, iteration, b_inds, b_actor_encobs, b_critic_encobs, b_actions, b_logprobs, b_values, b_advantages, b_returns) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor | None]:
 
+        if self._hp.norm_adv:
+            b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
+        
         # extract minibatch from batch
         start = iteration*self._hp.minibatch_size
         end = start + self._hp.minibatch_size
@@ -380,8 +395,6 @@ class PPO(RLAgent):
                                                                                                 action=mb_acts)
         logratio = newlogprobs - mb_logprobs                
         ratio = logratio.exp()
-        if self._hp.norm_adv:
-            mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
         # Policy loss
         pg_loss1 = -mb_advantages * ratio
@@ -431,14 +444,16 @@ class PPO(RLAgent):
         enc_critic_obss = map_tensor_tree(enc_critic_obss, lambda l: l.view((num_steps+1, num_envs)+l.shape[1:]))
         return enc_actor_obss, enc_critic_obss
 
-    def _compute_returns_and_advantages(self, rewards, dones, values):
+    def _compute_returns_and_advantages(self, rewards, terminateds, truncateds, values, consequent_values):
         advantages = th.zeros_like(rewards).to(self._hp.th_device)
         lastgaelam = 0
         for t in reversed(range(self._hp.num_steps)):
-            nextnonterminal = 1.0 - dones[t + 1]
-            nextvalues = values[t + 1]
+            nextnonterminal = 1.0 - terminateds[t + 1]
+            nextnottruncated = 1.0 - truncateds[t + 1]
+            nextnondone = nextnonterminal * nextnottruncated
+            nextvalues = consequent_values[t]
             delta = rewards[t] + self._hp.gamma * nextvalues * nextnonterminal - values[t]
-            lastgaelam = delta + self._hp.gamma * self._hp.gae_lambda * nextnonterminal * lastgaelam
+            lastgaelam = delta + self._hp.gamma * self._hp.gae_lambda * nextnondone * lastgaelam
             advantages[t] = lastgaelam
         returns = advantages + values[:-1]
         return returns, advantages
@@ -453,21 +468,21 @@ class PPO(RLAgent):
         b_actor_encobs  = enc_actor_obss[:self._hp.num_steps].view((self.__batch_size,) + enc_actor_obss.size()[2:])
         b_critic_encobs = enc_critic_obss[:self._hp.num_steps].view((self.__batch_size,) + enc_critic_obss.size()[2:])
         b_logprobs      = logprobs[:self._hp.num_steps].view(self.__batch_size)
-        b_actions       = actions.view((self.__batch_size,self._hp.action_len))
+        b_actions       = actions.view((self.__batch_size,self._action_len))
         b_advantages    = advantages.view(self.__batch_size)
         b_returns       = returns.view(self.__batch_size)
         b_values        = values[:self._hp.num_steps].view(self.__batch_size)
         b_inds          = th.zeros(size=(self.__batch_size,), dtype=th.long, device=self._hp.th_device)
         return b_actor_encobs, b_critic_encobs, b_logprobs, b_actions, b_advantages, b_returns, b_values, b_inds
     
-    def _prepare_epochs_data(self, raw_obss, actions, rewards, dones, logprobs, values, num_steps, num_envs):
+    def _prepare_epochs_data(self, raw_obss, actions, rewards, terminateds, truncateds, logprobs, start_values, num_steps, num_envs, consequent_values):
         # Extract obs features
         enc_actor_obss, enc_critic_obss = self._compute_encoded_obss(raw_obss, num_steps, num_envs)
         # bootstrap values and advantages
         with th.no_grad():
-            returns, advantages = self._compute_returns_and_advantages(rewards, dones, values)
+            returns, advantages = self._compute_returns_and_advantages(rewards, terminateds, truncateds, start_values, consequent_values)
         # flatten the batch
-        return self._reshape_batch_data(enc_actor_obss, enc_critic_obss, actions, logprobs, values, advantages, returns)
+        return self._reshape_batch_data(enc_actor_obss, enc_critic_obss, actions, logprobs, start_values, advantages, returns)
 
     @th.compile(fullgraph=True, mode="max-autotune")
     def _opt_step(self):
@@ -508,7 +523,7 @@ class PPO(RLAgent):
     @override
     def train_model(self, buff : PPORolloutBuffer):
         # t_0 = time.monotonic()
-        raw_obss, actions, rewards, dones, logprobs, values = buff.get_rollout_data()
+        raw_start_obss, actions, rewards, terminateds, truncateds, logprobs, start_values, consequent_values = buff.get_rollout_data()
         # prepare encoded observations, returns and advantages, and flatten the numenv and trajectory dimensions together
         (b_actor_encobs,
          b_critic_encobs,
@@ -517,7 +532,8 @@ class PPO(RLAgent):
          b_advantages,
          b_returns,
          b_values,
-         b_inds) = self._prepare_epochs_data(raw_obss, actions, rewards, dones, logprobs, values, buff.num_steps, buff.num_envs)
+         b_inds) = self._prepare_epochs_data(raw_start_obss, actions, rewards, terminateds, truncateds, logprobs, start_values, buff.num_steps, buff.num_envs,
+                                             consequent_values)
         # clipfracs = []
         # t_pretrain = time.monotonic()
         self._policy_losses_sum.fill_(0)
@@ -557,7 +573,7 @@ class PPO(RLAgent):
                         start = i*self._hp.minibatch_size
                         end = start + self._hp.minibatch_size
                         mb_inds = b_inds[start:end]
-                        self._save_worst_observations(vec_value_losses, raw_obss, mb_inds)
+                        self._save_worst_observations(vec_value_losses, raw_start_obss, mb_inds)
                 self._grad_step_count_th += 1
                 self._grad_step_count += 1
             # if self._hp.target_kl is not None and approx_kl > self._hp.target_kl:
@@ -650,9 +666,10 @@ class Collector():
         #     raise NotImplementedError(f"unsupported observation space {obs_space}")
         self._single_observation_space = obs_space
 
-        self._latest_obs, _ = self._vec_env.reset(seed=seed)
+        self._latest_start_obs, _ = self._vec_env.reset(seed=seed)
         # self._latest_obs = th.Tensor(self._latest_obs).to(th_device)
-        self._latest_done = th.zeros(self._num_envs).to(th_device)
+        self._latest_terminated = th.zeros(self._num_envs).to(th_device)
+        self._latest_truncated = th.zeros(self._num_envs).to(th_device)
         self._device = th_device
         self._vec_env = self._vec_env
         self._env_device = th.device("cuda")
@@ -671,47 +688,54 @@ class Collector():
         term_count = th.as_tensor(0).to(device=self._env_device, non_blocking=True)
         with th.no_grad():
             buffer.reset()
-            step_start_obs = map_tensor_tree(self._latest_obs, lambda a: th.as_tensor(a, device = agent.input_device()))
-            prev_done = self._latest_done
+            step_start_obs = map_tensor_tree(self._latest_start_obs, lambda a: th.as_tensor(a, device = agent.input_device()))
+            prev_terminated = self._latest_terminated
+            prev_truncated = self._latest_truncated
             for step in range(0, vsteps_to_collect):
                 # print(f"collecting step {step}/{vsteps_to_collect}")
                 th.compiler.cudagraph_mark_step_begin()
                 # ALGO LOGIC: action logic
-                action, logprob, _, value, _ = agent.get_action_logprob_entropy_critic_mean(obs_batch=step_start_obs)
-                value = value.clone()
+                action, logprob, _, start_value, _ = agent.get_action_logprob_entropy_critic_mean(obs_batch=step_start_obs)
+                start_value = start_value.clone()
                 action = action.clone()
                 logprob = logprob.clone()
 
                 # TRY NOT TO MODIFY: execute the game and log data.
                 action = action.to(device=self._env_device)
-                next_obs, reward, terminations, truncations, info = self._vec_env.step(action)
-                next_obs = map_tensor_tree(next_obs, lambda a: th.as_tensor(a))
+                next_start_obs, reward, terminations, truncations, info = self._vec_env.step(action)
+                next_start_obs = map_tensor_tree(next_start_obs, lambda a: th.as_tensor(a))
+                consequent_obs = info.get("final_observation",next_start_obs)
+                consequent_obs = map_tensor_tree(consequent_obs, lambda a: th.as_tensor(a))
+                # The consequent value computation may be optimized by moving it inside the next step get_action_logprob_entropy_critic_mean
+                consequent_value = agent.get_value(map_tensor_tree(consequent_obs, lambda a: th.as_tensor(a, device=agent.input_device()))).flatten()
                 reward = th.as_tensor(reward)
                 terminations = th.as_tensor(terminations)
                 truncations = th.as_tensor(truncations)
-                buffer.add(start_obss=step_start_obs,
-                            values=value.flatten(),
-                            prev_dones=prev_done,
+                buffer.add( start_obss=step_start_obs,
+                            start_obss_values=start_value.flatten(),
+                            prev_terminateds=prev_terminated,
+                            prev_truncateds=prev_truncated,
                             actions=action,
                             logprobs=logprob,
-                            rewards=reward.view(-1))
-                step_start_obs = map_tensor_tree(next_obs, lambda t: t.detach().clone().to(device=agent.input_device(), non_blocking=t.device.type=="cuda"))
+                            rewards=reward.view(-1),
+                            consequent_obss_values=consequent_value)
+                step_start_obs = map_tensor_tree(next_start_obs, lambda t: t.detach().clone().to(device=agent.input_device(), non_blocking=t.device.type=="cuda"))
                 done = th.logical_or(terminations, truncations)
                 term_count += th.count_nonzero(done)
                 # buffer._obs[step] = start_obs
-                prev_done = done
+                prev_terminated = terminations
+                prev_truncated = truncations
 
-            self._latest_done = done
-            self._latest_obs = next_obs
+            self._latest_terminated = terminations
+            self._latest_truncated = truncations
+            self._latest_start_obs = next_start_obs
 
             th.compiler.cudagraph_mark_step_begin()
 
-            self._latest_obs = map_tensor_tree(self._latest_obs, lambda a: th.as_tensor(a, device = agent.input_device()))
-            action, logprob, _, value, _ = agent.get_action_logprob_entropy_critic_mean(obs_batch=self._latest_obs)
-            buffer.set(start_obss=self._latest_obs,
-                        values=value.flatten(),
-                        prev_dones=self._latest_done,
-                        logprobs=logprob)
+            self._latest_start_obs = map_tensor_tree(self._latest_start_obs, lambda a: th.as_tensor(a, device = agent.input_device()))
+            buffer.set( prev_terminateds=self._latest_terminated,
+                        prev_truncateds=self._latest_truncated,
+                        consequent_obss_values=consequent_value)
         return term_count
 
 
@@ -853,7 +877,9 @@ def ppo_train(  seed : int,
                 checkpoint_freq : int = 100,
                 collector_device : th.device | None = None,
                 debug_level : int = 2,
-                no_wandb : bool = False):
+                no_wandb : bool = False,
+                env_checker_max_obs_value : float = 255.0,
+                env_checker_max_rew_value : float = 100.0):
 
     #     th.cuda.memory._record_memory_history(
     #        max_entries=100_000
@@ -887,7 +913,9 @@ def ppo_train(  seed : int,
                                                                                                 env_action_device=collector_device)
     if vec_env_builder is None:
         raise RuntimeError(f"You must specify either vec_env_builder or env_builder")
-    vec_env_builder = wrap_with_logger(vec_env_builder)
+    vec_env_builder = wrap_with_logger(vec_env_builder,
+                                       max_obs_value=env_checker_max_obs_value,
+                                       max_rew_value=env_checker_max_rew_value)
 
     collector = Collector(  vec_env_builder=vec_env_builder,
                             env_builder_args=env_builder_args,
@@ -900,7 +928,7 @@ def ppo_train(  seed : int,
     agent = PPO(PPO.Hyperparams(minibatch_size=agent_hyperparams.minibatch_size,
                                 minibatch_num=agent_hyperparams.minibatch_num,
                                 th_device=agent_hyperparams.th_device,
-                                action_len=int(np.prod(action_space.shape)),
+                                action_space=action_space,
                                 observation_space=obs_space,
                                 action_max=th.as_tensor(action_space.high, device=agent_hyperparams.th_device),
                                 action_min=th.as_tensor(action_space.low, device=agent_hyperparams.th_device),

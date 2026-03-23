@@ -262,12 +262,14 @@ def build_collector(use_processes : bool,
     #                                     storage_torch_device=collector_device)
     return collector
 
-def wrap_with_logger(vec_env_builder : VecEnvBuilderProtocol) -> VecEnvBuilderProtocol:
+def wrap_with_logger(vec_env_builder : VecEnvBuilderProtocol,
+                     max_obs_value : float = 255.0,
+                     max_rew_value : float = 100.0) -> VecEnvBuilderProtocol:
     def wrapped_builder(seed : int, run_folder : str, num_envs : int, env_builder_args : dict, env_name : str = ""):
         # logs_id = session.default_session.run_info["run_id"]
         venv = vec_env_builder(seed = seed, run_folder = run_folder, num_envs = num_envs, env_builder_args = env_builder_args)
         venv = VectorEnvLogger(env = venv, logs_id = env_name, env_th_device=env_builder_args["th_device"], log_infos=env_builder_args["log_info_stats"])
-        venv = VectorEnvChecker(env = venv, just_warn=True)
+        venv = VectorEnvChecker(env = venv, just_warn=True, max_obs_value=max_obs_value, max_rew_value=max_rew_value)
         return venv
     return wrapped_builder
 
