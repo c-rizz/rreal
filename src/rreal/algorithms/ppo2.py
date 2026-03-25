@@ -1,4 +1,5 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+import math
 import os
 import random
 import time
@@ -349,6 +350,12 @@ class PPO(RLAgent):
             raise RuntimeError(f"critic_observation_filter requires dict observations, got {type(observation)}")
         return {k: observation[k] for k in self._hp.critic_observation_filter}
 
+    @staticmethod
+    def _tanh_log_determinant(action):
+        tanh_log_det_per_dim = 2.0 * (math.log(2.0) - action - th.nn.functional.softplus(-2.0 * action))
+        tanh_log_determinant = tanh_log_det_per_dim.sum(1)
+        return tanh_log_determinant
+    
     @th.compile(fullgraph=True, mode="max-autotune")
     def get_action_logprob_entropy_critic_mean(self, obs_batch=None, enc_actor_obs_batch = None, enc_critic_obs_batch = None, action=None):
         if enc_actor_obs_batch is None:
@@ -367,9 +374,25 @@ class PPO(RLAgent):
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = th.exp(action_logstd)
         probs = Normal(action_mean, action_std)
-        if action is None:
-            action = action_mean + th.empty_like(action_mean).normal_(mean=0.0, std=1.0)*action_std # rsample has issues with torch.compile
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(enc_critic_obs_batch), action_mean
+        had_input_action = action is not None
+        action_sampled = action_mean + th.empty_like(action_mean).normal_(mean=0.0, std=1.0)*action_std # rsample has issues with torch.compile
+        if not had_input_action:
+            action = action_sampled
+        
+        # action is x_t (pre-tanh). The env receives tanh(x_t) in (-1,1).
+        # Jacobian correction for tanh squashing: log|d tanh(x)/dx| = log(1-tanh(x)^2)
+        # Numerically stable form (Brax TanhBijector): 2*(log2 - x - softplus(-2x))
+        act_tanh_log_determinant = self._tanh_log_determinant(action)
+        act_log_prob = probs.log_prob(action).sum(1) - act_tanh_log_determinant
+        action_entropy = probs.entropy().sum(1) + act_tanh_log_determinant
+        squashed_action = th.tanh(action)
+        if had_input_action:
+            sampled_act_entropy = probs.entropy().sum(1) + self._tanh_log_determinant(action_sampled)
+        else:
+            sampled_act_entropy = action_entropy
+        # Brax-style Monte Carlo estimate of the squashed-policy entropy:
+        # H[tanh(X)] = H[X] + E[log |d tanh(X)/dX|], approximated with the sampled action.
+        return action, squashed_action, act_log_prob, action_entropy, self.critic(enc_critic_obs_batch), action_mean, sampled_act_entropy
 
     @th.compile(fullgraph=True, mode="max-autotune")
     def _compute_losses(self, iteration, b_inds, b_actor_encobs, b_critic_encobs, b_actions, b_logprobs, b_values, b_advantages, b_returns) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor | None]:
@@ -389,7 +412,7 @@ class PPO(RLAgent):
         mb_advantages = b_advantages[mb_inds]
         mb_returns = b_returns[mb_inds]
 
-        _, newlogprobs, entropies, newvalues, _ = self.get_action_logprob_entropy_critic_mean(  obs_batch=None,
+        _, _, newlogprobs, entropies, newvalues, _, sampled_action_entropies = self.get_action_logprob_entropy_critic_mean(  obs_batch=None,
                                                                                                 enc_actor_obs_batch=mb_actor_encobs,
                                                                                                 enc_critic_obs_batch=mb_critic_encobs,
                                                                                                 action=mb_acts)
@@ -419,7 +442,7 @@ class PPO(RLAgent):
         if not self._log_highest_q_loss_obss:
             vec_value_loss = None
 
-        entropy_loss = - entropies.mean()
+        entropy_loss = - sampled_action_entropies.mean()
         loss = policy_loss + self._hp.loss_entropy_weight * entropy_loss + value_loss * self._hp.loss_value_weight
 
         with th.no_grad():
@@ -624,11 +647,11 @@ class PPO(RLAgent):
     @override
     def predict_action(self, observation_batch, deterministic = False):
         if deterministic:
-            act, logprob, entropy, critic, mean = self.get_action_logprob_entropy_critic_mean(obs_batch=observation_batch)
-            return mean.detach().clone()
+            act, squashed_act, logprob, entropy, critic, mean, _ = self.get_action_logprob_entropy_critic_mean(obs_batch=observation_batch)
+            return th.tanh(mean).detach().clone()
         else:
-            act, logprob, entropy, critic, mean = self.get_action_logprob_entropy_critic_mean(obs_batch=observation_batch)
-            return act.detach().clone()
+            act, squashed_act, logprob, entropy, critic, mean, _ = self.get_action_logprob_entropy_critic_mean(obs_batch=observation_batch)
+            return squashed_act.detach().clone()
 
     @override
     def save(self, path : str):
@@ -695,14 +718,14 @@ class Collector():
                 # print(f"collecting step {step}/{vsteps_to_collect}")
                 th.compiler.cudagraph_mark_step_begin()
                 # ALGO LOGIC: action logic
-                action, logprob, _, start_value, _ = agent.get_action_logprob_entropy_critic_mean(obs_batch=step_start_obs)
+                raw_action, squashed_action, logprob, _, start_value, _, _ = agent.get_action_logprob_entropy_critic_mean(obs_batch=step_start_obs)
                 start_value = start_value.clone()
-                action = action.clone()
+                raw_action = raw_action.clone()  # pre-tanh x_t, stored in buffer for log_prob recomputation
+                squashed_action = squashed_action.clone().to(device=self._env_device)  # tanh(x_t) in (-1,1), sent to env
                 logprob = logprob.clone()
 
                 # TRY NOT TO MODIFY: execute the game and log data.
-                action = action.to(device=self._env_device)
-                next_start_obs, reward, terminations, truncations, info = self._vec_env.step(action)
+                next_start_obs, reward, terminations, truncations, info = self._vec_env.step(squashed_action)
                 next_start_obs = map_tensor_tree(next_start_obs, lambda a: th.as_tensor(a))
                 consequent_obs = info.get("final_observation",next_start_obs)
                 consequent_obs = map_tensor_tree(consequent_obs, lambda a: th.as_tensor(a))
@@ -715,7 +738,7 @@ class Collector():
                             start_obss_values=start_value.flatten(),
                             prev_terminateds=prev_terminated,
                             prev_truncateds=prev_truncated,
-                            actions=action,
+                            actions=raw_action,
                             logprobs=logprob,
                             rewards=reward.view(-1),
                             consequent_obss_values=consequent_value)
