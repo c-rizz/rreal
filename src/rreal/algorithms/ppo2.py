@@ -332,7 +332,7 @@ class PPO(RLAgent):
 
     @th.compile(fullgraph=True, mode="max-autotune")
     def get_value(self, obs_batch):
-        actor_obs = self.get_actor_subobservation(obs_batch)
+        actor_obs = self.get_critic_subobservation(obs_batch)
         enc_actor_obs_batch = self._actor_feature_extractor.extract_features(actor_obs)
         return self.critic(enc_actor_obs_batch)
 

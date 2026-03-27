@@ -72,8 +72,10 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                 log_freq_joints_trajectories = int(stepLength_sec/sim_dt),
                                 log_folder=run_folder,
                                 safe_revolute_dof_armature=0.01,
-                                opt_preset="faster",
-                                add_ground=False
+                                opt_preset=None,
+                                add_ground=False,
+                                render_backend="warp",
+                                mjx_impl="warp"
                                 )
     elif mode == "mjx_jimp":
         from adarl.adapters.MjxJointImpedanceAdapter import MjxJointImpedanceAdapter
