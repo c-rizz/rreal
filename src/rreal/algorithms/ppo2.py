@@ -241,14 +241,14 @@ class PPO(RLAgent):
         time.sleep(5)
         if feature_extractor is not None and (actor_feature_extractor is not None or critic_feature_extractor is not None):
             raise RuntimeError("Provide either feature_extractor or actor/critic_feature_extractor, not both.")
-        share_observation_filter = self._hp.actor_observation_filter == self._hp.critic_observation_filter
+        same_observation_filter = self._hp.actor_observation_filter == self._hp.critic_observation_filter
         if feature_extractor is not None:
-            if not share_observation_filter:
+            if not same_observation_filter:
                 raise RuntimeError("Cannot share a single feature_extractor when actor and critic observation filters differ.")
             self._actor_feature_extractor = feature_extractor
             self._critic_feature_extractor = feature_extractor
         else:
-            if actor_feature_extractor is None and critic_feature_extractor is None:
+            if actor_feature_extractor is None and critic_feature_extractor is None and same_observation_filter:
                 shared_extractor = StackVectorsFeatureExtractor(observation_space=self._actor_observation_space,
                                                                 device=hyperparams.th_device)
                 self._actor_feature_extractor = shared_extractor
@@ -332,9 +332,9 @@ class PPO(RLAgent):
 
     @th.compile(fullgraph=True, mode="max-autotune")
     def get_value(self, obs_batch):
-        actor_obs = self.get_critic_subobservation(obs_batch)
-        enc_actor_obs_batch = self._actor_feature_extractor.extract_features(actor_obs)
-        return self.critic(enc_actor_obs_batch)
+        critic_obs = self.get_critic_subobservation(obs_batch)
+        enc_critic_obs_batch = self._critic_feature_extractor.extract_features(critic_obs)
+        return self.critic(enc_critic_obs_batch)
 
     def get_actor_subobservation(self, observation):
         if self._hp.actor_observation_filter is None:
