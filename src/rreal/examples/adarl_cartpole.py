@@ -129,7 +129,8 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                    img_obs_frame_stacking_size=env_builder_args.pop("img_obs_frame_stacking_size"),
                                    camera_offset_xyz=_sample_cam_offset(seed=seed,
                                                                         grid_size_meters=env_builder_args.pop("cam_pos_randomization_grid_size_meters"),
-                                                                        grid_steps=env_builder_args.pop("cam_pos_randomization_grid_steps")))
+                                                                        grid_steps=env_builder_args.pop("cam_pos_randomization_grid_steps")),
+                                   enable_highres_camera=env_builder_args.pop("enable_highres_camera"))
     env = ObsToDict(env=env)
     vrunner = EnvRunner(env=env, verbose=False, quiet=quiet, episodeInfoLogFile=run_folder+"/vec_runner.log",
                         ui_render_envs=[0], autoreset=autoreset,

@@ -415,7 +415,9 @@ class NoveltyScaler():
 
         #TODO: Could actually perform the weighting with better metrics, like trying to see if it is actually a proper chi squared with some metric
 
-
+        # print(f"novelty batch size = {raw_novelty_batch.size()}")
+        # print(f"novelty_mean = {novelty_mean.item()}, novelty_kurtosis = {novelty_kurtosis.item()}")
+        # print(f"novelty_batch minmax = {raw_novelty_batch.min().item()}-{raw_novelty_batch.max().item()}")
         novelty_weights = raw_novelty_batch / (novelty_mean + self._epsilon) # base weight multiplier
         novelty_weights = th.tanh((novelty_weights - 1.0)/self._novelty_weight_squash)*self._novelty_weight_squash + 1.0 # squash at _novelty_std_squash
         kurtosis_factor = th.clamp((novelty_kurtosis - self._kurtosis_min)/(self._kurtosis_max-self._kurtosis_min), min=0, max=1) # scale from 0 to 1 based on kurtosis
