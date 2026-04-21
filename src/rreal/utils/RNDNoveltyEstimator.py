@@ -3,6 +3,7 @@ from rreal.utils.utils import build_mlp_net, Parallel
 from dataclasses import dataclass
 from typing import Literal
 from adarl.utils.dbg import ggLog
+from adarl.utils.dbg.dbg_checks import dbg_check
 from rreal.utils.FixedAdamW import AdamW
 
 class RNDNoveltyEstimator(th.nn.Module):
@@ -235,7 +236,7 @@ class NoveltyScaler():
         self._avg_novelty_mean_of_square = th.as_tensor(float("nan"), device=th_device)
         self._avg_novelty_mean_of_fourth_residual = th.as_tensor(float("nan"), device=th_device)
         self._avg_novelty_mean_of_second_residual = th.as_tensor(float("nan"), device=th_device)
-        self._avg_raw_reward : th.Tensor
+        self._avg_raw_reward : th.Tensor = th.as_tensor(float("nan"), device=th_device)
         self._current_kurtosis = th.as_tensor(float("nan"), device=th_device)
 
         # HYPERPARAMETERS
@@ -301,6 +302,12 @@ class NoveltyScaler():
         self._avg_novelty_mean_of_second_residual.copy_(novelty_batch_mean_of_second_residual)
         if raw_reward_batch is not None:
             self._avg_raw_reward.copy_(avg_raw_reward)
+        # print(f"NoveltyScaler.update_stats(): raw_novelty_batch={raw_novelty_batch},\n")
+        # print(f"NoveltyScaler.update_stats(): avg_novelty = {self._avg_novelty.item()},\n"
+        #       f"avg_novelty_mean_of_square = {self._avg_novelty_mean_of_square.item()},\n"
+        #       f"avg_novelty_mean_of_fourth_residual = {self._avg_novelty_mean_of_fourth_residual.item()},\n"
+        #       f"avg_novelty_mean_of_second_residual = {self._avg_novelty_mean_of_second_residual.item()},\n"
+        #       f"avg_raw_reward = {self._avg_raw_reward.item()}")
         self._current_kurtosis = th.mean(self._avg_novelty_mean_of_fourth_residual)/th.square(th.mean(self._avg_novelty_mean_of_second_residual))
         # self._n_updates += 1
 
@@ -406,6 +413,8 @@ class NoveltyScaler():
         _type_
             _description_
         """
+        dbg_check(lambda: raw_novelty_batch.size()[0] >1,
+                  lambda: "NoveltyScaler.novelty_to_weights(): raw_novelty_batch should have more than 1 sample to compute meaningful statistics.")
         if update_stats:
             self.update_stats(raw_novelty_batch, None)
         novelty_mean = th.mean(raw_novelty_batch)

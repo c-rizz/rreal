@@ -49,11 +49,13 @@ class TargetEntropyAnnealer:
     def __init__(self, start_target: float = -1.5,
                  end_target: float = -5.0,
                  start_reference_threshold: float = 0.25,
+                 end_reference_threshold: float = 0.0,
                  reference_smoothing_alpha: float = 0.999,
                  reference_key: str = "linvel_q95"):
         self._start_target = start_target
         self._end_target = end_target
         self._start_reference_threshold = start_reference_threshold
+        self._end_reference_threshold = end_reference_threshold
         self._reference_key = reference_key
 
         self._reference_smoothing_alpha = reference_smoothing_alpha
@@ -76,7 +78,10 @@ class TargetEntropyAnnealer:
             return self._start_target
         # print(f"Linvel q95 = {linvelq95}")
         if linvelq95 < self._start_reference_threshold:
-            return self._end_target + (self._start_target - self._end_target)*(linvelq95/self._start_reference_threshold)
+            w = self._start_reference_threshold - self._end_reference_threshold
+            e = self._end_reference_threshold
+            r = max(0.0, min(1.0, (linvelq95 - e)/w))
+            return self._end_target + (self._start_target - self._end_target)*r
         else:
             return self._start_target
 

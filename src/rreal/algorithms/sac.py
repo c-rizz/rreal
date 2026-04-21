@@ -188,6 +188,7 @@ class SAC_init_hparams:
     actor_mean_bounds_ratio : float = 1.0
     """The ratio of the action bounds that the actor's mean can reach, by default it is 1.0 (the mean can reach the action bounds). Reducing this can prevent boundary effects that reduce noise on the edges, biasing the actor toward them."""
     max_grad_norm : float = 0.5
+    log_alpha_grad_clip : float = 0.1
     feature_extractor_lr : float = 0.0
     policy_update_freq : int = 2
     target_update_freq : int = 1
@@ -430,6 +431,7 @@ class SAC(RLAgent):
         gamma_reward_scaling : bool
         log_std_init : float
         max_grad_norm : float
+        log_alpha_grad_clip : float
         observation_space : gym.spaces.Space
         policy_arch : List[int]
         policy_lr : float
@@ -537,6 +539,7 @@ class SAC(RLAgent):
                                    feature_extractor_lr = init_hparams.feature_extractor_lr,
                                    batch_size = init_hparams.batch_size,
                                    max_grad_norm=init_hparams.max_grad_norm,
+                                   log_alpha_grad_clip = init_hparams.log_alpha_grad_clip,
                                    log_std_init = init_hparams.actor_log_std_init,
                                    actor_observation_space = actor_observation_space,
                                    critic_observation_space = critic_observation_space,
@@ -586,7 +589,7 @@ class SAC(RLAgent):
                 self._actor_feature_extractor = actor_feature_extractor
         critic_input_size = self._critic_feature_extractor.encoding_size()
         actor_input_size = self._actor_feature_extractor.encoding_size()
-        # ggLog.info(f"SAC: inner critic_input_size = {critic_input_size}, inner actor_input_size = {actor_input_size}")
+        ggLog.info(f"SAC: inner critic_input_size = {critic_input_size}, inner actor_input_size = {actor_input_size}")
         self._q_net = QNetwork( observation_size = critic_input_size,
                                 action_size = self._hp.action_size,
                                 q_network_arch = self._hp.q_network_arch,
@@ -1153,7 +1156,8 @@ class SAC(RLAgent):
     @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
     def _actor_and_alpha_opt_step(self, actor_loss : th.Tensor, alpha_loss : th.Tensor | None):
         simplified_clip_grad_norm_(list(self._actor.parameters()), self._hp.max_grad_norm)
-        simplified_clip_grad_norm_([self._log_alpha], self._hp.max_grad_norm)
+        clipped_log_alpha_grad : th.Tensor = th.clamp(self._log_alpha.grad, -self._hp.log_alpha_grad_clip, self._hp.log_alpha_grad_clip)
+        self._log_alpha.grad.copy_(clipped_log_alpha_grad)
         self._actor_and_alpha_optimizer.step()
         self._alpha.fill_(self._log_alpha.exp().detach().view(tuple())) # keep the same address to make cudagraphs happy
         self._last_actor_loss.copy_(actor_loss.detach())
