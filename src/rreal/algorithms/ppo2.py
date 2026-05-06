@@ -3,8 +3,11 @@ import math
 import os
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from tracemalloc import start
+import yaml
+import zipfile
+import pprint
 
 import torch as th
 import torch.nn as nn
@@ -18,17 +21,19 @@ from rreal.algorithms.sac_helpers import EnvBuilderProtocol, VecEnvBuilderProtoc
 from typing import Any, Final
 from adarl.utils.callbacks import TrainingCallback, CallbackList, CheckpointCallbackRB
 import adarl.utils.sigint_handler
-from rreal.algorithms.rl_agent import RLAgent
+from rreal.algorithms.rl_agent import RLAgent, register_agent_class
+from rreal.algorithms.sac import compare_dicts
+from rreal.feature_extractors import get_feature_extractor
 from typing_extensions import override
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
-from adarl.utils.utils import numpy_to_torch_dtype_dict
+from adarl.utils.utils import numpy_to_torch_dtype_dict, get_func_input_args
 from adarl.utils.tensor_trees import map_tensor_tree
 import adarl.utils.dbg.ggLog as ggLog
 import numpy as np
 from adarl.utils.wandb_wrapper import wandb_log
 from rreal.utils.utils import build_mlp_net
-import jax.profiler 
+import jax.profiler
 from rreal.utils.FixedAdamW import AdamW
 from rreal.utils.utils import simplified_clip_grad_norm_
 import wandb
@@ -70,7 +75,7 @@ class PPORolloutBuffer():
         self._pos = 0
         tot_bytes = self._actions.nbytes + self._logprobs.nbytes + self._rewards.nbytes + self._terminateds.nbytes + self._truncateds.nbytes + self._values.nbytes + self._consequent_values.nbytes
         ggLog.info(f"PPO Rollout buffer will occupy {tot_bytes/1024/1024}MiB")
-    
+
     @th.compile(fullgraph=True, mode="max-autotune")
     def add(self, start_obss, actions, logprobs, rewards, prev_terminateds, prev_truncateds, start_obss_values, consequent_obss_values):
         for k in start_obss.keys():
@@ -116,7 +121,7 @@ class PPORolloutBuffer():
                 self._logprobs, #[:self._pos+1])
                 self._values,
                 self._consequent_values) #[:self._pos+1],
-    
+
 
 # # From https://github.com/pytorch/pytorch/issues/79197#issuecomment-1434511798
 # from dataclasses import is_dataclass
@@ -161,56 +166,57 @@ class PPORolloutBuffer():
 #     inspect.stack()[1][0].f_globals[cls.__name__] = cls
 #     return cls
 
+@dataclass(repr=False, eq=False)
+class PPO_Hyperparams: # We keep it outside ppo because yaml does not handle nested classes https://github.com/yaml/pyyaml/issues/131
+    minibatch_size: int | None
+    minibatch_num: int | None
+    th_device : th.device
+    action_space : spaces.ThBox
+    observation_space : spaces.gym_spaces.Space
+    action_min : th.Tensor
+    action_max : th.Tensor
+    q_lr : float
+    policy_lr : float
+    num_envs: int
+    num_steps: int
+    update_epochs: int
+    # anneal_lr: bool = True
+    # """Toggle learning rate annealing for policy and value networks"""
+    gamma: float = 0.99
+    """the discount factor gamma"""
+    gae_lambda: float = 0.95
+    """the lambda for the general advantage estimation"""
+    norm_adv: bool = True
+    """Toggles advantages normalization"""
+    epsilon_value_clip_epsilon: float = 0.2
+    """the clipping coefficient used in the value function GAE loss"""
+    epsilon_policy_ratio_clip: float = 0.2
+    """The clipping coefficient used in the policy gradient loss, expressed as the maximum allowed ratio between new and old policy"""
+    clip_vloss: bool = True
+    """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
+    loss_entropy_weight: float = 0.001
+    """coefficient of the entropy"""
+    loss_value_weight: float = 0.5
+    """coefficient of the value function"""
+    max_grad_norm: float = 0.5
+    """the maximum norm for the gradient clipping"""
+    target_kl: float = None
+    """the target KL divergence threshold"""
+    critic_network_arch : tuple[int,...] = (64,64)
+    """The layer sizes of the critic MLP"""
+    actor_network_arch : tuple[int,...] = (64,64)
+    """The layer sizes of the actor MLP"""
+    actor_observation_filter : list[str] | None = None
+    """Subset of observation keys visible to the actor. Requires Dict observations."""
+    critic_observation_filter : list[str] | None = None
+    """Subset of observation keys visible to the critic. Requires Dict observations."""
+    init_actor_logstd : float = 0.0
+    """The initial value for the actor log standard deviation parameters"""
+
 class PPO(RLAgent):
 
-    @dataclass(repr=False, eq=False)
-    class Hyperparams:
-        minibatch_size: int | None
-        minibatch_num: int | None
-        th_device : th.device
-        action_space : spaces.ThBox
-        observation_space : spaces.gym_spaces.Space
-        action_min : th.Tensor
-        action_max : th.Tensor
-        q_lr : float
-        policy_lr : float
-        num_envs: int
-        num_steps: int
-        update_epochs: int
-        # anneal_lr: bool = True
-        # """Toggle learning rate annealing for policy and value networks"""
-        gamma: float = 0.99
-        """the discount factor gamma"""
-        gae_lambda: float = 0.95
-        """the lambda for the general advantage estimation"""
-        norm_adv: bool = True
-        """Toggles advantages normalization"""
-        epsilon_value_clip_epsilon: float = 0.2
-        """the clipping coefficient used in the value function GAE loss"""
-        epsilon_policy_ratio_clip: float = 0.2
-        """The clipping coefficient used in the policy gradient loss, expressed as the maximum allowed ratio between new and old policy"""
-        clip_vloss: bool = True
-        """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-        loss_entropy_weight: float = 0.001
-        """coefficient of the entropy"""
-        loss_value_weight: float = 0.5
-        """coefficient of the value function"""
-        max_grad_norm: float = 0.5
-        """the maximum norm for the gradient clipping"""
-        target_kl: float = None
-        """the target KL divergence threshold"""
-        critic_network_arch : tuple[int,...] = (64,64)
-        """The layer sizes of the critic MLP"""
-        actor_network_arch : tuple[int,...] = (64,64)
-        """The layer sizes of the actor MLP"""
-        actor_observation_filter : list[str] | None = None
-        """Subset of observation keys visible to the actor. Requires Dict observations."""
-        critic_observation_filter : list[str] | None = None
-        """Subset of observation keys visible to the critic. Requires Dict observations."""
-        init_actor_logstd : float = 0.0
-        """The initial value for the actor log standard deviation parameters"""
 
-    _hp : Final[Hyperparams]
+    _hp : Final[PPO_Hyperparams]
 
     def _get_filtered_observation_space(self,
                                         observation_space : spaces.gym_spaces.Space,
@@ -222,11 +228,18 @@ class PPO(RLAgent):
             raise RuntimeError(f"observation space must be a Dict to use {role}_observation_filter, but it's a {type(observation_space)}")
         return spaces.ThDict({k:v for k,v in observation_space.spaces.items() if k in obs_filter})
 
-    def __init__(self, hyperparams : Hyperparams,
+    def __init__(self, hyperparams : PPO_Hyperparams,
                  feature_extractor : FeatureExtractor | None = None,
                  actor_feature_extractor : FeatureExtractor | None = None,
                  critic_feature_extractor : FeatureExtractor | None = None):
         super().__init__()
+        self._init_args = get_func_input_args(exclude=[ "self",
+                                                        "values",
+                                                        "__class__",
+                                                        "feature_extractor",
+                                                        "critic_feature_extractor",
+                                                        "actor_feature_extractor"])
+        self._init_args = copy.deepcopy(self._init_args)
         self._hp = copy.deepcopy(hyperparams)
         action_mean_init=self._hp.action_space.zero_action.to(device=self._hp.th_device) if isinstance(self._hp.action_space,spaces.ThBox) else 0.0
         self._action_len = int(np.prod(self._hp.action_space.shape))
@@ -280,7 +293,7 @@ class PPO(RLAgent):
                                     # hidden_activations=th.nn.Tanh,
                                     layer_init_func=lambda m: ortho_layer_init_(m,1**0.5),
                                     last_layer_init_func=lambda m: ortho_layer_init_(m,0.01,action_mean_init)).to(device=self._hp.th_device)
-        
+
         self.actor_logstd = nn.Parameter(th.full((1, self._action_len), self._hp.init_actor_logstd, device=self._hp.th_device))
         if self._hp.q_lr is not None and self._hp.q_lr!=self._hp.policy_lr:
             raise NotImplementedError("Different learning rates for Q and policy are not supported yet.")
@@ -322,9 +335,9 @@ class PPO(RLAgent):
                         "avg_entropy_loss":th.as_tensor(float("nan"), device=self._hp.th_device),
                         "avg_actor_logstd":th.as_tensor(float("nan"), device=self._hp.th_device),}
         self._log_full_loss_curve = False
-        self._log_highest_q_loss_obss = True
+        self._log_highest_q_loss_obss = False
         self._loss_table = wandb.Table(columns=["ppo_grad_step", "policy_loss", "value_loss", "entropy_loss", "loss"], log_mode="MUTABLE")
-        
+
 
     @override
     def input_device(self):
@@ -355,7 +368,7 @@ class PPO(RLAgent):
         tanh_log_det_per_dim = 2.0 * (math.log(2.0) - action - th.nn.functional.softplus(-2.0 * action))
         tanh_log_determinant = tanh_log_det_per_dim.sum(1)
         return tanh_log_determinant
-    
+
     @th.compile(fullgraph=True, mode="max-autotune")
     def get_action_logprob_entropy_critic_mean(self, obs_batch=None, enc_actor_obs_batch = None, enc_critic_obs_batch = None, action=None):
         if enc_actor_obs_batch is None:
@@ -378,7 +391,7 @@ class PPO(RLAgent):
         action_sampled = action_mean + th.empty_like(action_mean).normal_(mean=0.0, std=1.0)*action_std # rsample has issues with torch.compile
         if not had_input_action:
             action = action_sampled
-        
+
         # action is x_t (pre-tanh). The env receives tanh(x_t) in (-1,1).
         # Jacobian correction for tanh squashing: log|d tanh(x)/dx| = log(1-tanh(x)^2)
         # Numerically stable form (Brax TanhBijector): 2*(log2 - x - softplus(-2x))
@@ -399,7 +412,7 @@ class PPO(RLAgent):
 
         if self._hp.norm_adv:
             b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
-        
+
         # extract minibatch from batch
         start = iteration*self._hp.minibatch_size
         end = start + self._hp.minibatch_size
@@ -416,7 +429,7 @@ class PPO(RLAgent):
                                                                                                 enc_actor_obs_batch=mb_actor_encobs,
                                                                                                 enc_critic_obs_batch=mb_critic_encobs,
                                                                                                 action=mb_acts)
-        logratio = newlogprobs - mb_logprobs                
+        logratio = newlogprobs - mb_logprobs
         ratio = logratio.exp()
 
         # Policy loss
@@ -497,7 +510,7 @@ class PPO(RLAgent):
         b_values        = values[:self._hp.num_steps].view(self.__batch_size)
         b_inds          = th.zeros(size=(self.__batch_size,), dtype=th.long, device=self._hp.th_device)
         return b_actor_encobs, b_critic_encobs, b_logprobs, b_actions, b_advantages, b_returns, b_values, b_inds
-    
+
     def _prepare_epochs_data(self, raw_obss, actions, rewards, terminateds, truncateds, logprobs, start_values, num_steps, num_envs, consequent_values):
         # Extract obs features
         enc_actor_obss, enc_critic_obss = self._compute_encoded_obss(raw_obss, num_steps, num_envs)
@@ -569,7 +582,7 @@ class PPO(RLAgent):
             th.randperm(self.__batch_size, out=b_inds, device=self._hp.th_device)
             # t_it0 = time.monotonic()
             for i in range(self.__minibatch_num):
-                th.compiler.cudagraph_mark_step_begin()                
+                th.compiler.cudagraph_mark_step_begin()
 
                 # with th.no_grad():
                 #     old_approx_kl = (-logratio).mean()
@@ -632,20 +645,20 @@ class PPO(RLAgent):
         # print("SPS:", int(global_step / (time.time() - start_time)))
         # writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-    
+
     def get_stats(self):
         return self.__stats
 
     @override
     def get_hidden_state(self):
         return None
-    
+
     @override
     def reset_hidden_state(self):
         pass
 
     @override
-    def predict_action(self, observation_batch, deterministic = False):
+    def predict_action(self, observation_batch, deterministic = False, extra_returns : dict | None = None):
         if deterministic:
             act, squashed_act, logprob, entropy, critic, mean, _ = self.get_action_logprob_entropy_critic_mean(obs_batch=observation_batch)
             return th.tanh(mean).detach().clone()
@@ -655,17 +668,94 @@ class PPO(RLAgent):
 
     @override
     def save(self, path : str):
-        raise NotImplementedError()
+        with zipfile.ZipFile(path, mode="w") as archive:
+            with archive.open("ppo.pth", "w") as ppo_file:
+                th.save(self.state_dict(), ppo_file)
+            with archive.open("extra.yaml", "w") as extra_file:
+                extra = {}
+                extra["init_args"] = self._init_args
+                extra["hyperparams"] = asdict(self._hp)
+                extra["class_name"] = self.__class__.__name__
+                extra["critic_feature_extractor_class_name"] = self._critic_feature_extractor.__class__.__name__
+                extra["critic_feature_extractor_init_args"] = self._critic_feature_extractor.get_init_args()
+                extra["actor_feature_extractor_class_name"] = self._actor_feature_extractor.__class__.__name__
+                extra["actor_feature_extractor_init_args"] = self._actor_feature_extractor.get_init_args()
+                extra["share_feature_extractor"] = self._share_actor_critic_feature_extractor
+                extra_file.write(yaml.dump(extra, default_flow_style=None).encode("utf-8"))
+            self._critic_feature_extractor.save_to_archive(archive, name="critic_feature_extractor")
+            self._actor_feature_extractor.save_to_archive(archive, name="actor_feature_extractor")
+
+    def _check_feature_extractor(self, current_featur_extractor : FeatureExtractor, loaded_fe_name, loaded_fe_args):
+        if current_featur_extractor.__class__.__name__ != loaded_fe_name:
+            ggLog.warn(f"feature_extractor_class_name of loaded model differs from that of self.\n"
+                       f"loaded = {loaded_fe_name}, self's = {current_featur_extractor.__class__.__name__}")
+            raise RuntimeError("Unmatched init_args")
+        if current_featur_extractor.get_init_args() != loaded_fe_args:
+            import difflib
+            self_init_args_yaml = yaml.dump(current_featur_extractor.get_init_args())
+            load_init_args_yaml = yaml.dump(loaded_fe_args)
+            diff = "".join(difflib.unified_diff(self_init_args_yaml.splitlines(keepends=True),
+                                                load_init_args_yaml.splitlines(keepends=True),
+                                                fromfile="self",
+                                                tofile="loaded",
+                                                lineterm=""))
+            ggLog.warn(f"init args of loaded model differ from those of self.\n"
+                       f"self init_args = \n{self_init_args_yaml}\n"
+                       f"load init_args = \n{load_init_args_yaml}\n"
+                       f"diff init_args = \n{diff}")
+            raise RuntimeError("Unmatched init_args")
 
     @override
     def load_(self, path : str):
-        raise NotImplementedError()
-    
-    @override
-    def load(cls, path : str):
-        raise NotImplementedError()
+        with zipfile.ZipFile(path) as archive:
+            with archive.open("extra.yaml", "r") as init_args_yamlfile:
+                extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+        if "class_name" in extra and extra["class_name"] != self.__class__.__name__:
+            raise RuntimeError(f"File was not saved by this class")
+        equal, reasons = compare_dicts(self._init_args, extra["init_args"])
+        if not equal:
+            ggLog.warn("init args of loaded model differ from those of self.")
+            load_yaml_args = yaml.dump(extra['init_args'])
+            original_yaml_args = yaml.dump(self._init_args)
+            ggLog.warn(f"self._init_args = \n{original_yaml_args}")
+            ggLog.warn(f"load init_args  = \n{load_yaml_args}")
+            ggLog.warn(f"Differing fields: \n{reasons}")
 
-        
+        self._check_feature_extractor(self._critic_feature_extractor,
+                                      extra["critic_feature_extractor_class_name"],
+                                      extra["critic_feature_extractor_init_args"])
+        self._check_feature_extractor(self._actor_feature_extractor,
+                                      extra["actor_feature_extractor_class_name"],
+                                      extra["actor_feature_extractor_init_args"])
+        with zipfile.ZipFile(path) as archive:
+            with archive.open("ppo.pth", "r") as ppo_file:
+                self.load_state_dict(th.load(ppo_file))
+
+    @classmethod
+    def load(cls, path : str):
+        with zipfile.ZipFile(path) as archive:
+            with archive.open("extra.yaml", "r") as init_args_yamlfile:
+                extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+        if "class_name" in extra and extra["class_name"] != cls.__name__:
+            raise RuntimeError(f"File was not saved by this class")
+        ppo_init_args = extra["init_args"]
+        with zipfile.ZipFile(path) as archive:
+            critic_feature_extractor_class = get_feature_extractor(extra["critic_feature_extractor_class_name"])
+            ppo_init_args["critic_feature_extractor"] = critic_feature_extractor_class.load(archive, name="critic_feature_extractor")
+            if extra["share_feature_extractor"]:
+                ppo_init_args["actor_feature_extractor"] = ppo_init_args["critic_feature_extractor"]
+            else:
+                actor_feature_extractor_class = get_feature_extractor(extra["actor_feature_extractor_class_name"])
+                ppo_init_args["actor_feature_extractor"] = actor_feature_extractor_class.load(archive, name="actor_feature_extractor")
+        ggLog.info(f"PPO.load(): building model with args: \n"+pprint.pformat(ppo_init_args))
+        model = cls(**ppo_init_args)
+        # At this point we should have a model that is initialized exactly like the one that was saved
+        # So we can load into it the state from the checkpoint
+        model.load_(path)
+        return model
+
+register_agent_class(PPO)
+
 
 class Collector():
     def __init__(self, vec_env_builder : VecEnvBuilderProtocol,
@@ -674,7 +764,7 @@ class Collector():
                     run_folder : str,
                     seed : int,
                     num_envs : int):
-        self._vec_env = vec_env_builder(seed=seed, 
+        self._vec_env = vec_env_builder(seed=seed,
                                         run_folder=run_folder,
                                         num_envs=num_envs,
                                         env_builder_args=env_builder_args)
@@ -700,10 +790,10 @@ class Collector():
 
     def single_observation_space(self):
         return self._single_observation_space
-    
+
     def single_action_space(self):
         return self._single_action_space
-    
+
     def num_envs(self):
         return self._num_envs
 
@@ -775,12 +865,12 @@ def train_on_policy(collector : Collector,
                     train_steps : int,
                     log_freq_vstep : int = -1,
                     callbacks : list[TrainingCallback] = []):
-    
+
     buffer = PPORolloutBuffer(num_steps, collector.num_envs(),
                                 obs_space=collector.single_observation_space(),
                                 act_space_shape=collector.single_action_space().shape,
                                 device=storage_torch_device)
-    
+
     # buffer = PPORolloutBuffer(num_envs=collector.num_envs(),
     #                           num_steps=num_steps,
     #                           storage_torch_device=storage_torch_device,
@@ -854,11 +944,6 @@ def train_on_policy(collector : Collector,
 
 
 
-
-
-
-
-
 @dataclass
 class PPO_hyperparams():
     actor_network_arch : tuple[int,...]
@@ -897,7 +982,7 @@ def ppo_train(  seed : int,
                 validation_holdout_ratio : float,
                 validation_batch_size : int,
                 eval_configurations : list[dict] = [],
-                checkpoint_freq : int = 100,
+                checkpoint_freq_vec_ep : int = 100,
                 collector_device : th.device | None = None,
                 debug_level : int = 2,
                 no_wandb : bool = False,
@@ -948,7 +1033,7 @@ def ppo_train(  seed : int,
                             seed=seed)
     action_space = collector.single_action_space()
     obs_space = collector.single_observation_space()
-    agent = PPO(PPO.Hyperparams(minibatch_size=agent_hyperparams.minibatch_size,
+    agent = PPO(PPO_Hyperparams(minibatch_size=agent_hyperparams.minibatch_size,
                                 minibatch_num=agent_hyperparams.minibatch_num,
                                 th_device=agent_hyperparams.th_device,
                                 action_space=action_space,
@@ -997,9 +1082,9 @@ def ppo_train(  seed : int,
     #                             disable_validation_set = False,
     #                             fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
     #                             val_buffer_min_size = validation_batch_size)
-    
+
     # ggLog.info(f"Replay buffer occupies {rb.memory_size()/1024/1024:.2f}MB on {rb.storage_torch_device()}")
-    
+
     start_time = time.time()
     callbacks = build_eval_callbacks(eval_configurations=eval_configurations,
                                      vec_env_builder=vec_env_builder,
@@ -1007,11 +1092,11 @@ def ppo_train(  seed : int,
                                      base_seed=seed,
                                      collector_device=collector_device,
                                      model = agent)
-    
+
     callbacks.append(CheckpointCallbackRB(save_path=run_folder+"/checkpoints",
                                           model=agent,
                                           save_best=False,
-                                          save_freq_ep=checkpoint_freq*agent_hyperparams.num_envs))
+                                          save_freq_ep=checkpoint_freq_vec_ep*agent_hyperparams.num_envs))
 
     train_on_policy(collector = collector,
                     model = agent,
@@ -1024,7 +1109,7 @@ def ppo_train(  seed : int,
 
 
 def example():
-    
+
     seed = 0
     run_id = str(int(time.monotonic()))
     env_builder_args={"env_name" : "HalfCheetah-v4",
@@ -1063,8 +1148,9 @@ def example():
                 validation_batch_size=0,
                 validation_buffer_size=0,
                 validation_holdout_ratio=0,
-                checkpoint_freq=-1,
+                checkpoint_freq_vec_ep=-1,
                 collector_device=th.device("cpu"))
+
 
 
 

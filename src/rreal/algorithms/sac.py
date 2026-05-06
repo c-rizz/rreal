@@ -9,7 +9,7 @@ from adarl.utils.dbg.dbg_checks import dbg_check_finite, dbg_check_size
 from adarl.utils.utils import get_func_input_args, th_compile_ext
 from dataclasses import dataclass, asdict
 from rreal.algorithms.collectors import ExperienceCollector
-from rreal.algorithms.rl_agent import RLAgent
+from rreal.algorithms.rl_agent import RLAgent, register_agent_class
 from rreal.feature_extractors import get_feature_extractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
@@ -841,7 +841,7 @@ class SAC(RLAgent):
         return model
 
     @override
-    def predict_action(self, observation_batch : DictObs , deterministic = False, info_return : dict | None = None):
+    def predict_action(self, observation_batch : DictObs , deterministic = False, extra_returns : dict | None = None):
         th.compiler.cudagraph_mark_step_begin()
         # s = {k:v.size() for k,v in observation.items()}
         # ggLog.info(f"predict: observation = {s}")
@@ -863,11 +863,11 @@ class SAC(RLAgent):
             action = action.squeeze()
             mean = mean.squeeze()
             log_prob = log_prob.squeeze()
-        if info_return is not None:
-            info_return["mean"] = mean
-            info_return["log_prob"] = log_prob
-            info_return["action"] = action
-            info_return["log_std"] = log_std
+        if extra_returns is not None:
+            extra_returns["mean"] = mean
+            extra_returns["log_prob"] = log_prob
+            extra_returns["action"] = action
+            extra_returns["log_std"] = log_std
         if deterministic:
             return mean
         else:
@@ -1379,6 +1379,8 @@ class SAC(RLAgent):
     
     def get_stats(self):
         return self._stats
+
+register_agent_class(SAC)
 
 def train_off_policy(collector : ExperienceCollector,
                     model : SAC,
