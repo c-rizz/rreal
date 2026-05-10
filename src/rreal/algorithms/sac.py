@@ -40,6 +40,7 @@ import typing
 import math
 # from torch.optim import AdamW
 from rreal.utils.FixedAdamW import AdamW
+import os
 
 th._dynamo.config.compiled_autograd = True
 th._dynamo.config.allow_unspec_int_on_nn_module = True
@@ -696,6 +697,10 @@ class SAC(RLAgent):
         self._stats.update({n:0.0 for n in self._actor_stats_names})
         example_q_stats = th.zeros((5, len(self._q_names)), device=self.device)
         self._update_q_stats(example_q_stats)
+
+        log_folder = adarl.utils.session.default_session.log_folder()+"/sac_logs"
+        os.makedirs(log_folder, exist_ok=True)
+        self._losses_file = open(log_folder+"/losses.bin", "ab")
     
     def _nvtx_startup(self):
         if self._enable_nvtx and self._agent_updates == 20:
@@ -1338,7 +1343,7 @@ class SAC(RLAgent):
     @override
     def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[th.Tensor,th.Tensor,th.Tensor]:
         # ggLog.info(f":::::::::::::::::::::::: train_model: global_step={global_step}")
-        q_act_alpha_losses = [None]*iterations
+        qloss_actloss_alphaloss_alpha = [None]*iterations
         target_entropy_cpu = self._target_entropy_factor_annealing(global_step, self._tot_grad_steps_count)*self._hp.action_size
         self._target_entropy.copy_(th.as_tensor(target_entropy_cpu).to(device=self.device, dtype=self._dtype, non_blocking=self.device.type=="cuda"))
         t0 = time.monotonic()
@@ -1350,12 +1355,15 @@ class SAC(RLAgent):
             # self._nvtx_end_range("sample")
             # transitions = map_tensor_tree(transitions, lambda t : t.to(device=self.device, non_blocking=self.device.type=="cuda"))
             # th.cuda.synchronize(self.device)
-            q_act_alpha_losses[i] = self._update(transitions = transitions)
+            losses = self._update(transitions = transitions)
+            qloss_actloss_alphaloss_alpha[i] = losses + (self._alpha,)
             self._tot_grad_steps_count += 1
         t1 = time.monotonic()
         # q_loss, actor_loss, alpha_loss = th.as_tensor(q_act_alpha_losses).mean(dim = 0).cpu().numpy()
         if iterations > 0:
-            q_loss, actor_loss, alpha_loss = q_act_alpha_losses[-1]
+            np.array(th.as_tensor(qloss_actloss_alphaloss_alpha, dtype=th.float32).cpu().numpy(), dtype=np.float32).tofile(self._losses_file)
+            self._losses_file.flush()
+            q_loss, actor_loss, alpha_loss, alpha = qloss_actloss_alphaloss_alpha[-1]
         else:
             with th.no_grad():
                 # compute losses but don't train
