@@ -3,6 +3,7 @@ import math
 import os
 import random
 import time
+import dataclasses
 from dataclasses import dataclass, asdict
 from tracemalloc import start
 import yaml
@@ -712,11 +713,14 @@ class PPO(RLAgent):
                 extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
         if "class_name" in extra and extra["class_name"] != self.__class__.__name__:
             raise RuntimeError(f"File was not saved by this class")
-        equal, reasons = compare_dicts(self._init_args, extra["init_args"])
+        curr_init_hparams = dataclasses.asdict(self._init_args["hyperparams"])
+        load_init_hparams = dataclasses.asdict(extra["init_args"]["hyperparams"])
+        equal, reasons = compare_dicts(curr_init_hparams, load_init_hparams)
+        # equal, reasons = compare_dicts(self._init_args, extra["init_args"])
         if not equal:
             ggLog.warn("init args of loaded model differ from those of self.")
-            load_yaml_args = yaml.dump(extra['init_args'])
-            original_yaml_args = yaml.dump(self._init_args)
+            load_yaml_args = yaml.dump(load_init_hparams)
+            original_yaml_args = yaml.dump(curr_init_hparams)
             ggLog.warn(f"self._init_args = \n{original_yaml_args}")
             ggLog.warn(f"load init_args  = \n{load_yaml_args}")
             ggLog.warn(f"Differing fields: \n{reasons}")
