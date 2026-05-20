@@ -1,6 +1,7 @@
 from __future__ import annotations
 import zipfile
 import torch.nn as nn
+import torch as th
 import yaml
 from adarl.utils.buffers import TransitionBatch, BaseBuffer
 from abc import abstractmethod, ABC
@@ -35,8 +36,9 @@ class RLAgent(nn.Module, ABC):
     def load_(self, path : str):
         raise NotImplementedError()
     
+    @classmethod
     @abstractmethod
-    def load(cls, path : str):
+    def load(cls, path : str, device : th.device | None = None) -> RLAgent:
         raise NotImplementedError()
     
     @abstractmethod
@@ -44,12 +46,12 @@ class RLAgent(nn.Module, ABC):
         raise NotImplementedError()
     
 
-agents_registry = {}
+agents_registry : dict[str, type[RLAgent]] = {}
 
 def register_agent_class(agent_class : type[RLAgent], name : str | None = None):
     agents_registry[name or agent_class.__name__] = agent_class
 
-def load_agent(path : str) -> RLAgent:
+def load_agent(path : str, device : th.device | None = None) -> RLAgent:
     with zipfile.ZipFile(path) as archive:
         with archive.open("extra.yaml", "r") as init_args_yamlfile:
             extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
@@ -59,4 +61,4 @@ def load_agent(path : str) -> RLAgent:
     if not class_name in agents_registry:
         raise RuntimeError(f"Not agent registered with name '{class_name}'")
     cls = agents_registry[class_name]
-    return cls.load(path)
+    return cls.load(path, device)

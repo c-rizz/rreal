@@ -36,6 +36,7 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         with th.no_grad():
             th.cuda.nvtx.mark("get vec part")
             vec_part = self._obs_converter.getVectorPart(observation_batch)
+            # ggLog.info(f"vec_part.devices = {vec_part.device}")
             th.cuda.nvtx.mark("normalize")
             return self._normalizer(vec_part).clone()
     
@@ -64,6 +65,8 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         if "class_name" in extra and extra["class_name"] != cls.__name__:
             raise RuntimeError(f"File was not saved by this class found '{extra['class_name']}' instead of '{cls.__name__}'")
         fe = StackVectorsFeatureExtractor(**extra["init_args"])
+        # Models saved while wrapped by torch.compile() have keys prefixed with "_orig_mod."
+        state_dict = {k.replace("._orig_mod.", "."): v for k, v in state_dict.items()}
         fe.load_state_dict(state_dict)
     
     @override

@@ -704,7 +704,7 @@ class PPO(RLAgent):
                        f"self init_args = \n{self_init_args_yaml}\n"
                        f"load init_args = \n{load_init_args_yaml}\n"
                        f"diff init_args = \n{diff}")
-            raise RuntimeError("Unmatched init_args")
+            # raise RuntimeError("Unmatched init_args")
 
     @override
     def load_(self, path : str):
@@ -733,16 +733,20 @@ class PPO(RLAgent):
                                       extra["actor_feature_extractor_init_args"])
         with zipfile.ZipFile(path) as archive:
             with archive.open("ppo.pth", "r") as ppo_file:
-                self.load_state_dict(th.load(ppo_file))
+                state_dict = th.load(ppo_file)
+                state_dict = {k.replace("._orig_mod.", "."): v for k, v in state_dict.items()}
+                self.load_state_dict(state_dict)
 
     @classmethod
-    def load(cls, path : str):
+    def load(cls, path : str, device : th.device | None = None):
         with zipfile.ZipFile(path) as archive:
             with archive.open("extra.yaml", "r") as init_args_yamlfile:
                 extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
         if "class_name" in extra and extra["class_name"] != cls.__name__:
             raise RuntimeError(f"File was not saved by this class")
         ppo_init_args = extra["init_args"]
+        if device is not None:
+            ppo_init_args["hyperparams"].th_device = device
         with zipfile.ZipFile(path) as archive:
             critic_feature_extractor_class = get_feature_extractor(extra["critic_feature_extractor_class_name"])
             ppo_init_args["critic_feature_extractor"] = critic_feature_extractor_class.load(archive, name="critic_feature_extractor")
