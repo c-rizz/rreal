@@ -65,9 +65,7 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         if "class_name" in extra and extra["class_name"] != cls.__name__:
             raise RuntimeError(f"File was not saved by this class found '{extra['class_name']}' instead of '{cls.__name__}'")
         fe = StackVectorsFeatureExtractor(**extra["init_args"])
-        # Models saved while wrapped by torch.compile() have keys prefixed with "_orig_mod."
-        state_dict = {k.replace("._orig_mod.", "."): v for k, v in state_dict.items()}
-        fe.load_state_dict(state_dict)
+        fe.load_state_dict(_adapt_compiled_state_dict(state_dict, fe))
     
     @override
     def save_to_archive(self, archive : zipfile.ZipFile, name : str = "feature_extractor"):
@@ -87,6 +85,18 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
     
 
 register_feature_extractor_class(StackVectorsFeatureExtractor)
+
+
+def _adapt_compiled_state_dict(state_dict: dict, model: nn.Module) -> dict:
+    """Handle mismatch between state dicts saved with/without torch.compile().
+    torch.compile() wraps submodules under '_orig_mod', so saved keys may have
+    '._orig_mod.' in them while the current model does not, or vice versa."""
+    stripped = {k.replace("._orig_mod.", "."): v for k, v in state_dict.items()}
+    model_keys = set(model.state_dict().keys())
+    if any("._orig_mod." in k for k in model_keys):
+        stripped_to_model = {k.replace("._orig_mod.", "."): k for k in model_keys}
+        return {stripped_to_model.get(k, k): v for k, v in stripped.items()}
+    return stripped
 
 
 def get_model_hashes(model : nn.Module):

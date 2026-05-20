@@ -734,7 +734,13 @@ class PPO(RLAgent):
         with zipfile.ZipFile(path) as archive:
             with archive.open("ppo.pth", "r") as ppo_file:
                 state_dict = th.load(ppo_file)
-                state_dict = {k.replace("._orig_mod.", "."): v for k, v in state_dict.items()}
+                stripped = {k.replace("._orig_mod.", "."): v for k, v in state_dict.items()}
+                model_keys = set(self.state_dict().keys())
+                if any("._orig_mod." in k for k in model_keys):
+                    stripped_to_model = {k.replace("._orig_mod.", "."): k for k in model_keys}
+                    state_dict = {stripped_to_model.get(k, k): v for k, v in stripped.items()}
+                else:
+                    state_dict = stripped
                 self.load_state_dict(state_dict)
 
     @classmethod
