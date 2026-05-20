@@ -700,10 +700,10 @@ class PPO(RLAgent):
                                                 fromfile="self",
                                                 tofile="loaded",
                                                 lineterm=""))
-            ggLog.warn(f"init args of loaded model differ from those of self.\n"
-                       f"self init_args = \n{self_init_args_yaml}\n"
+            ggLog.warn(f"self init_args = \n{self_init_args_yaml}\n"
                        f"load init_args = \n{load_init_args_yaml}\n"
-                       f"diff init_args = \n{diff}")
+                       f"init_args diff = \n{diff}"
+                       f"init args of loaded model differ from those of self.\n")
             # raise RuntimeError("Unmatched init_args")
 
     @override
