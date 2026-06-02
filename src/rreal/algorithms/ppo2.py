@@ -384,19 +384,10 @@ class PPO(RLAgent):
         return tanh_log_determinant
 
     @th.compile(fullgraph=True, mode="max-autotune")
-    def get_action_logprob_entropy_critic_mean(self, obs_batch=None, enc_actor_obs_batch = None, enc_critic_obs_batch = None, action=None):
+    def get_action_and_extras(self, obs_batch=None, enc_actor_obs_batch = None, action=None):
         if enc_actor_obs_batch is None:
-            if self._share_actor_critic_feature_extractor and enc_critic_obs_batch is not None:
-                enc_actor_obs_batch = enc_critic_obs_batch
-            else:
-                actor_obs = self.get_actor_subobservation(obs_batch)
-                enc_actor_obs_batch = self._actor_feature_extractor.extract_features(actor_obs)
-        if enc_critic_obs_batch is None:
-            if self._share_actor_critic_feature_extractor and enc_actor_obs_batch is not None:
-                enc_critic_obs_batch = enc_actor_obs_batch
-            else:
-                critic_obs = self.get_critic_subobservation(obs_batch)
-                enc_critic_obs_batch = self._critic_feature_extractor.extract_features(critic_obs)
+            actor_obs = self.get_actor_subobservation(obs_batch)
+            enc_actor_obs_batch = self._actor_feature_extractor.extract_features(actor_obs)
         action_mean = self.actor_mean(enc_actor_obs_batch)
         # Squash the mean to a stricter bound than the post-tanh action bounds, so the tanh
         # squashing applied to action = mean + noise*std does not eat the noise asymmetrically
@@ -427,6 +418,18 @@ class PPO(RLAgent):
             sampled_act_entropy = action_entropy
         # Brax-style Monte Carlo estimate of the squashed-policy entropy:
         # H[tanh(X)] = H[X] + E[log |d tanh(X)/dX|], approximated with the sampled action.
+        return action, squashed_action, act_log_prob, action_entropy, action_mean, sampled_act_entropy
+
+
+    @th.compile(fullgraph=True, mode="max-autotune")
+    def get_action_logprob_entropy_critic_mean(self, obs_batch=None, enc_actor_obs_batch = None, enc_critic_obs_batch = None, action=None):
+        action, squashed_action, act_log_prob, action_entropy, action_mean, sampled_act_entropy = self.get_action_and_extras(obs_batch, enc_actor_obs_batch, action)
+        if enc_critic_obs_batch is None:
+            if self._share_actor_critic_feature_extractor and enc_actor_obs_batch is not None:
+                enc_critic_obs_batch = enc_actor_obs_batch
+            else:
+                critic_obs = self.get_critic_subobservation(obs_batch)
+                enc_critic_obs_batch = self._critic_feature_extractor.extract_features(critic_obs)
         return action, squashed_action, act_log_prob, action_entropy, self.critic(enc_critic_obs_batch), action_mean, sampled_act_entropy
 
     @th.compile(fullgraph=True, mode="max-autotune")
@@ -681,11 +684,10 @@ class PPO(RLAgent):
 
     @override
     def predict_action(self, observation_batch, deterministic = False, extra_returns : dict | None = None):
+        act, squashed_act, logprob, entropy, mean, _ = self.get_action_and_extras(obs_batch=observation_batch)
         if deterministic:
-            act, squashed_act, logprob, entropy, critic, mean, _ = self.get_action_logprob_entropy_critic_mean(obs_batch=observation_batch)
             return th.tanh(mean).detach().clone()
         else:
-            act, squashed_act, logprob, entropy, critic, mean, _ = self.get_action_logprob_entropy_critic_mean(obs_batch=observation_batch)
             return squashed_act.detach().clone()
 
     @override
