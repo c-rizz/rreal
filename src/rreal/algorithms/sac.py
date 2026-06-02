@@ -206,11 +206,28 @@ class SAC_init_hparams:
 class SignedELUBounding(nn.Module):
     """Bounds vector entries to positive-only or negative-only ranges using ELU."""
 
-    def __init__(self, q_bounds_minmax: th.Tensor):
+    def __init__(self, q_bounds_minmax: th.Tensor, x_offset : th.Tensor | float = -4.0):
+        """ Initialize the bounding layer
+
+        Parameters
+        ----------
+        q_bounds_minmax : th.Tensor
+            A tensor of shape [2, N] containing the min and max bounds for each of the N components of the input vector.
+        x_offset : th.Tensor | float, optional
+            The offset for the ELU activation function. Useful to bring the activation closer to an identity. With
+            x_offset=0 SignedELUBounding(0) = ±1, with x_offset=-4 SignedELUBounding(-4) ≈ ±0.0183.
+            by default -4.0
+
+        Raises
+        ------
+        NotImplementedError
+            _description_
+        """
         super().__init__()
         if q_bounds_minmax.dim() != 2 or q_bounds_minmax.size(0) != 2:
             raise NotImplementedError("SignedELUBounding expects bounds shaped [2, N]")
         self._vector_size = q_bounds_minmax.shape[1]
+        self._x_offset = x_offset
         self._bounded_positive_mask = q_bounds_minmax[0] >= 0
         self._bounded_negative_mask = q_bounds_minmax[1] <= 0
         self._needs_positive_bounding = bool(th.any(self._bounded_positive_mask).item())
@@ -224,10 +241,10 @@ class SignedELUBounding(nn.Module):
             return q_values
         
         if self._needs_positive_bounding:
-            bounded_positive = F.elu(q_values) + 1.0
+            bounded_positive = F.elu(q_values+self._x_offset) + 1.0
             q_values = th.where(self._bounded_positive_mask, bounded_positive, q_values)
         if self._needs_negative_bounding:
-            bounded_negative = - (F.elu(-q_values) + 1.0)
+            bounded_negative = - (F.elu(-q_values+self._x_offset) + 1.0)
             q_values = th.where(self._bounded_negative_mask, bounded_negative, q_values)
         return q_values
 

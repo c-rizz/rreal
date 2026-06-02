@@ -213,6 +213,11 @@ class PPO_Hyperparams: # We keep it outside ppo because yaml does not handle nes
     """Subset of observation keys visible to the critic. Requires Dict observations."""
     init_actor_logstd : float = 0.0
     """The initial value for the actor log standard deviation parameters"""
+    actor_mean_bounds_ratio : float = 1.0
+    """Fraction of the post-tanh action range that the actor's mean is allowed to reach.
+    With 1.0 (default) the mean can reach the action bounds; reducing it (e.g. 0.9) keeps the mean
+    away from ±1 so the tanh squashing does not eat the action noise asymmetrically near the
+    boundaries."""
 
 class PPO(RLAgent):
 
@@ -296,6 +301,14 @@ class PPO(RLAgent):
                                     last_layer_init_func=lambda m: ortho_layer_init_(m,0.01,action_mean_init)).to(device=self._hp.th_device)
 
         self.actor_logstd = nn.Parameter(th.full((1, self._action_len), self._hp.init_actor_logstd, device=self._hp.th_device))
+        # Pre-compute the pre-tanh scale used to squash the actor mean to a stricter bound than ±1.
+        # Output post-tanh mean lies in [-actor_mean_bounds_ratio, actor_mean_bounds_ratio].
+        eps = 1e-6
+        ratio = float(self._hp.actor_mean_bounds_ratio)
+        if ratio <= 0.0 or ratio > 1.0:
+            raise RuntimeError(f"actor_mean_bounds_ratio must be in (0, 1], got {ratio}")
+        self._apply_mean_bounds = ratio < 1.0
+        self._mean_bounds_pretanh_scale : float = math.atanh(min(ratio, 1.0 - eps))
         if self._hp.q_lr is not None and self._hp.q_lr!=self._hp.policy_lr:
             raise NotImplementedError("Different learning rates for Q and policy are not supported yet.")
         self._optimizer = AdamW(self.parameters(), lr=self._hp.policy_lr, eps=1e-8)
@@ -385,6 +398,14 @@ class PPO(RLAgent):
                 critic_obs = self.get_critic_subobservation(obs_batch)
                 enc_critic_obs_batch = self._critic_feature_extractor.extract_features(critic_obs)
         action_mean = self.actor_mean(enc_actor_obs_batch)
+        # Squash the mean to a stricter bound than the post-tanh action bounds, so the tanh
+        # squashing applied to action = mean + noise*std does not eat the noise asymmetrically
+        # near ±1. The post-tanh mean ends up in [-actor_mean_bounds_ratio, actor_mean_bounds_ratio].
+        # The log-prob correction for the tanh squashing is unaffected: this only reshapes the
+        # pre-tanh mean, the Normal(mean, std) density and the tanh jacobian are unchanged.
+        if self._apply_mean_bounds:
+            scale = self._mean_bounds_pretanh_scale
+            action_mean = th.tanh(action_mean / scale) * scale
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = th.exp(action_logstd)
         probs = Normal(action_mean, action_std)
@@ -957,7 +978,6 @@ def train_on_policy(collector : Collector,
 
 
 
-
 @dataclass
 class PPO_hyperparams():
     actor_network_arch : tuple[int,...]
@@ -982,6 +1002,7 @@ class PPO_hyperparams():
     init_actor_logstd : float
     actor_observation_filter : list[str] | None = None
     critic_observation_filter : list[str] | None = None
+    actor_mean_bounds_ratio : float = 1.0
 
 def ppo_train(  seed : int,
                 folderName : str,
@@ -1071,7 +1092,8 @@ def ppo_train(  seed : int,
                                 clip_vloss=agent_hyperparams.epsilon_value_clip_epsilon < float("+inf"),
                                 gae_lambda=agent_hyperparams.gae_lambda,
                                 max_grad_norm=agent_hyperparams.max_grad_norm,
-                                init_actor_logstd=agent_hyperparams.init_actor_logstd))
+                                init_actor_logstd=agent_hyperparams.init_actor_logstd,
+                                actor_mean_bounds_ratio=agent_hyperparams.actor_mean_bounds_ratio))
     ggLog.info(f"Compiling PPO model...")
     t0 = time.monotonic()
     agent = th.compile(agent, fullgraph=True, mode="max-autotune")
