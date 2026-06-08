@@ -218,6 +218,9 @@ class PPO_Hyperparams: # We keep it outside ppo because yaml does not handle nes
     With 1.0 (default) the mean can reach the action bounds; reducing it (e.g. 0.9) keeps the mean
     away from ±1 so the tanh squashing does not eat the action noise asymmetrically near the
     boundaries."""
+    reference_init_args : dict = dataclasses.field(default_factory=dict)
+    """Additional arguments that will be saved together with the model, just for reference on how it was trained"""
+    
 
 class PPO(RLAgent):
 
@@ -981,7 +984,7 @@ def train_on_policy(collector : Collector,
 
 
 @dataclass
-class PPO_hyperparams():
+class PPO_init_hyperparams():
     actor_network_arch : tuple[int,...]
     critic_network_arch : tuple[int,...]
     epsilon_policy_ratio_clip : float
@@ -1005,6 +1008,7 @@ class PPO_hyperparams():
     actor_observation_filter : list[str] | None = None
     critic_observation_filter : list[str] | None = None
     actor_mean_bounds_ratio : float = 1.0
+    reference_init_args : dict = dataclasses.field(default_factory=dict)
 
 def ppo_train(  seed : int,
                 folderName : str,
@@ -1013,7 +1017,7 @@ def ppo_train(  seed : int,
                 env_builder : EnvBuilderProtocol | None,
                 vec_env_builder : VecEnvBuilderProtocol | None,
                 env_builder_args : dict,
-                agent_hyperparams : PPO_hyperparams,
+                agent_hyperparams : PPO_init_hyperparams,
                 max_episode_duration : int,
                 validation_buffer_size : int,
                 validation_holdout_ratio : float,
@@ -1095,7 +1099,8 @@ def ppo_train(  seed : int,
                                 gae_lambda=agent_hyperparams.gae_lambda,
                                 max_grad_norm=agent_hyperparams.max_grad_norm,
                                 init_actor_logstd=agent_hyperparams.init_actor_logstd,
-                                actor_mean_bounds_ratio=agent_hyperparams.actor_mean_bounds_ratio))
+                                actor_mean_bounds_ratio=agent_hyperparams.actor_mean_bounds_ratio,
+                                reference_init_args=agent_hyperparams.reference_init_args))
     ggLog.info(f"Compiling PPO model...")
     t0 = time.monotonic()
     agent = th.compile(agent, fullgraph=True, mode="max-autotune")
@@ -1170,7 +1175,7 @@ def example():
                 env_builder=gym_builder,
                 vec_env_builder=None,
                 env_builder_args=env_builder_args,
-                agent_hyperparams=PPO_hyperparams(  minibatch_size=512,
+                agent_hyperparams=PPO_init_hyperparams(  minibatch_size=512,
                                                     th_device=th.device("cuda"),
                                                     actor_network_arch=(64,64),
                                                     critic_network_arch=(64,64),

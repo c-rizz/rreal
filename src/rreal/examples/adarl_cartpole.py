@@ -375,7 +375,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                 env_builder_args=env_builder_args,
                 num_envs=num_envs)
     elif algo == "ppo":
-        from rreal.algorithms.ppo2 import ppo_train, PPO_hyperparams
+        from rreal.algorithms.ppo2 import ppo_train, PPO_init_hyperparams
         ppo_train(  seed=seed,
                 folderName=folderName,
                 run_id=run_id,
@@ -383,7 +383,7 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                 env_builder=None,
                 vec_env_builder=cartpole_venv_builder,
                 env_builder_args=env_builder_args,
-                agent_hyperparams=PPO_hyperparams(  minibatch_size=512,
+                agent_hyperparams=PPO_init_hyperparams(  minibatch_size=512,
                                                     th_device=th.device("cuda"),
                                                     q_lr=0.003,
                                                     policy_lr=3e-4,
