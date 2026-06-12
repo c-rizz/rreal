@@ -19,7 +19,7 @@ import adarl.utils.session
 import inspect
 import copy
 from rreal.algorithms.sac_helpers import EnvBuilderProtocol, VecEnvBuilderProtocol
-from typing import Any, Final
+from typing import Any, Final, TypeVar
 from adarl.utils.callbacks import TrainingCallback, CallbackList, CheckpointCallbackRB
 import adarl.utils.sigint_handler
 from rreal.algorithms.rl_agent import RLAgent, register_agent_class
@@ -28,7 +28,7 @@ from rreal.feature_extractors import get_feature_extractor
 from typing_extensions import override
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
-from adarl.utils.utils import numpy_to_torch_dtype_dict, get_func_input_args
+from adarl.utils.utils import numpy_to_torch_dtype_dict, get_func_input_args, override_struct
 from adarl.utils.tensor_trees import map_tensor_tree
 import adarl.utils.dbg.ggLog as ggLog
 import numpy as np
@@ -770,7 +770,9 @@ class PPO(RLAgent):
                 self.load_state_dict(state_dict)
 
     @classmethod
-    def load(cls, path : str, device : th.device | None = None):
+    def load(cls,   path : str, 
+                    device : th.device | None = None,
+                    init_args_override : dict | None = None):
         with zipfile.ZipFile(path) as archive:
             with archive.open("extra.yaml", "r") as init_args_yamlfile:
                 extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
@@ -787,12 +789,17 @@ class PPO(RLAgent):
             else:
                 actor_feature_extractor_class = get_feature_extractor(extra["actor_feature_extractor_class_name"])
                 ppo_init_args["actor_feature_extractor"] = actor_feature_extractor_class.load(archive, name="actor_feature_extractor")
+        override_struct(ppo_init_args, init_args_override)
         ggLog.info(f"PPO.load(): building model with args: \n"+pprint.pformat(ppo_init_args))
         model = cls(**ppo_init_args)
         # At this point we should have a model that is initialized exactly like the one that was saved
         # So we can load into it the state from the checkpoint
         model.load_(path)
         return model
+    
+    @override
+    def get_reference_init_args(self) -> dict:
+        return self._hp.reference_init_args
 
 register_agent_class(PPO)
 

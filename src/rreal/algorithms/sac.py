@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 from gc import freeze
 from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch, BaseBuffer, BaseValidatingBuffer
@@ -76,7 +75,7 @@ def compare_dicts(d1 : dict, d2 : dict) -> tuple[bool, str]:
     all_keys = set(d1.keys()).union(set(d2.keys()))
     diffs = ""
     equal = True
-    for k in all_keys:
+    for k in sorted(all_keys):
         e1 = d1.get(k,None)
         e2 = d2.get(k,None)
         d = th.as_tensor(e1 != e2)
@@ -468,6 +467,7 @@ class SAC(RLAgent):
         alpha_lr_factor : float
         reward_space : spaces.ThBox
         independent_entropy_q : bool
+        init_hparams : SAC_init_hparams
 
     def __init__(self,
                  init_hparams : SAC_init_hparams,
@@ -572,7 +572,8 @@ class SAC(RLAgent):
                                    gamma_reward_scaling = True,
                                    alpha_lr_factor=init_hparams.alpha_lr_factor,
                                    reward_space = reward_space,
-                                   independent_entropy_q = init_hparams.independent_entropy_q)
+                                   independent_entropy_q = init_hparams.independent_entropy_q,
+                                   init_hparams = init_hparams)
         self._transition_augmentation_func = None
         self._default_reward_weights = th.ones(rewards_num, dtype=self._dtype, device=self._hp.torch_device)
         self._obs_space_sizes = sizetree_from_space(observation_space)
@@ -1404,6 +1405,10 @@ class SAC(RLAgent):
     
     def get_stats(self):
         return self._stats
+    
+    @override
+    def get_reference_init_args(self) -> dict:
+        return self._hp.init_hparams.reference_init_args
 
 register_agent_class(SAC)
 
