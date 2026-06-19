@@ -2,10 +2,10 @@ from __future__ import annotations
 from gc import freeze
 from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch, BaseBuffer, BaseValidatingBuffer
 from adarl.utils.callbacks import TrainingCallback, CallbackList
-from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree
+from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree, filter_by_key_tensor_tree, map_tensor_tree_withkey
 from adarl.utils.wandb_wrapper import wandb_log
 from adarl.utils.dbg.dbg_checks import dbg_check_finite, dbg_check_size
-from adarl.utils.utils import get_func_input_args, th_compile_ext
+from adarl.utils.utils import get_func_input_args, th_compile_ext, override_struct
 from dataclasses import dataclass, asdict
 from rreal.algorithms.collectors import ExperienceCollector
 from rreal.algorithms.rl_agent import RLAgent, register_agent_class
@@ -790,19 +790,35 @@ class SAC(RLAgent):
                 #     print("k=",k)
                 #     yaml.dump(extra["init_args"][k],default_flow_style=None)
                 extra_file.write(yaml.dump(extra,default_flow_style=None).encode("utf-8"))
+            
             self._critic_feature_extractor.save_to_archive(archive, name="critic_feature_extractor")
             self._actor_feature_extractor.save_to_archive(archive, name="actor_feature_extractor")
             # th.save( self._feature_extractor.state_dict(), path+".fe_state.pth")
+
+            reference_data_folder = adarl.utils.session.default_session.run_info.get("reference_data_folder", None)
+            if reference_data_folder is not None and os.path.isdir(reference_data_folder):
+                for root, _, files in os.walk(reference_data_folder):
+                    for filename in files:
+                        file_path = os.path.join(root, filename)
+                        arcname = os.path.join("reference_data",
+                                               os.path.relpath(file_path, reference_data_folder))
+                        archive.write(file_path, arcname=arcname)
         
     def _check_feature_extractor(self, current_featur_extractor : FeatureExtractor, loaded_fe_name, loaded_fe_args):
         if current_featur_extractor.__class__.__name__ != loaded_fe_name:
             ggLog.warn(f"feature_extractor_class_name of loaded model differs from that of self.\n"
                        f"loaded = {loaded_fe_name}, self's = {self._critic_feature_extractor.__class__.__name__}")
             raise RuntimeError("Unmatched init_args")
-        if current_featur_extractor.get_init_args() != loaded_fe_args:
+        current_fe_args_ = copy.deepcopy(current_featur_extractor.get_init_args())
+        loaded_fe_args_ = copy.deepcopy(loaded_fe_args)
+        current_fe_args_["observation_space"].seed(0) # ignore the rng state
+        loaded_fe_args_["observation_space"].seed(0) # ignore the rng state
+        loaded_fe_args_["device"] = None # ignore the device
+        current_fe_args_["device"] = None # ignore the device
+        if current_fe_args_ != loaded_fe_args_:
             import difflib
-            self_init_args_yaml = yaml.dump(current_featur_extractor.get_init_args())
-            load_init_args_yaml = yaml.dump(loaded_fe_args)
+            self_init_args_yaml = yaml.dump(current_fe_args_)
+            load_init_args_yaml = yaml.dump(loaded_fe_args_)
             diff = "".join(difflib.unified_diff(self_init_args_yaml.splitlines(keepends=True),
                                         load_init_args_yaml.splitlines(keepends=True),
                                         fromfile="self",
@@ -839,25 +855,71 @@ class SAC(RLAgent):
         with zipfile.ZipFile(path) as archive:
             with archive.open("sac.pth", "r") as sac_file:
                 self.load_state_dict(th.load(sac_file))
+            self._diff_reference_data(archive)
 
+    def _diff_reference_data(self, archive : zipfile.ZipFile):
+        # Compare the reference_data stored in the archive against the folder
+        # currently indicated by the session's run_info, and warn if they differ.
+        archived_files = {os.path.relpath(name, "reference_data") : name
+                          for name in archive.namelist()
+                          if name.startswith("reference_data/") and not name.endswith("/")}
+        reference_data_folder = adarl.utils.session.default_session.run_info.get("reference_data_folder", None)
+        if reference_data_folder is None or not os.path.isdir(reference_data_folder):
+            if archived_files:
+                ggLog.warn(f"Loaded model contains reference_data but run_info has no valid "
+                           f"reference_data_folder (got {reference_data_folder!r}).")
+            return
+
+        current_files = {}
+        for root, _, files in os.walk(reference_data_folder):
+            for filename in files:
+                file_path = os.path.join(root, filename)
+                current_files[os.path.relpath(file_path, reference_data_folder)] = file_path
+
+        only_in_archive = sorted(set(archived_files) - set(current_files))
+        only_in_current = sorted(set(current_files) - set(archived_files))
+        differing_content = []
+        for relpath in sorted(set(archived_files) & set(current_files)):
+            with archive.open(archived_files[relpath], "r") as f:
+                archived_bytes = f.read()
+            with open(current_files[relpath], "rb") as f:
+                current_bytes = f.read()
+            if archived_bytes != current_bytes:
+                differing_content.append(relpath)
+
+        if only_in_archive or only_in_current or differing_content:
+            ggLog.warn(f"reference_data in loaded model differs from current "
+                       f"reference_data_folder ({reference_data_folder}):\n"
+                       f"  only in saved model:   {only_in_archive}\n"
+                       f"  only in current folder: {only_in_current}\n"
+                       f"  differing content:      {differing_content}")
+
+    @override
     @classmethod
-    def load(cls, path : str):
+    def load(cls,   path : str,
+                    device : th.device | None = None,
+                    init_args_override : dict | None = None):
         with zipfile.ZipFile(path) as archive:
             with archive.open("extra.yaml", "r") as init_args_yamlfile:
                 extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
         if "class_name" in extra and extra["class_name"] != cls.__name__:
             raise RuntimeError(f"File was not saved by this class")
-        sac_init_args = extra["init_args"]
+        init_args = extra["init_args"]
+        if device is not None:
+            init_args["init_hparams"].model_th_device = device
+        if init_args_override is not None:
+            init_args.update(init_args_override)
         with zipfile.ZipFile(path) as archive:
             critic_feature_extractor_class = get_feature_extractor(extra["critic_feature_extractor_class_name"])
-            sac_init_args["critic_feature_extractor"] = critic_feature_extractor_class.load(archive, name="critic_feature_extractor")
+            init_args["critic_feature_extractor"] = critic_feature_extractor_class.load(archive, name="critic_feature_extractor")
             if extra["share_feature_extractor"]:
-                sac_init_args["actor_feature_extractor"] = sac_init_args["critic_feature_extractor"]
+                init_args["actor_feature_extractor"] = init_args["critic_feature_extractor"]
             else:
                 actor_feature_extractor_class = get_feature_extractor(extra["actor_feature_extractor_class_name"])
-                sac_init_args["actor_feature_extractor"] = actor_feature_extractor_class.load(archive, name="actor_feature_extractor")
-        ggLog.info(f"SAC.load(): building model with args: \n"+pprint.pformat(sac_init_args))
-        model = SAC(**sac_init_args)
+                init_args["actor_feature_extractor"] = actor_feature_extractor_class.load(archive, name="actor_feature_extractor")
+        override_struct(init_args, init_args_override)
+        ggLog.info(f"SAC.load(): building model with args: \n"+pprint.pformat(init_args))
+        model = SAC(**init_args)
         # At this point we should have a model that is initialized exactly like the one that was saved
         # So we can load into it the state from the checkpoint
         model.load_(path)
