@@ -28,3 +28,7 @@ class FeatureExtractor(ABC, th.nn.Module):
     
     def get_init_args(self) -> dict[str,typing.Any]:
         return self._init_args
+    
+    @abstractmethod
+    def check_init_args_match(self : FeatureExtractor, loaded_fe_name : str, loaded_fe_args : dict[str, typing.Any]):
+        raise NotImplementedError("This method should be implemented in the subclass")

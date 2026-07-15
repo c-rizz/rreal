@@ -90,7 +90,7 @@ class ExperienceCollector(ABC):
         return self._reward_space
     
     def reset(self):
-        with th.no_grad():
+        with th.inference_mode():
             if self._vec_env is not None:
                 self._current_obs, info = self._vec_env.reset()
             self._current_obs = copy.deepcopy(self._current_obs) # make a copy of it to avoid inplace issues, this will be then in-place written during the steps
@@ -98,7 +98,7 @@ class ExperienceCollector(ABC):
     def collect_experience(self, policy : RLAgent, vsteps_to_collect, global_vstep_count, random_vsteps, policy_device,
                            buffer : BasicStorage, deterministic_ratio = 0.0, random_ratio = 0.0):
         t0 = time.monotonic()
-        with th.no_grad(): #just to be sure
+        with th.inference_mode(): #just to be sure
             if  self._current_obs is None:
                 raise RuntimeError(f"last_obs is not set. reset() should be called before running collect_experience the first time")
             num_envs = self.num_envs()

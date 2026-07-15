@@ -11,9 +11,11 @@ import adarl.utils.dbg.ggLog as ggLog
 from typing_extensions import override
 import zipfile
 from adarl.utils.running_mean_std import RunningNormalizer
-from adarl.utils.utils import get_func_input_args
+from adarl.utils.utils import get_func_input_args, check_dict_match
 import hashlib
+import copy
 import pickle
+from typing import Any
 
 class StackVectorsFeatureExtractor(FeatureExtractor):
     def __init__(self,  observation_space : gym.spaces.Space,
@@ -83,6 +85,19 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
     def train_extractor(self, global_step, grad_steps, buffer):
         pass
     
+    @override
+    def check_init_args_match(self : FeatureExtractor, loaded_fe_name : str, loaded_fe_args : dict[str, Any]):
+        if self.__class__.__name__ != loaded_fe_name:
+            ggLog.warn(f"feature_extractor_class_name of loaded model differs from that of self.\n"
+                       f"loaded = {loaded_fe_name}, self's = {self._critic_feature_extractor.__class__.__name__}")
+            raise RuntimeError("Unmatched init_args")
+        current_fe_args_ = self.get_init_args().copy()
+        loaded_fe_args_ = loaded_fe_args.copy()
+        current_fe_args_["observation_space"].seed(0) # ignore the rng state
+        loaded_fe_args_["observation_space"].seed(0) # ignore the rng state
+        loaded_fe_args_["device"] = None # ignore the device
+        current_fe_args_["device"] = None # ignore the device
+        check_dict_match(current_fe_args_, loaded_fe_args_)
 
 register_feature_extractor_class(StackVectorsFeatureExtractor)
 

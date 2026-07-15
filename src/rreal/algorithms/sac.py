@@ -803,32 +803,6 @@ class SAC(RLAgent):
                         arcname = os.path.join("reference_data",
                                                os.path.relpath(file_path, reference_data_folder))
                         archive.write(file_path, arcname=arcname)
-        
-    def _check_feature_extractor(self, current_featur_extractor : FeatureExtractor, loaded_fe_name, loaded_fe_args):
-        if current_featur_extractor.__class__.__name__ != loaded_fe_name:
-            ggLog.warn(f"feature_extractor_class_name of loaded model differs from that of self.\n"
-                       f"loaded = {loaded_fe_name}, self's = {self._critic_feature_extractor.__class__.__name__}")
-            raise RuntimeError("Unmatched init_args")
-        current_fe_args_ = copy.deepcopy(current_featur_extractor.get_init_args())
-        loaded_fe_args_ = copy.deepcopy(loaded_fe_args)
-        current_fe_args_["observation_space"].seed(0) # ignore the rng state
-        loaded_fe_args_["observation_space"].seed(0) # ignore the rng state
-        loaded_fe_args_["device"] = None # ignore the device
-        current_fe_args_["device"] = None # ignore the device
-        if current_fe_args_ != loaded_fe_args_:
-            import difflib
-            self_init_args_yaml = yaml.dump(current_fe_args_)
-            load_init_args_yaml = yaml.dump(loaded_fe_args_)
-            diff = "".join(difflib.unified_diff(self_init_args_yaml.splitlines(keepends=True),
-                                        load_init_args_yaml.splitlines(keepends=True),
-                                        fromfile="self",
-                                        tofile="loaded",
-                                        lineterm=""))
-            ggLog.warn(f"init args of loaded model differ from those of self.\n"
-                       f"self init_args = \n{self_init_args_yaml}\n"
-                       f"load init_args = \n{load_init_args_yaml}\n"
-                       f"diff init_args = \n{diff}")
-            raise RuntimeError("Unmatched init_args")
 
     def load_(self, path : str):
         # Before loading the state dict we try to check that the models are compatible
@@ -846,12 +820,12 @@ class SAC(RLAgent):
             ggLog.warn(f"load init_args  = \n{load_yaml_args}")
             ggLog.warn(f"Differing fields: \n{reasons}")
 
-        self._check_feature_extractor(self._critic_feature_extractor,
-                                      extra["critic_feature_extractor_class_name"],
-                                      extra["critic_feature_extractor_init_args"])
-        self._check_feature_extractor(self._actor_feature_extractor,
-                                      extra["actor_feature_extractor_class_name"],
-                                      extra["actor_feature_extractor_init_args"])
+        self._critic_feature_extractor.check_init_args_match(
+                                    extra["critic_feature_extractor_class_name"],
+                                    extra["critic_feature_extractor_init_args"])
+        self._actor_feature_extractor.check_init_args_match(
+                                    extra["actor_feature_extractor_class_name"],
+                                    extra["actor_feature_extractor_init_args"])
         with zipfile.ZipFile(path) as archive:
             with archive.open("sac.pth", "r") as sac_file:
                 self.load_state_dict(th.load(sac_file))
