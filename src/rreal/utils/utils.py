@@ -11,10 +11,12 @@ def scale_layer_weights(m : th.nn.Module, multiplier, bias_offset : th.Tensor | 
         m.weight *= multiplier
         m.bias *= multiplier
         m.bias += bias_offset
-    elif len(list(m.parameters()))==0:
-        pass
+    elif isinstance(m, th.nn.utils.parametrize.ParametrizationList):
+        pass # its original0/original1 were already scaled through the parametrized .weight above
+    elif len(list(m.parameters(recurse=False)))==0:
+        pass # container, or parameter-free leaf
     else:
-        raise RuntimeError(f"Unexpected module type {type(m)}")    
+        raise RuntimeError(f"Unexpected module type {type(m)}")
     
 def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     last_activation_class : Callable[[],th.nn.Module] = th.nn.Identity,

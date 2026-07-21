@@ -36,7 +36,7 @@ class DeconvNet(nn.Module):
                         kernel_sizes : List[int] | None = None,
                         paddings : List[int] | None = None,
                         scales : List[int] | None = None,
-                        torchDevice : str = "cuda",
+                        torchDevice : str | th.device = "cuda",
                         use_batchnorm = True):
         super().__init__()
         # ggLog.info(f"filters_number = {filters_number}")
