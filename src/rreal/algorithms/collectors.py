@@ -465,7 +465,11 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         self._commander.set_command("collect")
 
     def wait_collection(self, timeout = 10.0):
-        self._commander.wait_done(timeout=timeout)
+        try:
+            self._commander.wait_done(timeout=timeout)
+        except TimeoutError as e:
+            ggLog.error(f"Timed out waiting for collection, collector process alive = {self._collector_process.is_alive()}")
+            raise e
         return self._buffer
     
     def is_collecting(self):

@@ -16,17 +16,23 @@ import hashlib
 import copy
 import pickle
 from typing import Any
+from dataclasses import dataclass
+
+@dataclass
+class StackVectorsFeatureExtractorInitArgs:
+    device : th.device
+    normalize_input_obs : bool = True
+
 
 class StackVectorsFeatureExtractor(FeatureExtractor):
     def __init__(self,  observation_space : gym.spaces.Space,
-                        device : th.device,
-                        normalize_input_obs : bool = True):
+                        hp : StackVectorsFeatureExtractorInitArgs):
         super().__init__()
         self._init_args = get_func_input_args(exclude=["self", "__class__"])
-        self._normalize_input_obs = normalize_input_obs
-        self._th_device = device
+        self._normalize_input_obs = hp.normalize_input_obs
+        self._th_device = hp.device
         self._obs_converter = ObsConverter(observation_shape=observation_space)
-        if normalize_input_obs:
+        if self._normalize_input_obs:
             self._normalizer = RunningNormalizer(shape=(self._obs_converter.vector_part_size(),),
                                                 dtype = self._obs_converter.getVectorPartDtype(),
                                                 device=self._th_device)
@@ -48,7 +54,7 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
     
     @override
     @classmethod
-    def load(cls, file : zipfile.ZipFile | str, name : str = "feature_extractor"):
+    def load(cls, file : zipfile.ZipFile | str, name : str = "feature_extractor", device : th.device | None = None) -> StackVectorsFeatureExtractor:
         # if isinstance(file,str): # just for compatibility
         #     fname = file+".feature_extractor.extra.yaml"
         #     ggLog.info(f"opening {fname}")
@@ -66,6 +72,8 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
             raise RuntimeError(f"Unexpected input type")
         if "class_name" in extra and extra["class_name"] != cls.__name__:
             raise RuntimeError(f"File was not saved by this class found '{extra['class_name']}' instead of '{cls.__name__}'")
+        if device is not None:
+            extra["init_args"]["hp"].device = device
         fe = StackVectorsFeatureExtractor(**extra["init_args"])
         fe.load_state_dict(_adapt_compiled_state_dict(state_dict, fe))
     

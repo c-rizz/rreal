@@ -4,7 +4,6 @@ import torch.nn as nn
 from typing import Tuple, List
 import torchvision
 import adarl.utils.dbg.dbg_img as dbg_img
-from autoencoding_rl.utils import tensorToHumanCvImageRgb
 import adarl.utils.dbg.ggLog as ggLog
 from torchvision.transforms.functional import InterpolationMode
 

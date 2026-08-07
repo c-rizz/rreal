@@ -10,5 +10,6 @@ def register_feature_extractor_class(fe_class : type):
     feature_extractor_classes[fe_class.__name__] = fe_class
 
 
-import rreal.feature_extractors.stack_vectors_feature_extractor 
+import rreal.feature_extractors.stack_vectors_feature_extractor
+import rreal.feature_extractors.mixed_feature_extractor
     

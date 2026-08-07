@@ -5,6 +5,7 @@ from rreal.nets.Parallel import Parallel
 from torch.nn.utils.parametrizations import weight_norm
 from adarl.utils.tensor_trees import TensorTree
 import gymnasium as gym
+from adarl.utils import spaces
 
 def scale_layer_weights(m : th.nn.Module, multiplier, bias_offset : th.Tensor | float = 0.0):
     if isinstance(m, th.nn.Linear):
@@ -159,3 +160,21 @@ def update_net_state(src : th.nn.Module, dst : th.nn.Module, strict = True, tau 
             dst.get_parameter(name).data.copy_(src_param.data * tau + dst.get_parameter(name).data * (1-tau))
         for name, src_buffer in src.named_buffers():
             dst.get_buffer(name).data.copy_(src_buffer.data * tau + dst.get_buffer(name).data * (1-tau))
+
+
+def filter_dict_space(space : spaces.gym_spaces.Space, space_filter : list[str] | None) -> spaces.gym_spaces.Space:
+    if space_filter != None:
+        if isinstance(space, spaces.gym_spaces.Dict):
+            filtered_space = spaces.gym_spaces.Dict({k:v for k,v in space.items() if k in space_filter})
+        else:
+            raise RuntimeError(f"observation space must be a Dict to use filter, but it's a {type(space)}")
+    else:
+        filtered_space = space
+    return filtered_space
+
+def filter_dict(d : dict[str, th.Tensor], dfilter : list[str] | None) -> dict[str, th.Tensor]:
+    if dfilter is None:
+        return d
+    else:
+        r = {k:d.get(k,None) for k in dfilter} #type: ignore
+        return {k:v for k,v in r.items() if v is not None}

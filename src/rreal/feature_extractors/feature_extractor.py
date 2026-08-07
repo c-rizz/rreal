@@ -15,7 +15,7 @@ class FeatureExtractor(ABC, th.nn.Module):
     
     @classmethod
     @abstractmethod
-    def load(cls, archive : zipfile.ZipFile, name : str = "feature_extractor"):
+    def load(cls, archive : zipfile.ZipFile, name : str = "feature_extractor", device : th.device | None = None) -> FeatureExtractor:
         raise NotImplementedError()
     
     @abstractmethod

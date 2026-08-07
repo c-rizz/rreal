@@ -1,9 +1,10 @@
+from adarl.utils.dbg.dbg_checks import dbg_check_size
 from rreal.nets.Image_encoder import Image_encoder
 from rreal.nets.Parallel import Parallel
 
 import torch as th
 import torch.nn as nn
-from typing import Tuple, List
+from typing import Tuple, List, Callable
 
 import adarl.utils.dbg.ggLog as ggLog
 from rreal.utils.utils import build_mlp_net, scale_layer_weights
@@ -39,6 +40,9 @@ class Mixed_VAE_encoder(nn.Module):
         self._fcs_ensemble_size = 1
         self._concatenate_mulogvar = concatenate_mulogvar
 
+        if dropout_prob > 0:
+            raise NotImplementedError("Dropout is not implemented yet for Mixed_VAE_encoder. Please set dropout_prob=0.")
+
         if type(combiner_arch)==str and combiner_arch.lower().strip() == "identity":
             combined_size = img_encoding_size + vec_encoding_size
         else:
@@ -48,11 +52,9 @@ class Mixed_VAE_encoder(nn.Module):
                                         image_height = image_height,
                                         img_ensemble_size = img_ensemble_size,
                                         img_encoding_size = img_encoding_size,
-                                        backbone = backbone,
-                                        checkDimensions = checkDimensions,
+                                        img_backbone = backbone,
                                         torchDevice = torchDevice,
                                         use_coord_conv = use_coord_conv,
-                                        dropout_prob = dropout_prob,
                                         vec_encoder_arch = vec_encoder_arch,
                                         vec_part_size = vec_part_size,
                                         vec_encoding_size = vec_encoding_size,
@@ -124,29 +126,25 @@ class Mixed_encoder(nn.Module):
                         image_height : int = 64,
                         img_ensemble_size = 1,
                         img_encoding_size = 0,
-                        backbone : str = "conv",
-                        checkDimensions : bool = True,
+                        img_backbone : str | None = "conv",
                         torchDevice : str | th.device = "cuda",
                         use_coord_conv : bool = True,
-                        dropout_prob : float = 0,
-                        vec_encoder_arch : List[int] | str = [64,64],
+                        vec_encoder_arch : List[int] | str | None = [64,64],
                         vec_part_size = 0,
                         vec_encoding_size = 0,
                         vec_ensemble_size = 1,
                         output_size = 32,
                         combiner_arch = [128],
-                        encoders_activation = th.nn.LeakyReLU,
+                        encoders_activation : Callable[[],th.nn.Module] = th.nn.LeakyReLU,
                         use_batchnorm = True,
                         use_weightnorm : bool = False):
         super().__init__()
-        self._checkDimensions = checkDimensions
         self._input_width  = image_width
         self._input_height = image_height
         self._input_channels = image_channels
         self._img_encoding_size = img_encoding_size
         self._latent_space_size = output_size
         self._ensemble_size = img_ensemble_size
-        self._dropout_prob = dropout_prob
         self._img_ensemble_size = img_ensemble_size
         self._vec_enc_ensemble_size = vec_ensemble_size
         self._vec_encoding_size = vec_encoding_size
@@ -156,17 +154,14 @@ class Mixed_encoder(nn.Module):
         self._fcs_ensemble_size = 1
         self._encoders_activation = encoders_activation
 
-        if dropout_prob!=0: raise NotImplementedError(f"dropout is not implemented")
-
         if self._img_encoding_size != 0:
-            self._backbone = backbone.lower()
+            self._backbone = img_backbone.lower()
             # if backbone == "mobilenetv3" or backbone == "resnet18" or backbone == "bigconv":
             #     self._conv_ensemble_size = 1
             self.img_encoder = Parallel([Image_encoder(   image_channels_num = image_channels,
                                                     net_input_width = image_width,
                                                     net_input_height = image_height,
-                                                    backbone = backbone,
-                                                    checkDimensions = checkDimensions,
+                                                    backbone = img_backbone,
                                                     torchDevice = torchDevice,
                                                     use_coord_conv = use_coord_conv,
                                                     last_activation_class=self._encoders_activation,
@@ -221,18 +216,14 @@ class Mixed_encoder(nn.Module):
     def forward(self, image: th.Tensor, vector: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
 
         batch_size = image.size()[0]
-        if self._checkDimensions:
-            assert vector.size()[0] == batch_size, f"vector and image parts don't have same batch size, they are respectively {vector.size()[0]} and {batch_size}"
-            assert image.size() == (batch_size,self._input_channels,self._input_height, self._input_width), f"Image batch should have size {(batch_size,self._input_channels,self._input_height, self._input_width)}, but it is {image.size()}"
-            assert vector.size() == (batch_size,self._vec_part_size), f"vector batch should have size {(batch_size,self._vec_part_size)}, but it is {vector.size()}"
-        
+        dbg_check_size(image, (batch_size,self._input_channels,self._input_height, self._input_width), "Mixed_encoder.forward: image")
+        dbg_check_size(vector, (batch_size,self._vec_part_size), "Mixed_encoder.forward: vector")
+
         # ggLog.info(f"Mixed_encoder.forward: image.size()= {image.size()}, vector.size()= {vector.size()}")
         img_encoding = self.img_encoder(image)
-        if self._checkDimensions:
-            assert img_encoding.size() == (batch_size, self._img_encoding_size)
+        dbg_check_size(img_encoding, (batch_size,self._img_encoding_size), "Mixed_encoder.forward: img_encoding")
         vec_encoding = self.vec_encoder(vector)
-        if self._checkDimensions:
-            assert vec_encoding.size() == (batch_size, self._vec_encoding_size)
+        dbg_check_size(vec_encoding, (batch_size,self._vec_encoding_size), "Mixed_encoder.forward: vec_encoding")
 
         # enc_batch = th.cat([img_encoding, vec_encoding], dim = 1)
         # ggLog.info(f"enc_batch.size()= {enc_batch.size()}")

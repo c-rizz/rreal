@@ -11,8 +11,8 @@ from rreal.algorithms.collectors import ExperienceCollector
 from rreal.algorithms.rl_agent import RLAgent, register_agent_class
 from rreal.feature_extractors import get_feature_extractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
-from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
-from rreal.utils.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay, simplified_clip_grad_norm_
+from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor, StackVectorsFeatureExtractorInitArgs
+from rreal.utils.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay, simplified_clip_grad_norm_, filter_dict_space, get_params_with_decay_mask, filter_dict
 from typing import List, Union, Literal, Mapping, Callable
 import adarl.utils.callbacks
 import adarl.utils.dbg.ggLog as ggLog
@@ -50,7 +50,7 @@ th._dynamo.config.allow_unspec_int_on_nn_module = True
 compile_mode="max-autotune" # reduce overhead doesn't seem to reduce overhead more than max-autotune
 disable_compile = False
 dynamic_compile = False
-fullgraph = False
+fullgraph = True
 
 DictObs = dict[str, th.Tensor]
 @dataclass
@@ -189,7 +189,7 @@ class SAC_init_hparams:
     """The ratio of the action bounds that the actor's mean can reach, by default it is 1.0 (the mean can reach the action bounds). Reducing this can prevent boundary effects that reduce noise on the edges, biasing the actor toward them."""
     max_grad_norm : float = 0.5
     log_alpha_grad_clip : float = 0.1
-    feature_extractor_lr : float = 0.0
+    feature_extractor_lr : float = 0.001
     policy_update_freq : int = 2
     target_update_freq : int = 1
     auto_entropy_temperature : bool =True
@@ -500,20 +500,8 @@ class SAC(RLAgent):
         init_hparams = copy.deepcopy(init_hparams)
         if init_hparams.target_entropy_factor is None:
             init_hparams.target_entropy_factor = -1.0
-        if init_hparams.actor_observation_filter != None:
-            if isinstance(observation_space, spaces.gym_spaces.Dict):
-                actor_observation_space = spaces.gym_spaces.Dict({k:v for k,v in observation_space.spaces.items() if k in init_hparams.actor_observation_filter})
-            else:
-                raise RuntimeError(f"observation space must be a Dict to use actor_observation_filter, but it's a {type(observation_space)}")
-        else:
-            actor_observation_space = observation_space
-        if init_hparams.critic_observation_filter != None:
-            if isinstance(observation_space, spaces.gym_spaces.Dict):
-                critic_observation_space = spaces.gym_spaces.Dict({k:v for k,v in observation_space.spaces.items() if k in init_hparams.critic_observation_filter})
-            else:
-                raise RuntimeError(f"observation space must be a Dict to use actor_observation_filter, but it's a {type(observation_space)}")
-        else:
-            critic_observation_space = observation_space
+        actor_observation_space = filter_dict_space(observation_space, init_hparams.actor_observation_filter)
+        critic_observation_space = filter_dict_space(observation_space, init_hparams.critic_observation_filter)
         if init_hparams.action_reference_obs_key is not None:
             action_init = 0.0
 
@@ -590,7 +578,7 @@ class SAC(RLAgent):
         if self._share_actor_critic_feature_extractor:
             if critic_feature_extractor is None or actor_feature_extractor is None: # second considition is just for typing
                 self._critic_feature_extractor = StackVectorsFeatureExtractor(observation_space=critic_observation_space,
-                                                                   device=self._hp.torch_device)
+                                                                   hp=StackVectorsFeatureExtractorInitArgs(device=self._hp.torch_device))
                 self._actor_feature_extractor = self._critic_feature_extractor
             else:
                 self._critic_feature_extractor = critic_feature_extractor
@@ -598,12 +586,12 @@ class SAC(RLAgent):
         else:
             if critic_feature_extractor is None:
                 self._critic_feature_extractor = StackVectorsFeatureExtractor(observation_space=critic_observation_space,
-                                                                    device=self._hp.torch_device)
+                                                                   hp=StackVectorsFeatureExtractorInitArgs(device=self._hp.torch_device))
             else:
                 self._critic_feature_extractor = critic_feature_extractor
             if actor_feature_extractor is None:
                 self._actor_feature_extractor = StackVectorsFeatureExtractor(observation_space=actor_observation_space,
-                                                                    device=self._hp.torch_device)
+                                                                   hp=StackVectorsFeatureExtractorInitArgs(device=self._hp.torch_device))
             else:
                 self._actor_feature_extractor = actor_feature_extractor
         critic_input_size = self._critic_feature_extractor.encoding_size()
@@ -688,6 +676,7 @@ class SAC(RLAgent):
         self._last_alpha_loss = th.as_tensor(float("nan"), device=self.device)
         self._tot_grad_steps_count = 0
         self._enable_nvtx = True
+        self._log_losses = False
         self._merge_actor_and_critic_updates = merge_actor_and_critic_updates
         # This was optimized by improving GPU usage via cudagraphs, profiling with Nsight Systems
         # The profiling command was:
@@ -718,7 +707,8 @@ class SAC(RLAgent):
 
         log_folder = adarl.utils.session.default_session.log_folder()+"/sac_logs"
         os.makedirs(log_folder, exist_ok=True)
-        self._losses_file = open(log_folder+"/losses.bin", "ab")
+        if self._log_losses:
+            self._losses_file = open(log_folder+"/losses.bin", "ab")
     
     def _nvtx_startup(self):
         if self._enable_nvtx and self._agent_updates == 20:
@@ -749,18 +739,10 @@ class SAC(RLAgent):
             th.cuda.nvtx.range_pop()
 
     def get_actor_subobservation(self, observation : DictObs)  -> DictObs:
-        if self._hp.actor_observation_filter is None:
-            return observation
-        else:
-            r = {k:observation.get(k,None) for k in self._hp.actor_observation_filter} #type: ignore
-            return {k:v for k,v in r.items() if v is not None}
+        return filter_dict(observation, self._hp.actor_observation_filter)
 
     def get_critic_subobservation(self, observation : DictObs) -> DictObs:
-        if self._hp.critic_observation_filter is None:
-            return observation
-        else:
-            r = {k:observation.get(k,None) for k in self._hp.critic_observation_filter} #type: ignore
-            return {k:v for k,v in r.items() if v is not None}
+        return filter_dict(observation, self._hp.critic_observation_filter)
 
     def _get_reference_action(self, observation_batch : DictObs) -> th.Tensor | None:
         if self._hp.action_reference_obs_key is not None:
@@ -914,7 +896,7 @@ class SAC(RLAgent):
             observation_batch = {k:t.unsqueeze(0) for k,t in observation_batch.items()}
 
         observation_batch = self.get_actor_subobservation(observation_batch)
-        observation_batch = {k:t.to(device = self.device, dtype = self._dtype) for k,t in observation_batch.items()}
+        observation_batch = {k:t.to(device = self.device, non_blocking=self.device.type=="cuda") for k,t in observation_batch.items()}
         observation_batch_enc = self._actor_feature_extractor.extract_features(observation_batch)
         reference_action = self._get_reference_action(observation_batch)
         action, log_prob, mean, log_std = self._actor.sample_action(observation_batch_enc, reference_action=reference_action)
@@ -1179,16 +1161,20 @@ class SAC(RLAgent):
     
     def _compute_encodings(self, transitions : DictTransitionBatch):
         critic_enc_obss = self._critic_feature_extractor.extract_features(self.get_critic_subobservation(transitions.observations))
+        critic_enc_obss = critic_enc_obss.clone() # clone to avoid issues with cudagraphs
         if self._share_actor_critic_feature_extractor:
             actor_enc_obss = critic_enc_obss
         else:
             actor_enc_obss = self._actor_feature_extractor.extract_features(self.get_actor_subobservation(transitions.observations))
+            actor_enc_obss = actor_enc_obss.clone()
         with th.no_grad():
-            critic_enc_next_obss = self._critic_feature_extractor.extract_features( self.get_critic_subobservation(transitions.next_observations))   
+            critic_enc_next_obss = self._critic_feature_extractor.extract_features( self.get_critic_subobservation(transitions.next_observations))
+            critic_enc_next_obss = critic_enc_next_obss.clone()
             if self._share_actor_critic_feature_extractor:
                 actor_enc_next_obss = critic_enc_next_obss
             else:
                 actor_enc_next_obss = self._actor_feature_extractor.extract_features(self.get_actor_subobservation(transitions.next_observations))
+                actor_enc_next_obss = actor_enc_next_obss.clone()
         return actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss
     
     @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)
@@ -1415,8 +1401,9 @@ class SAC(RLAgent):
         t1 = time.monotonic()
         # q_loss, actor_loss, alpha_loss = th.as_tensor(q_act_alpha_losses).mean(dim = 0).cpu().numpy()
         if iterations > 0:
-            np.array(th.as_tensor(qloss_actloss_alphaloss_alpha, dtype=th.float32).cpu().numpy(), dtype=np.float32).tofile(self._losses_file)
-            self._losses_file.flush()
+            if self._log_losses:
+                np.array(th.as_tensor(qloss_actloss_alphaloss_alpha, dtype=th.float32).cpu().numpy(), dtype=np.float32).tofile(self._losses_file)
+                self._losses_file.flush()
             q_loss, actor_loss, alpha_loss, alpha = qloss_actloss_alphaloss_alpha[-1]
         else:
             with th.no_grad():

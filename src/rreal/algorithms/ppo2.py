@@ -27,7 +27,7 @@ from rreal.algorithms.sac import compare_dicts
 from rreal.feature_extractors import get_feature_extractor
 from typing_extensions import override
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
-from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor
+from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor, StackVectorsFeatureExtractorInitArgs
 from adarl.utils.utils import numpy_to_torch_dtype_dict, get_func_input_args, override_struct
 from adarl.utils.tensor_trees import map_tensor_tree
 import adarl.utils.dbg.ggLog as ggLog
@@ -272,16 +272,16 @@ class PPO(RLAgent):
         else:
             if actor_feature_extractor is None and critic_feature_extractor is None and same_observation_filter:
                 shared_extractor = StackVectorsFeatureExtractor(observation_space=self._actor_observation_space,
-                                                                device=hyperparams.th_device)
+                                                                hp=StackVectorsFeatureExtractorInitArgs(device=hyperparams.th_device))
                 self._actor_feature_extractor = shared_extractor
                 self._critic_feature_extractor = shared_extractor
             else:
                 if critic_feature_extractor is None:
                     critic_feature_extractor = StackVectorsFeatureExtractor(observation_space=self._critic_observation_space,
-                                                                            device=hyperparams.th_device)
+                                                                            hp=StackVectorsFeatureExtractorInitArgs(device=hyperparams.th_device))
                 if actor_feature_extractor is None:
                     actor_feature_extractor = StackVectorsFeatureExtractor(observation_space=self._actor_observation_space,
-                                                                            device=hyperparams.th_device)
+                                                                            hp=StackVectorsFeatureExtractorInitArgs(device=hyperparams.th_device))
                 self._critic_feature_extractor = critic_feature_extractor
                 self._actor_feature_extractor = actor_feature_extractor
         self._share_actor_critic_feature_extractor = self._actor_feature_extractor is self._critic_feature_extractor
@@ -783,12 +783,12 @@ class PPO(RLAgent):
             ppo_init_args["hyperparams"].th_device = device
         with zipfile.ZipFile(path) as archive:
             critic_feature_extractor_class = get_feature_extractor(extra["critic_feature_extractor_class_name"])
-            ppo_init_args["critic_feature_extractor"] = critic_feature_extractor_class.load(archive, name="critic_feature_extractor")
+            ppo_init_args["critic_feature_extractor"] = critic_feature_extractor_class.load(archive, name="critic_feature_extractor", device=device)
             if extra["share_feature_extractor"]:
                 ppo_init_args["actor_feature_extractor"] = ppo_init_args["critic_feature_extractor"]
             else:
                 actor_feature_extractor_class = get_feature_extractor(extra["actor_feature_extractor_class_name"])
-                ppo_init_args["actor_feature_extractor"] = actor_feature_extractor_class.load(archive, name="actor_feature_extractor")
+                ppo_init_args["actor_feature_extractor"] = actor_feature_extractor_class.load(archive, name="actor_feature_extractor", device=device)
         override_struct(ppo_init_args, init_args_override)
         ggLog.info(f"PPO.load(): building model with args: \n"+pprint.pformat(ppo_init_args))
         model = cls(**ppo_init_args)

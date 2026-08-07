@@ -18,6 +18,8 @@ from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
 from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector, SyncExperienceCollector
 from rreal.algorithms.rl_agent import RLAgent
 from rreal.algorithms.sac import SAC, train_off_policy, SAC_init_hparams, TransitionAugmentorFunction
+from rreal.feature_extractors import get_feature_extractor
+from rreal.feature_extractors.mixed_feature_extractor import MixedFeatureExtractorInitArgs
 from rreal.tmp.gym_transform_observation import DtypeObservation
 import adarl.utils.dbg.ggLog as ggLog
 import adarl.utils.session
@@ -32,6 +34,9 @@ import torch as th
 import typing
 import wandb 
 import math
+from dataclasses import dataclass
+from rreal.utils.utils import filter_dict_space
+from typing import Any
 
 class EnvBuilderProtocol(typing.Protocol):
     def __call__(self, seed : int, log_folder : str, is_eval : bool, env_builder_args : dict) -> tuple[gym.Env,float]:
@@ -237,6 +242,104 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, reward_space : gym.S
     agent = th.compile(agent, mode="max-autotune", fullgraph=True)
     return agent
 
+
+def build_sac_with_fe(obs_space : gym.Space,
+                            act_space : gym.Space,
+                            reward_space : gym.Space,
+                            sac_hparams : SAC_init_hparams,
+                            actor_feature_extractor_name : str | None,
+                            critic_feature_extractor_name : str | None,
+                            actor_fe_hparams : Any = None,
+                            critic_fe_hparams : Any = None,
+                            share_feature_extractor : bool | None = None) -> RLAgent:
+    """Build a SAC agent, optionally with feature extractors selected by registered class name.
+
+    Extractors are specified as a name plus their own hyperparameter object rather than as
+    already-built instances, so that this builder stays picklable and can be shipped to the
+    collector subprocesses. Passing only one of the two hparams reuses it for both roles.
+
+    share_feature_extractor: True/False forces sharing on/off, None (the default) shares whenever
+    both roles would build the very same extractor over the very same observations.
+    """
+    ggLog.info(f"Building SAC agent with:\n"
+                   f"    obs_space: {obs_space}\n"
+                   f"    act_space: {act_space}\n"
+                   f"    reward_space: {reward_space}")
+    actor_observation_space = filter_dict_space(obs_space, sac_hparams.actor_observation_filter)
+    critic_observation_space = filter_dict_space(obs_space, sac_hparams.critic_observation_filter)
+
+    # A single hparams object can be given and gets used for both roles
+    if actor_fe_hparams is None:
+        actor_fe_hparams = critic_fe_hparams
+    if critic_fe_hparams is None:
+        critic_fe_hparams = actor_fe_hparams
+    for role, fe_name, fe_hparams in (("actor", actor_feature_extractor_name, actor_fe_hparams),
+                                      ("critic", critic_feature_extractor_name, critic_fe_hparams)):
+        if fe_name is None:
+            continue
+        if fe_hparams is None:
+            raise AttributeError(f"{role}_feature_extractor_name is '{fe_name}' but no hyperparameters were "
+                                 f"provided: set {role}_fe_hparams (or the other role's, which gets reused).")
+        fe_device = getattr(fe_hparams, "device", None)
+        if fe_device is not None and th.device(fe_device).type != th.device(sac_hparams.model_th_device).type:
+            ggLog.warn(f"{role} feature extractor is configured for device {th.device(fe_device)}, but the "
+                       f"model runs on {th.device(sac_hparams.model_th_device)}.")
+
+    # SAC detects sharing by identity, so a shared extractor must be the very same object for both
+    # roles. Sharing is only correct if the two roles are fed the same observations.
+    can_share = (actor_feature_extractor_name == critic_feature_extractor_name and
+                 actor_fe_hparams == critic_fe_hparams and
+                 sac_hparams.actor_observation_filter == sac_hparams.critic_observation_filter)
+    if share_feature_extractor is None:
+        share_feature_extractor = can_share
+    elif share_feature_extractor and not can_share:
+        raise AttributeError(f"share_feature_extractor was requested, but actor and critic would not build the "
+                             f"same extractor over the same observations: names "
+                             f"'{actor_feature_extractor_name}'/'{critic_feature_extractor_name}', "
+                             f"hparams match = {actor_fe_hparams == critic_fe_hparams}, filters "
+                             f"{sac_hparams.actor_observation_filter}/{sac_hparams.critic_observation_filter}")
+
+    if actor_feature_extractor_name is not None:
+        act_fe = get_feature_extractor(actor_feature_extractor_name)( observation_space = actor_observation_space,
+                                        hp = actor_fe_hparams)
+    else:
+        act_fe = None
+    if critic_feature_extractor_name is None:
+        critic_fe = None
+    elif share_feature_extractor:
+        critic_fe = act_fe
+    else:
+        critic_fe = get_feature_extractor(critic_feature_extractor_name)( observation_space = critic_observation_space,
+                                        hp = critic_fe_hparams)
+    ggLog.info(f"SAC feature extractors: actor = {type(act_fe).__name__}, critic = {type(critic_fe).__name__}"
+               f"{' (shared: the same object as the actor one)' if act_fe is not None and critic_fe is act_fe else ''}")
+    agent = SAC(observation_space=obs_space,
+                reward_space=reward_space,
+                action_space=act_space,
+                init_hparams=sac_hparams,
+                actor_feature_extractor=act_fe,
+                critic_feature_extractor=critic_fe)
+    agent = th.compile(agent, mode="max-autotune", fullgraph=True)
+    return agent
+
+def get_build_sac_with_fe_builder( sac_hparams : SAC_init_hparams,
+                                        actor_feature_extractor_name : str | None,
+                                        critic_feature_extractor_name : str | None,
+                                        actor_fe_hparams : Any = None,
+                                        critic_fe_hparams : Any = None,
+                                        share_feature_extractor : bool | None = None):
+    def builder(observation_space : gym.Space, action_space : gym.Space, reward_space : gym.Space):
+        return build_sac_with_fe(obs_space=observation_space,
+                                    act_space=action_space,
+                                    reward_space=reward_space,
+                                    sac_hparams=sac_hparams,
+                                    actor_feature_extractor_name=actor_feature_extractor_name,
+                                    critic_feature_extractor_name=critic_feature_extractor_name,
+                                    actor_fe_hparams=actor_fe_hparams,
+                                    critic_fe_hparams=critic_fe_hparams,
+                                    share_feature_extractor=share_feature_extractor)
+    return builder
+
 def build_collector(use_processes : bool,
                     vec_env_builder : VecEnvBuilderProtocol,
                     env_builder_args : dict[str,typing.Any],
@@ -274,7 +377,7 @@ def wrap_with_logger(vec_env_builder : VecEnvBuilderProtocol,
         # logs_id = session.default_session.run_info["run_id"]
         venv = vec_env_builder(seed = seed, run_folder = run_folder, num_envs = num_envs, env_builder_args = env_builder_args)
         venv = VectorEnvLogger(env = venv, logs_id = env_name, env_th_device=env_builder_args["th_device"], log_infos=env_builder_args["log_info_stats"])
-        venv = VectorEnvChecker(env = venv, just_warn=True, max_obs_value=max_obs_value, max_rew_value=max_rew_value)
+        venv = VectorEnvChecker(env = venv, just_warn=False, max_obs_value=max_obs_value, max_rew_value=max_rew_value)
         return venv
     return wrapped_builder
 
@@ -311,7 +414,12 @@ def sac_train(  seed : int,
                 no_wandb : bool = False,
                 log_weights_and_grads = False,
                 transition_augmentor_builder: AugmentorBuilder | None = None,
-                parallelize_collection : bool = True):
+                parallelize_collection : bool = True,
+                actor_feature_extractor_name : str | None = None,
+                critic_feature_extractor_name : str | None = None,
+                actor_fe_hparams : Any = None,
+                critic_fe_hparams : Any = None,
+                share_feature_extractor : bool | None = None):
 
     run_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
@@ -357,12 +465,20 @@ def sac_train(  seed : int,
                                 collector_buffer_size = hyperparams.train_freq_vstep*hyperparams.parallel_envs,
                                 session = session,
                                 deterministic_action_ratio=hyperparams.deterministic_collection_ratio)
-    collector.set_base_collector_model(lambda o,a,r: build_sac(o,a,r,hyperparams))
+    sac_builder = get_build_sac_with_fe_builder( sac_hparams = hyperparams,
+                                                actor_feature_extractor_name = actor_feature_extractor_name,
+                                                critic_feature_extractor_name = critic_feature_extractor_name,
+                                                actor_fe_hparams = actor_fe_hparams,
+                                                critic_fe_hparams = critic_fe_hparams,
+                                                share_feature_extractor = share_feature_extractor)
+
+    
+    collector.set_base_collector_model(sac_builder)
     observation_space = collector.observation_space()
     action_space = collector.action_space()
     reward_space = collector.reward_space()
 
-    model = build_sac(observation_space, action_space, reward_space, hyperparams)
+    model = sac_builder(observation_space, action_space, reward_space)
 
     # torchexplorer.watch(model, backend="wandb")
     if log_weights_and_grads:
@@ -372,18 +488,6 @@ def sac_train(  seed : int,
         transition_augmentor = transition_augmentor_builder(observation_space, action_space, reward_space)
         model.set_transition_augmentor(transition_augmentor)
 
-    # compiled_model = th.compile(model)
-
-    # rb = ThDReplayBuffer(
-    #     buffer_size=hyperparams.buffer_size,
-    #     observation_space=observation_space,
-    #     action_space=action_space,
-    #     out_device=device,
-    #     storage_torch_device=buffer_device,
-    #     handle_timeout_termination=True,
-    #     n_envs=hyperparams.parallel_envs,
-    #     random_add=True,
-    #     fallback_to_cpu_storage=False)
     rewards_num = spaces.get_1d_space_size(reward_space)
     rb = ThVecDictEpReplayBuffer(buffer_size=hyperparams.buffer_size,
                                 observation_space=observation_space,
@@ -397,20 +501,6 @@ def sac_train(  seed : int,
                                 min_episode_duration = 0,
                                 disable_validation_set = True,
                                 rewards_num=rewards_num)
-    
-    # rb = ThDictEpReplayBuffer(  buffer_size=hyperparams.buffer_size,
-    #                             observation_space=observation_space,
-    #                             action_space=action_space,
-    #                             device=device,
-    #                             storage_torch_device=device,
-    #                             n_envs=hyperparams.parallel_envs,
-    #                             max_episode_duration=max_episode_duration,
-    #                             validation_buffer_size = validation_buffer_size,
-    #                             validation_holdout_ratio = validation_holdout_ratio,
-    #                             min_episode_duration = 0,
-    #                             disable_validation_set = False,
-    #                             fill_val_buffer_to_min_at_step = hyperparams.learning_starts,
-    #                             val_buffer_min_size = validation_batch_size)
     
     ggLog.info(f"Replay buffer occupies {rb.memory_size()/1024/1024:.2f}MB on {rb.storage_torch_device()}")
     

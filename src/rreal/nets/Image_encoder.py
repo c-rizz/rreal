@@ -2,6 +2,7 @@ import torch as th
 import torch.nn as nn
 from typing import Tuple, Callable
 
+from adarl.utils.dbg.dbg_checks import dbg_check_size
 from rreal.utils.utils import build_mlp_net
 from rreal.nets.ConvNet import ConvNet
 from rreal.nets.BigConvNet import BigConvNet
@@ -24,7 +25,6 @@ class Image_encoder(nn.Module):
                         use_batchnorm = True,
                         use_weightnorm = True):
         super().__init__()
-        self._checkDimensions = checkDimensions
         self._input_width  = net_input_width
         self._input_height = net_input_height
         self._input_channels = image_channels_num
@@ -157,7 +157,7 @@ class Image_encoder(nn.Module):
             raise AttributeError(f"Unknown backbone '{self._backbone}'")
 
         conv_out_shape = encoder_head.output_shape
-        self._conv_out_size = 1
+        self._conv_out_size : int = 1
         for s in conv_out_shape:
             self._conv_out_size *= s
         if output_size is None:
@@ -204,16 +204,11 @@ class Image_encoder(nn.Module):
             Two batches, containing latent space mean and log-variance for each input image.
             Size of each of the two batches will be (batch_size, latent_space_size)
         """
-        if self._checkDimensions:
-            assert x.size() == (x.size()[0],self._input_channels,self._input_height, self._input_width), f"Image batch should have size {(x.size()[0],self._input_channels,self._input_height, self._input_width)}, but it is {x.size()}"
-
+        dbg_check_size(x, (x.size()[0],self._input_channels,self._input_height, self._input_width), "Image_encoder.forward(): input image batch")
+        
         # ggLog.info(f"Image_encoder.forward(): x.size() = {x.size()}")
         enc_out = self._net(x)
-        if self._checkDimensions:
-            batch_size = x.size()[0]
-            assert len(enc_out.size())==2, "Encoder output should have two dimensions (because it's a batch)"
-            assert enc_out.size()==(batch_size, self._output_size), f"Encoder outputs should have size (batch_size, output_size)=={(batch_size,self._output_size)}, but enc_out.size() = {enc_out.size()}"
-            
+        dbg_check_size(enc_out, (x.size()[0], self._output_size), "Image_encoder.forward(): encoder output")
         return enc_out
             
 
