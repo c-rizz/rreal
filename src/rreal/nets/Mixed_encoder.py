@@ -7,7 +7,7 @@ import torch.nn as nn
 from typing import Tuple, List, Callable
 
 import adarl.utils.dbg.ggLog as ggLog
-from rreal.utils.utils import build_mlp_net, scale_layer_weights
+from rreal.utils.utils import build_mlp_net, scale_layer_weights, softclamp
 
 class Mixed_VAE_encoder(nn.Module):
     def __init__(self,  image_channels : int = 1,
@@ -31,7 +31,8 @@ class Mixed_VAE_encoder(nn.Module):
                         encoders_activation = th.nn.LeakyReLU,
                         use_batchnorm = True,
                         use_weightnorm : bool = False,
-                        concatenate_mulogvar : bool= False):
+                        concatenate_mulogvar : bool= False,
+                        max_logvar : float = 20.0):
         super().__init__()
         self._checkDimensions = checkDimensions
         self._latent_space_size = latent_space_size
@@ -39,6 +40,7 @@ class Mixed_VAE_encoder(nn.Module):
         self._fcs_arch = fcs_arch
         self._fcs_ensemble_size = 1
         self._concatenate_mulogvar = concatenate_mulogvar
+        self._max_logvar = max_logvar
 
         if dropout_prob > 0:
             raise NotImplementedError("Dropout is not implemented yet for Mixed_VAE_encoder. Please set dropout_prob=0.")
@@ -104,6 +106,7 @@ class Mixed_VAE_encoder(nn.Module):
 
         mu = self.fc_mu(combined_mixed_encoding)
         logvar = self.fc_logvar(combined_mixed_encoding)
+        logvar = softclamp(logvar, maxval=self._max_logvar)
 
         if self._checkDimensions:
             assert mu.size() == (batch_size, self._latent_space_size)
@@ -228,11 +231,6 @@ class Mixed_encoder(nn.Module):
         # enc_batch = th.cat([img_encoding, vec_encoding], dim = 1)
         # ggLog.info(f"enc_batch.size()= {enc_batch.size()}")
         return self.combiner(th.cat([img_encoding, vec_encoding], dim = 1))
-            
-    def sample(self, mu : th.Tensor, logvar : th.Tensor):
-        std = th.exp(0.5 * logvar) # std = sqrt(var) = sqrt(e^logvar) = e^(0.5*logvar)
-        eps = th.randn(std.size(), device=mu.device) # sample from unit gaussian
-        return eps * std + mu
 
 class DictMixedEncoder(Mixed_encoder):
     def __init__(self, image_dict_key : str | int,

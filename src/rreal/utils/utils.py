@@ -6,6 +6,7 @@ from torch.nn.utils.parametrizations import weight_norm
 from adarl.utils.tensor_trees import TensorTree
 import gymnasium as gym
 from adarl.utils import spaces
+from typing import TypeVar, Generic, cast
 
 def scale_layer_weights(m : th.nn.Module, multiplier, bias_offset : th.Tensor | float = 0.0):
     if isinstance(m, th.nn.Linear):
@@ -162,10 +163,12 @@ def update_net_state(src : th.nn.Module, dst : th.nn.Module, strict = True, tau 
             dst.get_buffer(name).data.copy_(src_buffer.data * tau + dst.get_buffer(name).data * (1-tau))
 
 
-def filter_dict_space(space : spaces.gym_spaces.Space, space_filter : list[str] | None) -> spaces.gym_spaces.Space:
+_SpaceType = TypeVar("_SpaceType", bound=spaces.gym_spaces.Space)
+
+def filter_dict_space(space : _SpaceType, space_filter : list[str] | None) -> _SpaceType:
     if space_filter != None:
         if isinstance(space, spaces.gym_spaces.Dict):
-            filtered_space = spaces.gym_spaces.Dict({k:v for k,v in space.items() if k in space_filter})
+            filtered_space = cast(_SpaceType, spaces.gym_spaces.Dict({k:v for k,v in space.items() if k in space_filter}))
         else:
             raise RuntimeError(f"observation space must be a Dict to use filter, but it's a {type(space)}")
     else:
@@ -178,3 +181,12 @@ def filter_dict(d : dict[str, th.Tensor], dfilter : list[str] | None) -> dict[st
     else:
         r = {k:d.get(k,None) for k in dfilter} #type: ignore
         return {k:v for k,v in r.items() if v is not None}
+
+
+def softclamp(v,maxval):
+    """scaled tanh on the positive side, unbounded on the negative
+    """
+    simm_clamped = maxval*th.tanh(v/maxval)
+    relu_simmclamped = th.nn.functional.relu(simm_clamped)
+    negpart = th.clamp(v,max=0)
+    return negpart + relu_simmclamped

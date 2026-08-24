@@ -405,7 +405,7 @@ class Actor(nn.Module):
 
     @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, copy_outs=True, disable=disable_compile,  dynamic=dynamic_compile)
     def sample_action(self, observation_batch, reference_action : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        dbg_check_finite(observation_batch, async_assert=True, assert_msg="sac.Actor.sample_action: observation is not finite")
+        dbg_check_finite(observation_batch, async_assert=True, assert_msg="sac.Actor.sample_action: input is not finite")
         # observation_batch = map_tensor_tree(observation_batch, lambda t: t.fill_(0.0))
         batch_size = observation_batch.shape[0]
         mean, log_std = self(observation_batch, reference_action)
@@ -897,6 +897,7 @@ class SAC(RLAgent):
 
         observation_batch = self.get_actor_subobservation(observation_batch)
         observation_batch = {k:t.to(device = self.device, non_blocking=self.device.type=="cuda") for k,t in observation_batch.items()}
+        dbg_check_finite(observation_batch, async_assert=True, assert_msg="sac.predict_action: observation is not finite")
         observation_batch_enc = self._actor_feature_extractor.extract_features(observation_batch)
         reference_action = self._get_reference_action(observation_batch)
         action, log_prob, mean, log_std = self._actor.sample_action(observation_batch_enc, reference_action=reference_action)
