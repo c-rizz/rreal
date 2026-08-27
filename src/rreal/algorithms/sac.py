@@ -50,7 +50,7 @@ th._dynamo.config.allow_unspec_int_on_nn_module = True
 compile_mode="max-autotune" # reduce overhead doesn't seem to reduce overhead more than max-autotune
 disable_compile = False
 dynamic_compile = False
-fullgraph = True
+fullgraph = False
 
 DictObs = dict[str, th.Tensor]
 @dataclass
