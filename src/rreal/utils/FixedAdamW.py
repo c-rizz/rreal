@@ -3,7 +3,7 @@ import torch
 from torch import Tensor
 from torch.optim.adam import adam
 
-from rreal.utils.torch_patcher import _use_grad_for_differentiable_graphbreakfix as _use_grad_for_differentiable
+from adarl.utils.torch_patcher import _use_grad_for_differentiable_graphbreakfix as _use_grad_for_differentiable
 
 class AdamW(AdamW_original):
     @_use_grad_for_differentiable
