@@ -20,7 +20,7 @@ import inspect
 import copy
 from rreal.algorithms.sac_helpers import EnvBuilderProtocol, VecEnvBuilderProtocol
 from typing import Any, Final, TypeVar
-from adarl.utils.callbacks import TrainingCallback, CallbackList, CheckpointCallbackRB
+from rreal.utils.callbacks import TrainingCallback, CallbackList, CheckpointCallbackRB
 import adarl.utils.sigint_handler
 from rreal.algorithms.rl_agent import RLAgent, register_agent_class
 from rreal.algorithms.sac import compare_dicts

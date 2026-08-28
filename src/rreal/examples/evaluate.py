@@ -15,7 +15,7 @@ import adarl.utils.sigint_handler
 from rreal.algorithms.sac import train_off_policy
 from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector
 import wandb 
-from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
+from rreal.utils.callbacks import EvalCallback, CheckpointCallbackRB
 from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
 import typing
 from rreal.algorithms.rl_agent import RLAgent

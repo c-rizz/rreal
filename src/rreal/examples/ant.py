@@ -16,7 +16,7 @@ import adarl.utils.sigint_handler
 from rreal.algorithms.sac import SAC, train_off_policy
 from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector
 import wandb 
-from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
+from rreal.utils.callbacks import EvalCallback, CheckpointCallbackRB
 import gymnasium as gym
 from adarl.envs.RecorderGymWrapper import RecorderGymWrapper
 from adarl.envs.GymEnvWrapper import GymEnvWrapper

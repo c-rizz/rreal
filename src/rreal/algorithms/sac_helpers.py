@@ -14,7 +14,7 @@ from adarl.utils.ThDictEpReplayBuffer import ThDictEpReplayBuffer
 from adarl.utils.ThVecDictEpReplayBuffer import ThVecDictEpReplayBuffer
 from adarl.utils.async_vector_env import AsyncVectorEnvShmem
 from adarl.utils.buffers import ThDReplayBuffer
-from adarl.utils.callbacks import EvalCallback, CheckpointCallbackRB
+from rreal.utils.callbacks import EvalCallback, CheckpointCallbackRB
 from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector, SyncExperienceCollector
 from rreal.algorithms.rl_agent import RLAgent
 from rreal.algorithms.sac import SAC, train_off_policy, SAC_init_hparams, TransitionAugmentorFunction

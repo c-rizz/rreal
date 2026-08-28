@@ -1,7 +1,7 @@
 from __future__ import annotations
 from gc import freeze
 from adarl.utils.buffers import ThDReplayBuffer, TransitionBatch, BaseBuffer, BaseValidatingBuffer
-from adarl.utils.callbacks import TrainingCallback, CallbackList
+from rreal.utils.callbacks import TrainingCallback, CallbackList
 from adarl.utils.tensor_trees import sizetree_from_space, map2_tensor_tree, flatten_tensor_tree, map_tensor_tree, filter_by_key_tensor_tree, map_tensor_tree_withkey
 from adarl.utils.wandb_wrapper import wandb_log
 from adarl.utils.dbg.dbg_checks import dbg_check_finite, dbg_check_size
@@ -14,7 +14,7 @@ from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor, StackVectorsFeatureExtractorInitArgs
 from rreal.utils.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay, simplified_clip_grad_norm_, filter_dict_space, get_params_with_decay_mask, filter_dict
 from typing import List, Union, Literal, Mapping, Callable
-import adarl.utils.callbacks
+import rreal.utils.callbacks
 import adarl.utils.dbg.ggLog as ggLog
 import adarl.utils.session
 import adarl.utils.sigint_handler
