@@ -685,9 +685,6 @@ class SAC(RLAgent):
         #    virtualenv/lrjax/bin/python3 src/rreal/src/rreal/examples/half_cheetah.py --comment t --algo sac
         # Then the produced file can be drag and dropped into Nsight Systems GUI to see the profiling results (e.g. the timeline)        
         # Can still be optimized more, but some segments are tricky to include in th.compile and behave weird
-        if self._merge_actor_and_critic_updates:
-            self._update = self._update_full_merged
-
 
         self._stats = { "tot_grad_steps_count":0,
                         "q_loss_tot":0.0,
@@ -1396,7 +1393,10 @@ class SAC(RLAgent):
             # self._nvtx_end_range("sample")
             # transitions = map_tensor_tree(transitions, lambda t : t.to(device=self.device, non_blocking=self.device.type=="cuda"))
             # th.cuda.synchronize(self.device)
-            losses = self._update(transitions = transitions)
+            if self._merge_actor_and_critic_updates:
+                losses = self._update_full_merged(transitions = transitions)
+            else:
+                losses = self._update(transitions = transitions)
             qloss_actloss_alphaloss_alpha[i] = losses + (self._alpha,)
             self._tot_grad_steps_count += 1
         t1 = time.monotonic()
