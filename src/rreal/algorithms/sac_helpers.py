@@ -422,7 +422,7 @@ def sac_train(  seed : int,
                 critic_fe_hparams : Any = None,
                 share_feature_extractor : bool | None = None,
                 use_rnd_exploration : bool = False,
-                rnd_hyperparams : RNDHyperparams = RNDHyperparams()):
+                rnd_hyperparams : RNDHyperparams | None = None):
 
     run_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
@@ -492,6 +492,8 @@ def sac_train(  seed : int,
         model.set_transition_augmentor(transition_augmentor)
 
     if use_rnd_exploration:
+        if rnd_hyperparams is None:
+            rnd_hyperparams = RNDHyperparams()
         from rreal.utils.RNDNoveltyEstimator import RNDNoveltyEstimator, NoveltyScaler, SAC_RND_reward_augmentor
         rnd_hyperparams.estimator_hyperparams.vec_input_size = model.get_critic_encoding_size()
         rnd_augmentor = SAC_RND_reward_augmentor(

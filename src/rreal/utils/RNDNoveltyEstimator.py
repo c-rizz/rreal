@@ -452,7 +452,7 @@ class SAC_RND_reward_augmentor():
             The rewards augmented with novelty-based reward bonuses for the given transitions.
         """
         raw_reward_batch = transitions.rewards
-        raw_novelty_batch = self._rnd_novelty_estimator(crit_next_enc_obss=critic_next_enc_obss)
+        raw_novelty_batch = self._rnd_novelty_estimator(vector_obs_batch=critic_next_enc_obss)
         augmented_rewards = self._novelty_scaler.novelty_to_reward_bonuses(raw_novelty_batch, raw_reward_batch, update_stats=False)
         return augmented_rewards
 
@@ -471,7 +471,7 @@ class SAC_RND_reward_augmentor():
         losses : tuple[th.Tensor, th.Tensor, th.Tensor]
             The losses computed during the SAC update (q_loss, actor_loss, alpha_loss)
         """
-        critic_next_enc_obss = encoded_obss[1]
+        critic_next_enc_obss = encoded_obss[3]
         loss, square_errors = self._rnd_novelty_estimator.train_model(vector_obs_batch=critic_next_enc_obss)
         self._novelty_scaler.update_stats(raw_novelty_batch=square_errors,
                                           raw_reward_batch=transitions.rewards)
