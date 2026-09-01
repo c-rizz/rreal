@@ -1,59 +1,58 @@
 import torch as th
 from rreal.utils.utils import build_mlp_net, Parallel
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from typing import Literal
 from adarl.utils.dbg import ggLog
 from adarl.utils.dbg.dbg_checks import dbg_check
 from rreal.utils.FixedAdamW import AdamW
+@dataclass
+class RNDEstimatorHyperparams:
+    vec_encoder_arch : list[int] | Literal['identity'] = field(default_factory=lambda: [256,256])
+    vec_encoding_size : int = 64
+    vec_input_size : int = 0
+    img_encoder_arch : str = "conv_extrasmall"
+    img_encoding_size : int = 0
+    img_input_size_chw : tuple[int, int, int] = (0,0,0)
+    combiner_arch : list[int] | Literal['identity'] = field(default_factory=list)
+    feature_size : int = 64
+    learning_rate : float = 1e-3
+    ensemble_size : int = 3
+    th_device : th.device = th.device("cuda")
+    dict_obs_image_key : str | int = "image"
+    dict_obs_vector_key : str | int = "vector"
+    use_torch_compile : bool = False
+
+@dataclass
+class RNDScalerHyperparams:   
+    avg_alpha : float = 0.99
+    th_device : th.device = th.device("cuda")
+    reward_bonus_weight : float = 0.5
+    reward_novelty_interest_std_threshold : float = 1.5
+    reward_novelty_std_squash : float = 3.0
+    reward_target_bland_ratio : float = 0.25
+    reward_target_interesting_ratio : float = 0.9
+    reward_increment : float = 0.01
+    kurtosis_min : float = 10.0
+    kurtosis_max : float = 20.0
+    novelty_weight_squash : float = 10.0
+
+@dataclass
+class RNDHyperparams:
+    estimator_hyperparams : RNDEstimatorHyperparams = field(default_factory=RNDEstimatorHyperparams)
+    scaler_hyperparams : RNDScalerHyperparams = field(default_factory=RNDScalerHyperparams)
+
+
+def _shallow_copy_dataclass(dc):
+    return type(dc)(**{field.name: getattr(dc, field.name) for field in fields(dc)})
 
 class RNDNoveltyEstimator(th.nn.Module):
 
-    @dataclass
-    class Hyperparams:
-        vec_encoder_arch : list[int] | Literal['identity']
-        vec_input_size : int
-        vec_encoding_size : int
-        img_input_size_chw : tuple[int, int, int]
-        img_encoding_size : int
-        img_encoder_arch : str
-        combiner_arch : list[int]
-        feature_size : int
-        learning_rate : float
-        ensemble_size : int
-        th_device : th.device
-        dict_obs_image_key : str | int
-        dict_obs_vector_key : str | int
-
-    def __init__(self,  vec_encoder_arch : list[int] | Literal['identity'],
-                        vec_encoding_size : int,
-                        vec_input_size : int,
-                        img_encoder_arch : str = "conv_extrasmall",
-                        img_encoding_size : int = 0,
-                        img_input_size_chw : tuple[int, int, int] = (0,0,0),
-                        combiner_arch : list[int] | Literal['identity'] = [],
-                        feature_size : int = 64,
-                        learning_rate : float = 1e-3,
-                        ensemble_size : int = 3,
-                        th_device : th.device = th.device("cuda"),
-                        dict_obs_image_key : str | int = "image",
-                        dict_obs_vector_key : str | int = "vector",
-                        use_torch_compile : bool = False):
+    def __init__(self,  hyperparams : RNDEstimatorHyperparams):
         super().__init__()
-        self._hyperparams = self.Hyperparams(   vec_encoder_arch=vec_encoder_arch,
-                                                vec_encoding_size=vec_encoding_size,
-                                                vec_input_size=vec_input_size,
-                                                img_encoder_arch=img_encoder_arch,
-                                                img_encoding_size=img_encoding_size,
-                                                img_input_size_chw=img_input_size_chw,
-                                                combiner_arch=combiner_arch,
-                                                feature_size=feature_size,
-                                                learning_rate=learning_rate,
-                                                ensemble_size=ensemble_size,
-                                                th_device=th_device,
-                                                dict_obs_image_key=dict_obs_image_key,
-                                                dict_obs_vector_key=dict_obs_vector_key)
+        self._hyperparams = _shallow_copy_dataclass(hyperparams)
+        
         self.build_models()
-        if use_torch_compile:
+        if self._hyperparams.use_torch_compile:
             self._compute_loss = th.compile(self._compute_loss)
             self._optimizer_step = th.compile(self._optimizer_step)
 
@@ -152,7 +151,7 @@ class RNDNoveltyEstimator(th.nn.Module):
     def _compute_loss(self, dict_obs_batch : dict[str|int,th.Tensor] | None = None, vector_obs_batch : th.Tensor | None = None, img_obs_batch : th.Tensor | None = None) -> th.Tensor:
         square_errors = self(dict_obs_batch=dict_obs_batch, vector_obs_batch=vector_obs_batch, img_obs_batch=img_obs_batch)
         loss = th.mean(square_errors)
-        return loss
+        return loss, square_errors
 
     def _optimizer_step(self):
         self._optimizer.step()
@@ -163,12 +162,12 @@ class RNDNoveltyEstimator(th.nn.Module):
         # ggLog.info(f"RNDNoveltyEstimator.train_model(): dict_obs_batch[{self._hyperparams.dict_obs_vector_key}].size() = {dict_obs_batch[self._hyperparams.dict_obs_vector_key].size()}")          
         self.train() # Put module in train mode
         self._optimizer.zero_grad(set_to_none=True)
-        loss = self._compute_loss(dict_obs_batch=dict_obs_batch, vector_obs_batch=vector_obs_batch, img_obs_batch=img_obs_batch)
+        loss, square_errors = self._compute_loss(dict_obs_batch=dict_obs_batch, vector_obs_batch=vector_obs_batch, img_obs_batch=img_obs_batch)
         loss.backward()
         with th.no_grad():
             self._optimizer_step()
-        return loss
-        
+        return loss, square_errors
+
 
 class NoveltyScaler():
     """ To apply RND estimates to enrich rewards or losses, these estimates need to be rescaled appropriately.
@@ -192,17 +191,7 @@ class NoveltyScaler():
            Vogel 2023 - When Heavy Tails Disrupt Statistical Inference).
         Normalization and tail-heaviness is computed on exponentially moving averages of the relevant statistics.
     """
-    def __init__(self,  avg_alpha : float, 
-                        th_device : th.device,
-                        reward_bonus_weight : float = 0.5,
-                        reward_novelty_interest_std_threshold : float = 1.5,
-                        reward_novelty_std_squash : float = 3.0,
-                        reward_target_bland_ratio : float = 0.25,
-                        reward_target_interesting_ratio : float = 0.9,
-                        reward_increment : float = 0.01,
-                        kurtosis_min : float = 10.0,
-                        kurtosis_max : float = 20.0,
-                        novelty_weight_squash : float = 10.0):
+    def __init__(self,  hyperparams: RNDScalerHyperparams):
         """
 
         Parameters
@@ -232,30 +221,30 @@ class NoveltyScaler():
         """
         # self._n_updates = 0
         self._stats_initialized = False
-        self._avg_novelty = th.as_tensor(float("nan"), device=th_device)
-        self._avg_novelty_mean_of_square = th.as_tensor(float("nan"), device=th_device)
-        self._avg_novelty_mean_of_fourth_residual = th.as_tensor(float("nan"), device=th_device)
-        self._avg_novelty_mean_of_second_residual = th.as_tensor(float("nan"), device=th_device)
-        self._avg_raw_reward : th.Tensor = th.as_tensor(float("nan"), device=th_device)
-        self._current_kurtosis = th.as_tensor(float("nan"), device=th_device)
+        self._avg_novelty = th.as_tensor(float("nan"), device=hyperparams.th_device)
+        self._avg_novelty_mean_of_square = th.as_tensor(float("nan"), device=hyperparams.th_device)
+        self._avg_novelty_mean_of_fourth_residual = th.as_tensor(float("nan"), device=hyperparams.th_device)
+        self._avg_novelty_mean_of_second_residual = th.as_tensor(float("nan"), device=hyperparams.th_device)
+        self._avg_raw_reward : th.Tensor = th.as_tensor(float("nan"), device=hyperparams.th_device)
+        self._current_kurtosis = th.as_tensor(float("nan"), device=hyperparams.th_device)
 
         # HYPERPARAMETERS
-        self._avgs_alpha_th = th.as_tensor(avg_alpha, device=th_device) # stats exponential moving average alpha
-        self._reward_bonus_weight = th.as_tensor(reward_bonus_weight, device=th_device) # weight of the novelty-based reward bonus
+        self._avgs_alpha_th = th.as_tensor(hyperparams.avg_alpha, device=hyperparams.th_device) # stats exponential moving average alpha
+        self._reward_bonus_weight = th.as_tensor(hyperparams.reward_bonus_weight, device=hyperparams.th_device) # weight of the novelty-based reward bonus
         self._epsilon = 1e-14 # to avoid numerical issues, carefule here, don't set it too big, losses easily get close to 1e-8
         # Normalization and scaling hyperparameters:
-        self._novelty_interest_std_threshold = reward_novelty_interest_std_threshold # We consider 'interesting' novelties that are at this multiple of std in the novelty distribution..
-        self._novelty_std_squash = reward_novelty_std_squash # We squash the normalized novelty at this multiple of std (sigma), to reduce the impact of outliers
+        self._novelty_interest_std_threshold = hyperparams.reward_novelty_interest_std_threshold # We consider 'interesting' novelties that are at this multiple of std in the novelty distribution..
+        self._novelty_std_squash = hyperparams.reward_novelty_std_squash # We squash the normalized novelty at this multiple of std (sigma), to reduce the impact of outliers
         # We compute reward bonuses as ratios of the average reward, following these target ratios:
-        self._reward_target_bland_ratio = reward_target_bland_ratio # Stuff that is neither boring nor interesting shoud end up accounting for this amount of reward
-        self._reward_target_interesting_ratio = reward_target_interesting_ratio # Stuff that is interesting shoud end up accounting for this amount of reward
-        self._reward_increment = reward_increment # We add this to the average reward when scaling the bonuses to ensure that even if the average reward is zero we still get some bonus
+        self._reward_target_bland_ratio = hyperparams.reward_target_bland_ratio # Stuff that is neither boring nor interesting shoud end up accounting for this amount of reward
+        self._reward_target_interesting_ratio = hyperparams.reward_target_interesting_ratio # Stuff that is interesting shoud end up accounting for this amount of reward
+        self._reward_increment = hyperparams.reward_increment # We add this to the average reward when scaling the bonuses to ensure that even if the average reward is zero we still get some bonus
         # We linearly scale the bonuses between these two kurtosis values:
-        self._kurtosis_min = kurtosis_min # when the novelty kurtosis reaches this value the bonuses gets zeroed out
-        self._kurtosis_max = kurtosis_max # when the novelty kurtosis is at or above this value the bonuses are fully applied
+        self._kurtosis_min = hyperparams.kurtosis_min # when the novelty kurtosis reaches this value the bonuses gets zeroed out
+        self._kurtosis_max = hyperparams.kurtosis_max # when the novelty kurtosis is at or above this value the bonuses are fully applied
 
         # When using novelty to compute loss weights for data imbalance:
-        self._novelty_weight_squash = novelty_weight_squash # we squash the novelty-based weights at this value to avoid extreme weights
+        self._novelty_weight_squash = hyperparams.novelty_weight_squash # we squash the novelty-based weights at this value to avoid extreme weights
 
     def process_bonuses(self, raw_bonus_batch : th.Tensor, raw_reward_batch : th.Tensor,
                               return_avg_raw_exp_bonus : th.Tensor | None,
@@ -433,3 +422,56 @@ class NoveltyScaler():
         novelty_weights = 1.0 + (novelty_weights - 1.0)*kurtosis_factor # scale towards 1.0 as kurtosis goes down
 
         return novelty_weights
+
+from rreal.algorithms.sac import DictTransitionBatch
+
+class SAC_RND_reward_augmentor():
+    """ This class is meant to be used as a reward augmentor for SAC, using RND novelty estimates to augment the rewards.
+        It uses a RNDNoveltyEstimator and a NoveltyScaler to compute the novelty-based reward bonuses.
+        It can be used as a reward augmentor for SAC by passing it to the SAC constructor.
+    """
+    def __init__(self, rnd_novelty_estimator : RNDNoveltyEstimator, novelty_scaler : NoveltyScaler):
+        self._rnd_novelty_estimator = rnd_novelty_estimator
+        self._novelty_scaler = novelty_scaler
+
+    def get_augmented_rewards(self,
+                            transitions : DictTransitionBatch,
+                            critic_enc_obss : th.Tensor,
+                            critic_next_enc_obss : th.Tensor,
+                            actor_next_enc_obss : th.Tensor) -> th.Tensor:
+        """ Computes the novelty-based reward bonuses for the given transitions.
+
+        Parameters
+        ----------
+        transitions : DictTransitionBatch
+            The transitions from which to compute the novelty-based reward bonuses.
+
+        Returns
+        -------
+        th.Tensor
+            The rewards augmented with novelty-based reward bonuses for the given transitions.
+        """
+        raw_reward_batch = transitions.rewards
+        raw_novelty_batch = self._rnd_novelty_estimator(crit_next_enc_obss=critic_next_enc_obss)
+        augmented_rewards = self._novelty_scaler.novelty_to_reward_bonuses(raw_novelty_batch, raw_reward_batch, update_stats=False)
+        return augmented_rewards
+
+    def train_postupdate_hook(self,
+                              transitions : DictTransitionBatch,
+                              encoded_obss : tuple[th.Tensor | None, th.Tensor, th.Tensor, th.Tensor],
+                              losses : tuple[th.Tensor, th.Tensor, th.Tensor]):
+        """ This function is meant to be used as a post-update hook for SAC, to train the RND novelty estimator after each SAC update.
+
+        Parameters
+        ----------
+        transitions : DictTransitionBatch
+            The transitions used by the SAC update
+        encoded_obss : tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]
+            The encoded observations produced by SAC for the transitions
+        losses : tuple[th.Tensor, th.Tensor, th.Tensor]
+            The losses computed during the SAC update (q_loss, actor_loss, alpha_loss)
+        """
+        critic_next_enc_obss = encoded_obss[1]
+        loss, square_errors = self._rnd_novelty_estimator.train_model(vector_obs_batch=critic_next_enc_obss)
+        self._novelty_scaler.update_stats(raw_novelty_batch=square_errors,
+                                          raw_reward_batch=transitions.rewards)

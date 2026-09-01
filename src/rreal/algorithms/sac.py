@@ -105,6 +105,26 @@ def safe_quantile(x : th.Tensor, q : float, dim : int = 0) -> th.Tensor:
     """
     return th.kthvalue(x, k=int(q * x.size(dim)), dim=dim).values
 
+class RewardAugmentorProtocol(Protocol):
+        def __call__(self,
+                     transitions : DictTransitionBatch,
+                     critic_enc_obss : th.Tensor,
+                     critic_next_enc_obss : th.Tensor,
+                     actor_next_enc_obss : th.Tensor) -> th.Tensor:
+            ...
+
+class PostUpdateHookProtocol(Protocol):
+        """Protocol for a hook ran after the SAC model update. 
+        The hook receives:
+         * The transition batch the model was trained on
+         * The encoded observations for the transitions (encoded actor observation may be None)
+         * The losses computed during the update (q_loss, actor_loss, alpha_loss)"""
+        
+        def __call__(self,
+                     transitions : DictTransitionBatch,
+                     encoded_obss : tuple[th.Tensor | None, th.Tensor, th.Tensor, th.Tensor],
+                     losses : tuple[th.Tensor, th.Tensor, th.Tensor]) -> None:
+            ...
 
 @typing.runtime_checkable
 class AnnealingFunction(Protocol):
@@ -467,6 +487,7 @@ class SAC(RLAgent):
         alpha_lr_factor : float
         reward_space : spaces.ThBox
         independent_entropy_q : bool
+        perform_multiple_actor_updates : bool
         init_hparams : SAC_init_hparams
 
     def __init__(self,
@@ -475,9 +496,7 @@ class SAC(RLAgent):
                  reward_space : gym.spaces.Space,
                  action_space : gym.spaces.Box,
                  actor_feature_extractor : FeatureExtractor | None = None,
-                 critic_feature_extractor : FeatureExtractor | None = None,
-                 merge_actor_and_critic_updates : bool = True
-                 ):
+                 critic_feature_extractor : FeatureExtractor | None = None                 ):
         super().__init__()
         self._init_args = get_func_input_args(exclude=[ "self",
                                                         "values",
@@ -561,8 +580,11 @@ class SAC(RLAgent):
                                    alpha_lr_factor=init_hparams.alpha_lr_factor,
                                    reward_space = reward_space,
                                    independent_entropy_q = init_hparams.independent_entropy_q,
-                                   init_hparams = init_hparams)
-        self._transition_augmentation_func = None
+                                   init_hparams = init_hparams,
+                                   perform_multiple_actor_updates = True)
+        self._transition_augmentor_func = None
+        self._reward_augmentor_func : RewardAugmentorProtocol | None = None
+        self._postupdate_hooks : list[PostUpdateHookProtocol] = []
         self._default_reward_weights = th.ones(rewards_num, dtype=self._dtype, device=self._hp.torch_device)
         self._obs_space_sizes = sizetree_from_space(observation_space)
         self.device = self._hp.torch_device
@@ -677,7 +699,6 @@ class SAC(RLAgent):
         self._tot_grad_steps_count = 0
         self._enable_nvtx = True
         self._log_losses = False
-        self._merge_actor_and_critic_updates = merge_actor_and_critic_updates
         # This was optimized by improving GPU usage via cudagraphs, profiling with Nsight Systems
         # The profiling command was:
         #  sudo nsys profile -w true -t cuda,nvtx,osrt,cudnn,cublas --capture-range=cudaProfilerApi --capture-range-end=stop \
@@ -706,18 +727,30 @@ class SAC(RLAgent):
         os.makedirs(log_folder, exist_ok=True)
         if self._log_losses:
             self._losses_file = open(log_folder+"/losses.bin", "ab")
-    
+
+
+    def get_critic_encoding_size(self):
+        return self._critic_feature_extractor.encoding_size()
+
+
+    def get_actor_encoding_size(self):
+        return self._actor_feature_extractor.encoding_size()
+
+
     def _nvtx_startup(self):
         if self._enable_nvtx and self._agent_updates == 20:
             th.cuda.cudart().cudaProfilerStart() #type: ignore
+
 
     def _nvtx_stop(self):
         if self._enable_nvtx and self._agent_updates > 30:
             th.cuda.cudart().cudaProfilerStop() #type: ignore
 
+
     def _nvtx_mark(self, name : str):
         if self._enable_nvtx:
             th.cuda.nvtx.mark(name)
+
 
     def _nvtx_start_range(self, name : str):
         if not hasattr(self, "_nvtx_range_stack"):
@@ -725,6 +758,7 @@ class SAC(RLAgent):
         self._stack_nvtx_range.append(name)
         if self._enable_nvtx:
             th.cuda.nvtx.range_push(name)
+
 
     def _nvtx_end_range(self, name : str):
         if not hasattr(self, "_stack_nvtx_range") or len(self._stack_nvtx_range) == 0:
@@ -735,11 +769,14 @@ class SAC(RLAgent):
         if self._enable_nvtx:
             th.cuda.nvtx.range_pop()
 
+
     def get_actor_subobservation(self, observation : DictObs)  -> DictObs:
         return filter_dict(observation, self._hp.actor_observation_filter)
 
+
     def get_critic_subobservation(self, observation : DictObs) -> DictObs:
         return filter_dict(observation, self._hp.critic_observation_filter)
+
 
     def _get_reference_action(self, observation_batch : DictObs) -> th.Tensor | None:
         if self._hp.action_reference_obs_key is not None:
@@ -747,8 +784,10 @@ class SAC(RLAgent):
         else:
             return None
 
+
     def get_feature_extractors(self):
         return self._critic_feature_extractor, self._actor_feature_extractor
+
 
     def save(self, path : str):
         with zipfile.ZipFile(path, mode="w") as archive:
@@ -932,36 +971,37 @@ class SAC(RLAgent):
     def _compute_critic_loss(self,  transitions : DictTransitionBatch,
                                     get_stats : bool = True,
                                     critic_enc_obss : th.Tensor | None = None,
-                                    crit_next_enc_obss : th.Tensor | None = None,
-                                    actor_next_obss_enc : th.Tensor | None = None) -> tuple[th.Tensor, tuple[th.Tensor, th.Tensor]]:
+                                    critic_enc_next_obss : th.Tensor | None = None,
+                                    actor_enc_next_obss : th.Tensor | None = None) -> tuple[th.Tensor, tuple[th.Tensor, th.Tensor], tuple[None, th.Tensor, th.Tensor, th.Tensor]]:
         critic_obss = self.get_critic_subobservation(transitions.observations)
         # actor_obss = self.get_actor_subobservation(transitions.observations)
         if critic_enc_obss is None:
             critic_enc_obss = self._critic_feature_extractor.extract_features(critic_obss)
         with th.no_grad():
-            rewards     = transitions.rewards
             terminateds = transitions.terminated
             next_observations = transitions.next_observations
             actions = transitions.actions
             batch_size = terminateds.size()[0]
-            dbg_check_size(rewards, (batch_size, self._hp.rewards_num), "sac._compute_critic_loss: rewards has incorrect size")
             dbg_check_size(terminateds, (batch_size, 1), "sac._compute_critic_loss: terminateds has incorrect size")
-            actor_next_obss = self.get_actor_subobservation(next_observations)
-
             q_size = self._hp.rewards_num+1 if self._hp.independent_entropy_q else self._hp.rewards_num
-            if crit_next_enc_obss is None:
+
+            actor_next_obss = self.get_actor_subobservation(next_observations)
+            if critic_enc_next_obss is None:
                 critic_next_obss = self.get_critic_subobservation(next_observations)
-                crit_next_enc_obss = self._critic_feature_extractor.extract_features(critic_next_obss)   
+                critic_enc_next_obss = self._critic_feature_extractor.extract_features(critic_next_obss)   
             if self._share_actor_critic_feature_extractor:
-                actor_next_obss_enc = crit_next_enc_obss
+                actor_enc_next_obss = critic_enc_next_obss
             else:
-                if actor_next_obss_enc is None:
-                    actor_next_obss_enc = self._actor_feature_extractor.extract_features(actor_next_obss)
+                if actor_enc_next_obss is None:
+                    actor_enc_next_obss = self._actor_feature_extractor.extract_features(actor_next_obss)
             reference_action = self._get_reference_action(actor_next_obss)
+
+            rewards = self._augment_rewards(transitions, critic_enc_obss, critic_enc_next_obss, actor_enc_next_obss)
+            dbg_check_size(rewards, (batch_size, self._hp.rewards_num), "sac._compute_critic_loss: rewards has incorrect size")
             
             # Compute next-values for TD
-            next_state_actions, next_state_log_pi, _, _ = self._actor.sample_action(actor_next_obss_enc, reference_action = reference_action)
-            q_next = self._q_net_target.get_min_qval(crit_next_enc_obss, next_state_actions)
+            next_state_actions, next_state_log_pi, _, _ = self._actor.sample_action(actor_enc_next_obss, reference_action = reference_action)
+            q_next = self._q_net_target.get_min_qval(critic_enc_next_obss, next_state_actions)
             
             dbg_check_size(q_next, (batch_size, q_size), "sac._compute_critic_loss: q_next has incorrect size")
             dbg_check_size(next_state_log_pi, (batch_size, ), "sac._compute_critic_loss: next_state_log_pi has incorrect size")
@@ -1009,7 +1049,8 @@ class SAC(RLAgent):
         #     stats = (per_reward_square_errs.detach().clone(), q_stats.detach())
         # else:
         #     stats = (None, None)
-        return th.sum(per_reward_square_errs), stats
+        encoded_obss = (None, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss)
+        return th.sum(per_reward_square_errs), stats, encoded_obss
 
     @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
     def _critic_opt_step(self, q_loss : th.Tensor):
@@ -1034,7 +1075,7 @@ class SAC(RLAgent):
         self._q_optimizer.zero_grad(set_to_none=True)
         # self._nvtx_start_range("critic forward")
         # ggLog.info(f"compute_critic_loss...")
-        q_loss, (subq_errs, q_stats) = self._compute_critic_loss(transitions)
+        q_loss, (subq_errs, q_stats), enc_obss = self._compute_critic_loss(transitions)
         # ggLog.info(f"compute_critic_loss done")
         # self._nvtx_end_range("critic forward")
         # self._nvtx_start_range("critic backward")
@@ -1051,6 +1092,7 @@ class SAC(RLAgent):
         self._critic_updates += 1
         # self._nvtx_end_range("_update_critic")
         # ggLog.info(f"critic update done")
+        return enc_obss
 
 
     # @th.compile(mode=compile_mode, fullgraph=fullgraph)
@@ -1192,9 +1234,10 @@ class SAC(RLAgent):
                                                                actor_enc_obss=actor_enc_obss)
             loss = actor_loss + alpha_loss + q_loss
         else:
-            alpha_loss, alpha_stats = 0, None
+            alpha_loss, alpha_stats = th.zeros_like(actor_loss), None
             loss = actor_loss + q_loss
-        return loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, (subq_square_errs, q_stats)
+        encoded_obss = (actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss)
+        return loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, (subq_square_errs, q_stats), encoded_obss
     
     @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
     def _actor_and_alpha_opt_step(self, actor_loss : th.Tensor, alpha_loss : th.Tensor | None):
@@ -1244,7 +1287,7 @@ class SAC(RLAgent):
         self._q_optimizer.zero_grad(set_to_none=True)
 
         # self._nvtx_start_range("_compute_all_losses")
-        loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, (subq_errs, q_stats) = self._compute_all_losses(transitions)
+        loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, (subq_errs, q_stats), encoded_obss = self._compute_all_losses(transitions)
         # self._nvtx_end_range("_compute_all_losses")
         # self._nvtx_start_range("all_backward")
         loss.backward()
@@ -1265,6 +1308,7 @@ class SAC(RLAgent):
         self._critic_updates += 1
         self._alpha_updates += 1
         self._actor_updates += 1
+        return encoded_obss
         # self._nvtx_end_range("_update_all")
         
     @staticmethod
@@ -1301,11 +1345,12 @@ class SAC(RLAgent):
                 self._actor_feature_extractor_optimizer.zero_grad(set_to_none=True)
         update_actor_and_alpha = self._agent_updates % self._hp.policy_update_freq == 0
         if update_actor_and_alpha:
-            self._update_all(transitions)
-            for _ in range(self._hp.policy_update_freq-1): # do the remaining updates
-                self._update_actor_and_alpha(transitions=transitions)
+            encoded_obss = self._update_all(transitions)
+            if self._hp.perform_multiple_actor_updates:
+                for _ in range(self._hp.policy_update_freq-1): # do the remaining updates (twice on the same transition?? This comes from CleanRL)
+                    self._update_actor_and_alpha(transitions=transitions)
         else:
-            self._update_critic(transitions)
+            encoded_obss = self._update_critic(transitions)
 
         if self._enable_feature_extractor_training:
             self._update_feature_extractor()
@@ -1313,40 +1358,8 @@ class SAC(RLAgent):
         self._needs_target_update = self._critic_updates % self._hp.targets_update_freq == 0
         # self._nvtx_end_range(nvtx_range_name)
         # self._nvtx_stop()
-        return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
-
-    def _update(self, transitions : DictTransitionBatch):
-        # ggLog.info(f" ----------- SAC update {self._agent_updates}...")
-        th.compiler.cudagraph_mark_step_begin()
-        # sync_dbg_mode = th.cuda.get_sync_debug_mode()
-        # th.cuda.set_sync_debug_mode("error")
-        # Mark the beginning of cuda graphs to help the compile.Docs say "CUDA Graphs will free tensors of
-        #  a prior iteration. A new iteration is started on each invocation of torch.compile, so long as 
-        # there is not a pending backward that has not been called.". Not sure what it means, but marking these
-        # should be helpful
-        # th.compiler.cudagraph_mark_step_begin()
-        # self._nvtx_startup()
-        nvtx_range_name = f"iteration{self._critic_updates}"
-        # self._nvtx_start_range(nvtx_range_name)
-
-        if self._enable_feature_extractor_training:
-            if self._critic_feature_extractor_optimizer is not None:
-                self._critic_feature_extractor_optimizer.zero_grad(set_to_none=True)
-            if self._actor_feature_extractor_optimizer is not None:
-                self._actor_feature_extractor_optimizer.zero_grad(set_to_none=True)
-
-        self._update_critic(transitions = transitions)
-        if self._critic_updates % self._hp.policy_update_freq == 0:
-            for _ in range(self._hp.policy_update_freq):
-                self._update_actor_and_alpha(transitions=transitions) # TODO: is it good to update twice with the same batch
-        if self._enable_feature_extractor_training:
-            self._update_feature_extractor()
-        # self._nvtx_end_range(nvtx_range_name)
-        self._agent_updates += 1
-        # self._nvtx_stop()      
-        # th.cuda.set_sync_debug_mode(sync_dbg_mode)
-        # ggLog.info(f"sac update done")
-        return self._last_q_loss, self._last_actor_loss, self._last_alpha_loss
+        q_act_alpha_losses = (self._last_q_loss, self._last_actor_loss, self._last_alpha_loss)
+        return q_act_alpha_losses, encoded_obss
     
     def validate(self, buffer : BaseValidatingBuffer, batch_size : int):
         with th.no_grad():
@@ -1359,12 +1372,34 @@ class SAC(RLAgent):
                             "val_alpha_loss":alpha_loss})
         return critic_loss, actor_loss, alpha_loss
 
+
+    def set_reward_augmentor_func(self, reward_augmentor_func : RewardAugmentorProtocol | None):
+        """Sets a function to augment rewards using transitions and encoded observations, see RewardAugmentorProtocol. The function must be torch-compilable
+
+        Parameters
+        ----------
+        reward_augmentor_func : RewardAugmentorProtocol | None
+            The function to augment rewards, or None to disable reward augmentation.
+        """
+        self._reward_augmentor_func = reward_augmentor_func
+
+        
+    def _augment_rewards(self, transitions, critic_enc_obss, critic_next_enc_obss, actor_next_enc_obss):
+        if self._reward_augmentor_func is None:
+            return transitions.rewards
+        else:
+            return self._reward_augmentor_func(transitions,
+                                               critic_enc_obss,
+                                               critic_next_enc_obss,
+                                               actor_next_enc_obss)
+    
+
     def set_transition_augmentor(self, transition_augmentor: TransitionAugmentorFunction):
-        self._transition_augmentation_func = transition_augmentor
+        self._transition_augmentor_func = transition_augmentor
 
     def _augment_transitions(self, transitions : DictTransitionBatch) -> DictTransitionBatch:
-        if self._transition_augmentation_func is not None:
-            o, a, no, r, t = self._transition_augmentation_func(transitions.observations,
+        if self._transition_augmentor_func is not None:
+            o, a, no, r, t = self._transition_augmentor_func(transitions.observations,
                                                                 transitions.actions,
                                                                 transitions.next_observations,
                                                                 transitions.rewards,
@@ -1378,6 +1413,20 @@ class SAC(RLAgent):
             )
         return transitions
 
+    def register_postupdate_hook(self, hook_func : PostUpdateHookProtocol):
+        self._postupdate_hooks.append(hook_func)
+
+    def _run_postupdate_hooks(self, transitions : DictTransitionBatch,
+                              encoded_obss : tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor],
+                              losses : tuple[th.Tensor, th.Tensor, th.Tensor]):
+        detached_encoded_obss = (encoded_obss[0].detach() if encoded_obss[0] is not None else None,
+                                encoded_obss[1].detach(),
+                                encoded_obss[2].detach(),
+                                encoded_obss[3].detach())
+        detached_losses = (losses[0].detach(), losses[1].detach(), losses[2].detach())
+        for hook in self._postupdate_hooks:
+            hook(transitions, detached_encoded_obss, detached_losses)
+
     @override
     def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[th.Tensor,th.Tensor,th.Tensor]:
         # ggLog.info(f":::::::::::::::::::::::: train_model: global_step={global_step}")
@@ -1390,13 +1439,14 @@ class SAC(RLAgent):
             transitions : DictTransitionBatch = buffer.sample(self._hp.batch_size) #TODO: maybe add a check that does this cast better
 
             transitions = self._augment_transitions(transitions)
+
             # self._nvtx_end_range("sample")
             # transitions = map_tensor_tree(transitions, lambda t : t.to(device=self.device, non_blocking=self.device.type=="cuda"))
             # th.cuda.synchronize(self.device)
-            if self._merge_actor_and_critic_updates:
-                losses = self._update_full_merged(transitions = transitions)
-            else:
-                losses = self._update(transitions = transitions)
+            losses, encoded_obss = self._update_full_merged(transitions = transitions)
+
+            self._run_postupdate_hooks(transitions, encoded_obss, losses)
+
             qloss_actloss_alphaloss_alpha[i] = losses + (self._alpha,)
             self._tot_grad_steps_count += 1
         t1 = time.monotonic()

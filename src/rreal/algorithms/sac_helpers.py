@@ -14,6 +14,7 @@ from adarl.utils.ThDictEpReplayBuffer import ThDictEpReplayBuffer
 from adarl.utils.ThVecDictEpReplayBuffer import ThVecDictEpReplayBuffer
 from adarl.utils.async_vector_env import AsyncVectorEnvShmem
 from adarl.utils.buffers import ThDReplayBuffer
+from rreal.utils.RNDNoveltyEstimator import RNDEstimatorHyperparams, RNDHyperparams
 from rreal.utils.callbacks import EvalCallback, CheckpointCallbackRB
 from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector, SyncExperienceCollector
 from rreal.algorithms.rl_agent import RLAgent
@@ -251,7 +252,7 @@ def build_sac_with_fe(obs_space : gym.Space,
                             critic_feature_extractor_name : str | None,
                             actor_fe_hparams : Any = None,
                             critic_fe_hparams : Any = None,
-                            share_feature_extractor : bool | None = None) -> RLAgent:
+                            share_feature_extractor : bool | None = None) -> SAC:
     """Build a SAC agent, optionally with feature extractors selected by registered class name.
 
     Extractors are specified as a name plus their own hyperparameter object rather than as
@@ -419,7 +420,9 @@ def sac_train(  seed : int,
                 critic_feature_extractor_name : str | None = None,
                 actor_fe_hparams : Any = None,
                 critic_fe_hparams : Any = None,
-                share_feature_extractor : bool | None = None):
+                share_feature_extractor : bool | None = None,
+                use_rnd_exploration : bool = False,
+                rnd_hyperparams : RNDHyperparams = RNDHyperparams()):
 
     run_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
@@ -487,6 +490,15 @@ def sac_train(  seed : int,
     if transition_augmentor_builder is not None:
         transition_augmentor = transition_augmentor_builder(observation_space, action_space, reward_space)
         model.set_transition_augmentor(transition_augmentor)
+
+    if use_rnd_exploration:
+        from rreal.utils.RNDNoveltyEstimator import RNDNoveltyEstimator, NoveltyScaler, SAC_RND_reward_augmentor
+        rnd_hyperparams.estimator_hyperparams.vec_input_size = model.get_critic_encoding_size()
+        rnd_augmentor = SAC_RND_reward_augmentor(
+                                RNDNoveltyEstimator(hyperparams=rnd_hyperparams.estimator_hyperparams),
+                                NoveltyScaler(hyperparams=rnd_hyperparams.scaler_hyperparams))
+        model.set_reward_augmentor_func(rnd_augmentor.get_augmented_rewards)
+        model.register_postupdate_hook(rnd_augmentor.train_postupdate_hook)
 
     rewards_num = spaces.get_1d_space_size(reward_space)
     rb = ThVecDictEpReplayBuffer(buffer_size=hyperparams.buffer_size,
