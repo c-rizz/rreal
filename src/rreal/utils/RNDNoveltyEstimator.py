@@ -5,6 +5,8 @@ from typing import Literal
 from adarl.utils.dbg import ggLog
 from adarl.utils.dbg.dbg_checks import dbg_check
 from rreal.utils.FixedAdamW import AdamW
+import copy
+
 @dataclass
 class RNDEstimatorHyperparams:
     vec_encoder_arch : list[int] | Literal['identity'] = field(default_factory=lambda: [256,256])
@@ -23,7 +25,40 @@ class RNDEstimatorHyperparams:
     use_torch_compile : bool = False
 
 @dataclass
-class RNDScalerHyperparams:   
+class RNDScalerHyperparams:
+    """Hyperparameters for :class:`NoveltyScaler`.
+
+    Attributes
+    ----------
+    avg_alpha : float
+        Alpha for the exponential moving averages of the novelty statistics
+    th_device : th.device
+        Torch device to use for the internal tensors
+    reward_bonus_weight : float
+        Final weight of the novelty-based reward bonus
+    reward_novelty_interest_std_threshold : float
+        Threshold, in novelty standard deviations, above which a sample counts as interesting
+    reward_novelty_std_squash : float
+        Squash factor for normalized novelty, in standard deviations, to reduce outlier impact
+    reward_target_bland_ratio : float
+        Target ratio of reward for bland (neither boring nor interesting) samples
+    reward_target_interesting_ratio : float
+        Target ratio of reward for interesting samples
+    reward_max_ratio : float
+        The reward ratio is clamped to +-this value, so that outlying novelties cannot
+        produce an arbitrarily large bonus or penalty
+    reward_range_increment : float
+        Increment added to the reward standard deviation when scaling bonuses, so that a
+        constant reward, whose standard deviation is zero, still yields a bonus
+    kurtosis_min : float
+        Kurtosis at or below which the bonuses are zeroed out
+    kurtosis_max : float
+        Kurtosis at or above which the bonuses are fully applied
+    novelty_weight_squash : float
+        Squash factor for the novelty weights to reduce outlier impact, used when computing weights
+    rewards_num : int
+        Number of reward channels; the statistics are tracked per channel
+    """
     avg_alpha : float = 0.99
     th_device : th.device = th.device("cuda")
     reward_bonus_weight : float = 0.5
@@ -31,10 +66,12 @@ class RNDScalerHyperparams:
     reward_novelty_std_squash : float = 3.0
     reward_target_bland_ratio : float = 0.25
     reward_target_interesting_ratio : float = 0.9
-    reward_increment : float = 0.01
-    kurtosis_min : float = 10.0
-    kurtosis_max : float = 20.0
+    reward_max_ratio : float = 1.5
+    reward_range_increment : float = 0.01
+    kurtosis_min : float = 3.0
+    kurtosis_max : float = 10.0
     novelty_weight_squash : float = 10.0
+    rewards_num : int = 1
 
 @dataclass
 class RNDHyperparams:
@@ -148,7 +185,7 @@ class RNDNoveltyEstimator(th.nn.Module):
         # we return a [batch_size] tensor. i.e. we return the novelty for each sample
         return th.mean(th.square(error),dim=(1,2)) 
 
-    def _compute_loss(self, dict_obs_batch : dict[str|int,th.Tensor] | None = None, vector_obs_batch : th.Tensor | None = None, img_obs_batch : th.Tensor | None = None) -> th.Tensor:
+    def _compute_loss(self, dict_obs_batch : dict[str|int,th.Tensor] | None = None, vector_obs_batch : th.Tensor | None = None, img_obs_batch : th.Tensor | None = None) -> tuple[th.Tensor, th.Tensor]:
         square_errors = self(dict_obs_batch=dict_obs_batch, vector_obs_batch=vector_obs_batch, img_obs_batch=img_obs_batch)
         loss = th.mean(square_errors)
         return loss, square_errors
@@ -166,7 +203,7 @@ class RNDNoveltyEstimator(th.nn.Module):
         loss.backward()
         with th.no_grad():
             self._optimizer_step()
-        return loss, square_errors
+        return loss.detach(), square_errors.detach()
 
 
 class NoveltyScaler():
@@ -192,59 +229,25 @@ class NoveltyScaler():
         Normalization and tail-heaviness is computed on exponentially moving averages of the relevant statistics.
     """
     def __init__(self,  hyperparams: RNDScalerHyperparams):
-        """
-
-        Parameters
-        ----------
-        avg_alpha : float
-            Alpha for the exponential moving averages of the novelty statistics
-        bonus_weight : float
-            Final weight of the novelty-based reward bonus
-        th_device : th.device
-            Torch device to use for the internal tensors
-        novelty_interest_std_threshold : float, optional
-            Threshold for considering novelty as interesting, by default 1.5
-        novelty_std_squash : float, optional
-            Squash factor for normalized novelty to reduce outlier impact, by default 3.0
-        reward_target_bland_ratio : float, optional
-            Target ratio of reward for bland (neither boring nor interesting) samples, by default 0.25
-        reward_target_interesting_ratio : float, optional
-            Target ratio of reward for interesting samples, by default 0.9
-        reward_increment : float, optional
-            Increment added to the average reward when scaling bonuses, by default 0.01
-        kurtosis_min : float, optional
-            Minimum kurtosis value for scaling bonuses, by default 10.0
-        kurtosis_max : float, optional
-            Maximum kurtosis value for scaling bonuses, by default 20.0
-        novelty_weight_squash : float, optional
-            Squash factor for the novelty weights to reduce outlier impact, used when computing weights, by default 10.0
-        """
-        # self._n_updates = 0
+        """See :class:`RNDScalerHyperparams` for the meaning of each hyperparameter."""
+        self._n_updates = 0
+        self._n_reward_updates = 0
+        self._hp = copy.deepcopy(hyperparams)
         self._stats_initialized = False
-        self._avg_novelty = th.as_tensor(float("nan"), device=hyperparams.th_device)
-        self._avg_novelty_mean_of_square = th.as_tensor(float("nan"), device=hyperparams.th_device)
-        self._avg_novelty_mean_of_fourth_residual = th.as_tensor(float("nan"), device=hyperparams.th_device)
-        self._avg_novelty_mean_of_second_residual = th.as_tensor(float("nan"), device=hyperparams.th_device)
-        self._avg_raw_reward : th.Tensor = th.as_tensor(float("nan"), device=hyperparams.th_device)
+        self._avg_novelty = th.as_tensor(0.0, device=hyperparams.th_device)
+        self._avg_novelty_m2 = th.as_tensor(0.0, device=hyperparams.th_device) # 2nd central moment, about the running mean
+        self._avg_novelty_m4 = th.as_tensor(0.0, device=hyperparams.th_device) # 4th central moment, about the running mean
         self._current_kurtosis = th.as_tensor(float("nan"), device=hyperparams.th_device)
 
+        self._avg_raw_reward : th.Tensor = th.zeros(size=(hyperparams.rewards_num,), device=hyperparams.th_device)
+        self._avg_raw_reward_var = th.zeros(size=(hyperparams.rewards_num,), device=hyperparams.th_device)
+        self._raw_reward_means_var = th.zeros(size=(hyperparams.rewards_num,), device=hyperparams.th_device)
+        self._current_reward_variance = th.zeros(size=(hyperparams.rewards_num,), device=hyperparams.th_device)
+
         # HYPERPARAMETERS
-        self._avgs_alpha_th = th.as_tensor(hyperparams.avg_alpha, device=hyperparams.th_device) # stats exponential moving average alpha
         self._reward_bonus_weight = th.as_tensor(hyperparams.reward_bonus_weight, device=hyperparams.th_device) # weight of the novelty-based reward bonus
         self._epsilon = 1e-14 # to avoid numerical issues, carefule here, don't set it too big, losses easily get close to 1e-8
-        # Normalization and scaling hyperparameters:
-        self._novelty_interest_std_threshold = hyperparams.reward_novelty_interest_std_threshold # We consider 'interesting' novelties that are at this multiple of std in the novelty distribution..
-        self._novelty_std_squash = hyperparams.reward_novelty_std_squash # We squash the normalized novelty at this multiple of std (sigma), to reduce the impact of outliers
-        # We compute reward bonuses as ratios of the average reward, following these target ratios:
-        self._reward_target_bland_ratio = hyperparams.reward_target_bland_ratio # Stuff that is neither boring nor interesting shoud end up accounting for this amount of reward
-        self._reward_target_interesting_ratio = hyperparams.reward_target_interesting_ratio # Stuff that is interesting shoud end up accounting for this amount of reward
-        self._reward_increment = hyperparams.reward_increment # We add this to the average reward when scaling the bonuses to ensure that even if the average reward is zero we still get some bonus
-        # We linearly scale the bonuses between these two kurtosis values:
-        self._kurtosis_min = hyperparams.kurtosis_min # when the novelty kurtosis reaches this value the bonuses gets zeroed out
-        self._kurtosis_max = hyperparams.kurtosis_max # when the novelty kurtosis is at or above this value the bonuses are fully applied
 
-        # When using novelty to compute loss weights for data imbalance:
-        self._novelty_weight_squash = hyperparams.novelty_weight_squash # we squash the novelty-based weights at this value to avoid extreme weights
 
     def process_bonuses(self, raw_bonus_batch : th.Tensor, raw_reward_batch : th.Tensor,
                               return_avg_raw_exp_bonus : th.Tensor | None,
@@ -269,36 +272,52 @@ class NoveltyScaler():
         
     def update_stats(self,  raw_novelty_batch : th.Tensor, 
                             raw_reward_batch : th.Tensor | None):
-        novelty_batch_mean = th.mean(raw_novelty_batch)
-        novelty_batch_mean_of_square = th.mean(th.square(raw_novelty_batch))
-        novelty_batch_mean_of_fourth_residual = th.mean(th.pow(raw_novelty_batch - novelty_batch_mean, 4.0))
-        novelty_batch_mean_of_second_residual = th.mean(th.pow(raw_novelty_batch - novelty_batch_mean, 2.0))
-        if raw_reward_batch is not None:
-            avg_raw_reward = th.mean(raw_reward_batch)
-        if not self._stats_initialized:
-            self._stats_initialized = True
-        else:
-            a = self._avgs_alpha_th            
-            novelty_batch_mean = a * self._avg_novelty + (1-a)*novelty_batch_mean
-            novelty_batch_mean_of_square = a * self._avg_novelty_mean_of_square + (1-a)*novelty_batch_mean_of_square
-            novelty_batch_mean_of_fourth_residual = a * self._avg_novelty_mean_of_fourth_residual + (1-a)*novelty_batch_mean_of_fourth_residual
-            novelty_batch_mean_of_second_residual = a * self._avg_novelty_mean_of_second_residual + (1-a)*novelty_batch_mean_of_second_residual
+        """Update the running statistics with a new batch.
+
+        The exponential moving averages use a step-dependent alpha: while fewer than
+        1/(1-avg_alpha) updates have been seen, alpha is 1-1/t, which makes each average an
+        exact arithmetic mean over every batch seen so far. Afterwards alpha settles at
+        avg_alpha and the averages become the usual exponential window. This gives the
+        minimum-variance estimate early on, when the bonuses are already being applied, and
+        seeds the accumulators exactly on the first update (where alpha is zero).
+        """
+        with th.no_grad():
             if raw_reward_batch is not None:
-                avg_raw_reward = a * self._avg_raw_reward + (1-a)*avg_raw_reward
-        self._avg_novelty.copy_(novelty_batch_mean)
-        self._avg_novelty_mean_of_square.copy_(novelty_batch_mean_of_square)
-        self._avg_novelty_mean_of_fourth_residual.copy_(novelty_batch_mean_of_fourth_residual)
-        self._avg_novelty_mean_of_second_residual.copy_(novelty_batch_mean_of_second_residual)
-        if raw_reward_batch is not None:
-            self._avg_raw_reward.copy_(avg_raw_reward)
-        # print(f"NoveltyScaler.update_stats(): raw_novelty_batch={raw_novelty_batch},\n")
-        # print(f"NoveltyScaler.update_stats(): avg_novelty = {self._avg_novelty.item()},\n"
-        #       f"avg_novelty_mean_of_square = {self._avg_novelty_mean_of_square.item()},\n"
-        #       f"avg_novelty_mean_of_fourth_residual = {self._avg_novelty_mean_of_fourth_residual.item()},\n"
-        #       f"avg_novelty_mean_of_second_residual = {self._avg_novelty_mean_of_second_residual.item()},\n"
-        #       f"avg_raw_reward = {self._avg_raw_reward.item()}")
-        self._current_kurtosis = th.mean(self._avg_novelty_mean_of_fourth_residual)/th.square(th.mean(self._avg_novelty_mean_of_second_residual))
-        # self._n_updates += 1
+                self._n_reward_updates += 1
+                a = min(self._hp.avg_alpha, 1.0 - 1.0/self._n_reward_updates)
+                raw_reward_mean = th.mean(raw_reward_batch, dim=0)
+                raw_reward_batch_var = ((raw_reward_batch - raw_reward_mean)**2).mean(dim=0)
+                if self._n_reward_updates > 1:
+                    # Drift of the batch mean with respect to the running mean. There is no
+                    # running mean to drift from on the first update.
+                    raw_reward_mean_drift = (raw_reward_mean - self._avg_raw_reward)**2
+                else:
+                    raw_reward_mean_drift = th.zeros_like(raw_reward_batch_var)
+                # mean of the batch means (i.e. the mean)
+                self._avg_raw_reward.copy_(a*self._avg_raw_reward + (1-a)*raw_reward_mean)
+                # mean of the batch variances (not the variance)
+                self._avg_raw_reward_var.copy_(a*self._avg_raw_reward_var + (1-a)*raw_reward_batch_var)
+                # mean of the batch mean drifts (i.e. the variance of the means)
+                self._raw_reward_means_var.copy_(a*self._raw_reward_means_var + (1-a)*raw_reward_mean_drift)
+                # Law of total variance
+                self._current_reward_variance = self._avg_raw_reward_var + self._raw_reward_means_var
+
+            self._n_updates += 1
+            a = min(self._hp.avg_alpha, 1.0 - 1.0/self._n_updates)
+            novelty_batch_mean = th.mean(raw_novelty_batch)
+            # Central moments are taken about the *running* mean rather than the batch mean, so
+            # that they cover the drift of the batch means and not just the within-batch spread.
+            # mean((x-c)^2) expands to the law of total variance, and mean((x-c)^4) to its
+            # equivalent for the fourth moment, so no cross terms need to be tracked separately.
+            # On the first update there is no running mean to center on yet.
+            center = self._avg_novelty if self._n_updates > 1 else novelty_batch_mean
+            novelty_batch_m2 = th.mean((raw_novelty_batch - center)**2.0)
+            novelty_batch_m4 = th.mean((raw_novelty_batch - center)**4.0)
+            self._avg_novelty.copy_(a*self._avg_novelty + (1-a)*novelty_batch_mean)
+            self._avg_novelty_m2.copy_(a*self._avg_novelty_m2 + (1-a)*novelty_batch_m2)
+            self._avg_novelty_m4.copy_(a*self._avg_novelty_m4 + (1-a)*novelty_batch_m4)
+            self._current_kurtosis = self._avg_novelty_m4/th.square(self._avg_novelty_m2)
+            self._stats_initialized = True
 
     def current_kurtosis_estimate(self) -> th.Tensor:
         return self._current_kurtosis
@@ -340,15 +359,18 @@ class NoveltyScaler():
 
         if update_stats:
             self.update_stats(raw_novelty_batch, raw_reward_batch)
+
+        if not self._stats_initialized:
+            return raw_reward_batch # if we don't have stats yet, we just return the raw reward batch
         # novelty_mean = th.mean(raw_novelty_batch)
         # novelty_std = th.std(raw_novelty_batch)
         novelty_mean = self._avg_novelty
-        novelty_std = th.sqrt(self._avg_novelty_mean_of_square - th.square(self._avg_novelty)) # maybe use bias correction?
+        novelty_std = th.sqrt(self._avg_novelty_m2) # 2nd central moment about the running mean, so no cancellation
         novelty_kurtosis = self._current_kurtosis
 
         # squash and normalize the bonuses 
-        norm_novelty = th.tanh((raw_novelty_batch - novelty_mean)/(self._novelty_std_squash*novelty_std)) # squash at _novelty_std_squash
-        norm_novelty = norm_novelty*self._novelty_std_squash/self._novelty_interest_std_threshold # normalize at interest_threshold*sigma
+        norm_novelty = th.tanh((raw_novelty_batch - novelty_mean)/(self._hp.reward_novelty_std_squash*novelty_std)) # squash at _novelty_std_squash
+        norm_novelty = norm_novelty*self._hp.reward_novelty_std_squash/self._hp.reward_novelty_interest_std_threshold # normalize at interest_threshold*sigma
         # now interest_threshold*sigma is at 1
 
         # now:
@@ -358,15 +380,16 @@ class NoveltyScaler():
         # The min and max should be at ±_novelty_std_squash/_novelty_interest_std_threshold (i.e. ±2 in the default case)
 
         # shrink using kurtosis, assuming kurtosis gets low when exploration is done
-        norm_novelty = norm_novelty*th.clamp((novelty_kurtosis - self._kurtosis_min)/(self._kurtosis_max-self._kurtosis_min), min=0, max=1)
+        norm_novelty = norm_novelty*th.clamp((novelty_kurtosis - self._hp.kurtosis_min)/(self._hp.kurtosis_max-self._hp.kurtosis_min), min=0, max=1)
 
         # Scale the squashed/normalized bonuses to the reward
-        novelty_reward_ratio = self._reward_target_bland_ratio + norm_novelty*self._reward_target_interesting_ratio # This can lead to negative ratios for boring samples!
-        inc_avg_reward = self._avg_raw_reward + self._reward_increment # this way even if the reward average is zero we still get an exploration bonus
-        novelty_reward = self._reward_bonus_weight*inc_avg_reward*novelty_reward_ratio
+        novelty_reward_ratio = self._hp.reward_target_bland_ratio + norm_novelty*self._hp.reward_target_interesting_ratio # This can lead to negative ratios for boring samples!
+        novelty_reward_ratio = th.clamp(novelty_reward_ratio, min=-self._hp.reward_max_ratio, max=self._hp.reward_max_ratio) # clamp to avoid excessive bonuses
+        bonus_range = th.sqrt(self._current_reward_variance) + self._hp.reward_range_increment # this way even if the reward average is zero we still get an exploration bonus
+        novelty_reward = self._reward_bonus_weight*bonus_range*novelty_reward_ratio.unsqueeze(1) # (batch_size, rewards_num)
         
         # scaled_exp_bonus = th.clamp(scaled_exp_bonus, min=0)
-        rewards = raw_reward_batch + novelty_reward.unsqueeze(dim=1)
+        rewards = raw_reward_batch + novelty_reward
         
         if extra_returns is not None:
             extra_returns[0][:] = novelty_mean
@@ -417,8 +440,8 @@ class NoveltyScaler():
         # print(f"novelty_mean = {novelty_mean.item()}, novelty_kurtosis = {novelty_kurtosis.item()}")
         # print(f"novelty_batch minmax = {raw_novelty_batch.min().item()}-{raw_novelty_batch.max().item()}")
         novelty_weights = raw_novelty_batch / (novelty_mean + self._epsilon) # base weight multiplier
-        novelty_weights = th.tanh((novelty_weights - 1.0)/self._novelty_weight_squash)*self._novelty_weight_squash + 1.0 # squash at _novelty_std_squash
-        kurtosis_factor = th.clamp((novelty_kurtosis - self._kurtosis_min)/(self._kurtosis_max-self._kurtosis_min), min=0, max=1) # scale from 0 to 1 based on kurtosis
+        novelty_weights = th.tanh((novelty_weights - 1.0)/self._hp.novelty_weight_squash)*self._hp.novelty_weight_squash + 1.0 # squash at _novelty_std_squash
+        kurtosis_factor = th.clamp((novelty_kurtosis - self._hp.kurtosis_min)/(self._hp.kurtosis_max-self._hp.kurtosis_min), min=0, max=1) # scale from 0 to 1 based on kurtosis
         novelty_weights = 1.0 + (novelty_weights - 1.0)*kurtosis_factor # scale towards 1.0 as kurtosis goes down
 
         return novelty_weights
@@ -437,7 +460,7 @@ class SAC_RND_reward_augmentor():
     def get_augmented_rewards(self,
                             transitions : DictTransitionBatch,
                             critic_enc_obss : th.Tensor,
-                            critic_next_enc_obss : th.Tensor,
+                            critic_enc_next_obss : th.Tensor,
                             actor_next_enc_obss : th.Tensor) -> th.Tensor:
         """ Computes the novelty-based reward bonuses for the given transitions.
 
@@ -451,10 +474,11 @@ class SAC_RND_reward_augmentor():
         th.Tensor
             The rewards augmented with novelty-based reward bonuses for the given transitions.
         """
-        raw_reward_batch = transitions.rewards
-        raw_novelty_batch = self._rnd_novelty_estimator(vector_obs_batch=critic_next_enc_obss)
-        augmented_rewards = self._novelty_scaler.novelty_to_reward_bonuses(raw_novelty_batch, raw_reward_batch, update_stats=False)
-        return augmented_rewards
+        with th.no_grad():
+            raw_reward_batch = transitions.rewards
+            raw_novelty_batch = self._rnd_novelty_estimator(vector_obs_batch=critic_enc_next_obss)
+            augmented_rewards = self._novelty_scaler.novelty_to_reward_bonuses(raw_novelty_batch, raw_reward_batch, update_stats=False)
+            return augmented_rewards
 
     def train_postupdate_hook(self,
                               transitions : DictTransitionBatch,
@@ -471,7 +495,18 @@ class SAC_RND_reward_augmentor():
         losses : tuple[th.Tensor, th.Tensor, th.Tensor]
             The losses computed during the SAC update (q_loss, actor_loss, alpha_loss)
         """
-        critic_next_enc_obss = encoded_obss[3]
-        loss, square_errors = self._rnd_novelty_estimator.train_model(vector_obs_batch=critic_next_enc_obss)
+        raw_reward_batch = transitions.rewards
+        critic_enc_next_obss = encoded_obss[3]
+        loss, square_errors = self._rnd_novelty_estimator.train_model(vector_obs_batch=critic_enc_next_obss)
         self._novelty_scaler.update_stats(raw_novelty_batch=square_errors,
-                                          raw_reward_batch=transitions.rewards)
+                                          raw_reward_batch=raw_reward_batch)
+        augmented_rewards = self._novelty_scaler.novelty_to_reward_bonuses(square_errors, raw_reward_batch, update_stats=False)
+        logs = {
+            "rnd/bonus_ratio_mean" : th.mean(th.abs(augmented_rewards - raw_reward_batch)/(th.abs(raw_reward_batch) + 1e-8)),
+            "rnd/bonus_ratio_std" :  th.std(th.abs(augmented_rewards - raw_reward_batch)/(th.abs(raw_reward_batch) + 1e-8)),
+            "rnd/loss" : loss,
+            "rnd/avg_novelty" : self._novelty_scaler.current_avg_novelty(),
+            "rnd/kurtosis" : self._novelty_scaler.current_kurtosis_estimate(),
+            "rnd/square_errors" : square_errors
+        }
+        return logs

@@ -109,7 +109,7 @@ class RewardAugmentorProtocol(Protocol):
         def __call__(self,
                      transitions : DictTransitionBatch,
                      critic_enc_obss : th.Tensor,
-                     critic_next_enc_obss : th.Tensor,
+                     critic_enc_next_obss : th.Tensor,
                      actor_next_enc_obss : th.Tensor) -> th.Tensor:
             ...
 
@@ -123,7 +123,7 @@ class PostUpdateHookProtocol(Protocol):
         def __call__(self,
                      transitions : DictTransitionBatch,
                      encoded_obss : tuple[th.Tensor | None, th.Tensor, th.Tensor, th.Tensor],
-                     losses : tuple[th.Tensor, th.Tensor, th.Tensor]) -> None:
+                     losses : tuple[th.Tensor, th.Tensor, th.Tensor]) -> dict[str,th.Tensor]:
             ...
 
 @typing.runtime_checkable
@@ -1221,10 +1221,10 @@ class SAC(RLAgent):
     def _compute_all_losses(self, transitions):
         # Precompute encodings to save time
         actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss = self._compute_encodings(transitions)
-        q_loss, (subq_square_errs, q_stats) = self._compute_critic_loss(transitions,
+        q_loss, (subq_square_errs, q_stats), encoded_obss = self._compute_critic_loss(transitions,
                                                                         critic_enc_obss=critic_enc_obss,
-                                                                        crit_next_enc_obss=critic_enc_next_obss,
-                                                                        actor_next_obss_enc=actor_enc_next_obss)
+                                                                        critic_enc_next_obss=critic_enc_next_obss,
+                                                                        actor_enc_next_obss=actor_enc_next_obss)
         actor_loss, actor_stats = self._compute_actor_loss(transitions, freeze_critic=True, get_stats=False,
                                                             actor_enc_obss=actor_enc_obss,
                                                             critic_enc_obss=critic_enc_obss)
@@ -1364,7 +1364,7 @@ class SAC(RLAgent):
     def validate(self, buffer : BaseValidatingBuffer, batch_size : int):
         with th.no_grad():
             transitions = buffer.sample_validation(batch_size=batch_size)
-            critic_loss, (square_errs, q_stats) = self._compute_critic_loss(transitions)
+            critic_loss, (square_errs, q_stats), enc_obss = self._compute_critic_loss(transitions)
             actor_loss, _ = self._compute_actor_loss(transitions)
             alpha_loss, _ = self._compute_alpha_loss(transitions)
         self._stats.update({"val_q_loss":critic_loss,
@@ -1384,13 +1384,13 @@ class SAC(RLAgent):
         self._reward_augmentor_func = reward_augmentor_func
 
         
-    def _augment_rewards(self, transitions, critic_enc_obss, critic_next_enc_obss, actor_next_enc_obss):
+    def _augment_rewards(self, transitions, critic_enc_obss, critic_enc_next_obss, actor_next_enc_obss):
         if self._reward_augmentor_func is None:
             return transitions.rewards
         else:
             return self._reward_augmentor_func(transitions,
                                                critic_enc_obss,
-                                               critic_next_enc_obss,
+                                               critic_enc_next_obss,
                                                actor_next_enc_obss)
     
 
@@ -1424,13 +1424,17 @@ class SAC(RLAgent):
                                 encoded_obss[2].detach(),
                                 encoded_obss[3].detach())
         detached_losses = (losses[0].detach(), losses[1].detach(), losses[2].detach())
+        all_logs = {}
         for hook in self._postupdate_hooks:
-            hook(transitions, detached_encoded_obss, detached_losses)
+            logs = hook(transitions, detached_encoded_obss, detached_losses)
+            all_logs.update(logs)
+        return all_logs
 
     @override
     def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[th.Tensor,th.Tensor,th.Tensor]:
         # ggLog.info(f":::::::::::::::::::::::: train_model: global_step={global_step}")
         qloss_actloss_alphaloss_alpha = [None]*iterations
+        hooks_logs = {}
         target_entropy_cpu = self._target_entropy_factor_annealing(global_step, self._tot_grad_steps_count)*self._hp.action_size
         self._target_entropy.copy_(th.as_tensor(target_entropy_cpu).to(device=self.device, dtype=self._dtype, non_blocking=self.device.type=="cuda"))
         t0 = time.monotonic()
@@ -1445,7 +1449,7 @@ class SAC(RLAgent):
             # th.cuda.synchronize(self.device)
             losses, encoded_obss = self._update_full_merged(transitions = transitions)
 
-            self._run_postupdate_hooks(transitions, encoded_obss, losses)
+            hooks_logs.update(self._run_postupdate_hooks(transitions, encoded_obss, losses))
 
             qloss_actloss_alphaloss_alpha[i] = losses + (self._alpha,)
             self._tot_grad_steps_count += 1
@@ -1460,7 +1464,7 @@ class SAC(RLAgent):
             with th.no_grad():
                 # compute losses but don't train
                 transitions = buffer.sample(batch_size=self._hp.batch_size)
-                q_loss, (square_errs, q_stats) = self._compute_critic_loss(transitions)
+                q_loss, (square_errs, q_stats), enc_obss = self._compute_critic_loss(transitions)
                 actor_loss, _ = self._compute_actor_loss(transitions)
                 alpha_loss, _ = self._compute_alpha_loss(transitions)
         self._stats.update({"tot_grad_steps_count":self._tot_grad_steps_count,
@@ -1471,6 +1475,8 @@ class SAC(RLAgent):
                             "alpha":self._alpha.clone(),
                             "target_entropy":target_entropy_cpu,
                             "iterations_per_second":iterations/(t1-t0)})
+        # ggLog.info(f"hook logs = {hooks_logs}")
+        self._stats.update(hooks_logs)
         return q_loss, actor_loss, alpha_loss
 
     @override
@@ -1555,6 +1561,8 @@ def train_off_policy(collector : ExperienceCollector,
             train_count += 1
         t_after_train = time.monotonic()
         if trained and validation_freq>0 and train_count%validation_freq==0:
+            if not isinstance(buffer, BaseValidatingBuffer):
+                raise RuntimeError(f"validation_freq>0 but buffer is not a BaseValidatingBuffer")
             model.validate(buffer, batch_size=validation_batch_size)
         t_after_val = time.monotonic()
         
