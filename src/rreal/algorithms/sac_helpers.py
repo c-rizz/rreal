@@ -14,7 +14,7 @@ from adarl.utils.ThDictEpReplayBuffer import ThDictEpReplayBuffer
 from adarl.utils.ThVecDictEpReplayBuffer import ThVecDictEpReplayBuffer
 from adarl.utils.async_vector_env import AsyncVectorEnvShmem
 from adarl.utils.buffers import ThDReplayBuffer
-from rreal.utils.RNDNoveltyEstimator import RNDEstimatorHyperparams, RNDHyperparams
+from rreal.utils.RNDNoveltyEstimator import RNDEstimatorHyperparams, SAC_RND_reward_hyperparams
 from rreal.utils.callbacks import EvalCallback, CheckpointCallbackRB
 from rreal.algorithms.collectors import AsyncProcessExperienceCollector, AsyncThreadExperienceCollector, SyncExperienceCollector
 from rreal.algorithms.rl_agent import RLAgent
@@ -422,7 +422,7 @@ def sac_train(  seed : int,
                 critic_fe_hparams : Any = None,
                 share_feature_extractor : bool | None = None,
                 use_rnd_exploration : bool = False,
-                rnd_hyperparams : RNDHyperparams | None = None):
+                rnd_hyperparams : SAC_RND_reward_hyperparams | None = None):
 
     run_folder, session = adarl.utils.session.adarl_startup(inspect.getframeinfo(inspect.currentframe().f_back)[0],
                                                         inspect.currentframe(),
@@ -493,12 +493,12 @@ def sac_train(  seed : int,
 
     if use_rnd_exploration:
         if rnd_hyperparams is None:
-            rnd_hyperparams = RNDHyperparams()
-        from rreal.utils.RNDNoveltyEstimator import RNDNoveltyEstimator, NoveltyScaler, SAC_RND_reward_augmentor
-        rnd_hyperparams.estimator_hyperparams.vec_input_size = model.get_critic_encoding_size()
-        rnd_augmentor = SAC_RND_reward_augmentor(
-                                RNDNoveltyEstimator(hyperparams=rnd_hyperparams.estimator_hyperparams),
-                                NoveltyScaler(hyperparams=rnd_hyperparams.scaler_hyperparams))
+            rnd_hyperparams = SAC_RND_reward_hyperparams()
+        from rreal.utils.RNDNoveltyEstimator import SAC_RND_reward_augmentor
+        rnd_hyperparams.estimator_hyperparams.vec_input_size = (model.get_actor_encoding_size()
+                                                                if rnd_hyperparams.use_actor_encoding
+                                                                else model.get_critic_encoding_size())
+        rnd_augmentor = SAC_RND_reward_augmentor(hyperparams=rnd_hyperparams)
         model.set_reward_augmentor_func(rnd_augmentor.get_augmented_rewards)
         model.register_postupdate_hook(rnd_augmentor.train_postupdate_hook)
 

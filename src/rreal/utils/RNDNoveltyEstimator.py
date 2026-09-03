@@ -1,3 +1,5 @@
+import os
+
 import torch as th
 from rreal.utils.utils import build_mlp_net, Parallel
 from dataclasses import dataclass, field, fields
@@ -6,6 +8,8 @@ from adarl.utils.dbg import ggLog
 from adarl.utils.dbg.dbg_checks import dbg_check
 from rreal.utils.FixedAdamW import AdamW
 import copy
+import hdf5plot.save
+from adarl.utils.session import default_session
 
 @dataclass
 class RNDEstimatorHyperparams:
@@ -17,12 +21,13 @@ class RNDEstimatorHyperparams:
     img_input_size_chw : tuple[int, int, int] = (0,0,0)
     combiner_arch : list[int] | Literal['identity'] = field(default_factory=list)
     feature_size : int = 64
-    learning_rate : float = 1e-3
+    learning_rate : float = 1e-4
     ensemble_size : int = 3
     th_device : th.device = th.device("cuda")
     dict_obs_image_key : str | int = "image"
     dict_obs_vector_key : str | int = "vector"
     use_torch_compile : bool = False
+    weight_decay : float = 0.001
 
 @dataclass
 class RNDScalerHyperparams:
@@ -74,9 +79,13 @@ class RNDScalerHyperparams:
     rewards_num : int = 1
 
 @dataclass
-class RNDHyperparams:
+class SAC_RND_reward_hyperparams:
     estimator_hyperparams : RNDEstimatorHyperparams = field(default_factory=RNDEstimatorHyperparams)
     scaler_hyperparams : RNDScalerHyperparams = field(default_factory=RNDScalerHyperparams)
+    use_actor_encoding : bool = False
+    """Compute novelty over the actor's encoding of the next observation instead of the critic's.
+    Needed when the critic does not encode through the representation novelty should be measured in
+    (e.g. a privileged critic, whose encoding is the raw privileged observation)."""
 
 
 def _shallow_copy_dataclass(dc):
@@ -137,7 +146,9 @@ class RNDNoveltyEstimator(th.nn.Module):
             p.requires_grad_(False)
         self._predictor_net = self._build_net()
 
-        self._optimizer = AdamW(self._predictor_net.parameters(), lr = self._hyperparams.learning_rate)
+        self._optimizer = AdamW(self._predictor_net.parameters(),
+                                lr = self._hyperparams.learning_rate,
+                                weight_decay = self._hyperparams.weight_decay)
         self._optimizer.zero_grad()
 
     def _compute_error(self, dict_obs_batch : dict[str|int,th.Tensor] | None = None, vector_obs_batch : th.Tensor | None = None, img_obs_batch : th.Tensor | None = None) -> th.Tensor:
@@ -234,9 +245,12 @@ class NoveltyScaler():
         self._n_reward_updates = 0
         self._hp = copy.deepcopy(hyperparams)
         self._stats_initialized = False
-        self._avg_novelty = th.as_tensor(0.0, device=hyperparams.th_device)
-        self._avg_novelty_m2 = th.as_tensor(0.0, device=hyperparams.th_device) # 2nd central moment, about the running mean
-        self._avg_novelty_m4 = th.as_tensor(0.0, device=hyperparams.th_device) # 4th central moment, about the running mean
+
+        self._avg_raw_novelty_floor = th.as_tensor(0.0, device=hyperparams.th_device)
+        self._avg_raw_novelty_ceiling = th.as_tensor(0.0, device=hyperparams.th_device)
+        self._avg_lognovelty = th.as_tensor(0.0, device=hyperparams.th_device)
+        self._avg_lognovelty_m2 = th.as_tensor(0.0, device=hyperparams.th_device) # 2nd central moment, about the running mean
+        self._avg_lognovelty_m4 = th.as_tensor(0.0, device=hyperparams.th_device) # 4th central moment, about the running mean
         self._current_kurtosis = th.as_tensor(float("nan"), device=hyperparams.th_device)
 
         self._avg_raw_reward : th.Tensor = th.zeros(size=(hyperparams.rewards_num,), device=hyperparams.th_device)
@@ -269,7 +283,12 @@ class NoveltyScaler():
         return self.novelty_to_reward_bonuses(raw_bonus_batch, raw_reward_batch,
                                               extra_returns = extra_returns #type: ignore
                                               )
-        
+
+    def _scaled_lognovelty(self, raw_novelty_batch : th.Tensor) -> th.Tensor:
+        return th.log(  ((raw_novelty_batch - self._avg_raw_novelty_floor)/
+                        (self._avg_raw_novelty_ceiling - self._avg_raw_novelty_floor+self._epsilon))
+                        .clamp(min=1e-4))
+
     def update_stats(self,  raw_novelty_batch : th.Tensor, 
                             raw_reward_batch : th.Tensor | None):
         """Update the running statistics with a new batch.
@@ -304,26 +323,32 @@ class NoveltyScaler():
 
             self._n_updates += 1
             a = min(self._hp.avg_alpha, 1.0 - 1.0/self._n_updates)
-            novelty_batch_mean = th.mean(raw_novelty_batch)
+            batch_raw_novelty_ceiling = th.quantile(raw_novelty_batch, 0.95)
+            self._avg_raw_novelty_ceiling = a*self._avg_raw_novelty_ceiling + (1-a)*batch_raw_novelty_ceiling
+            batch_raw_novelty_floor = th.quantile(raw_novelty_batch, 0.05)
+            self._avg_raw_novelty_floor = a*self._avg_raw_novelty_floor + (1-a)*batch_raw_novelty_floor
+
+            lognovelty_batch = self._scaled_lognovelty(raw_novelty_batch)
+            lognovelty_batch_mean = th.mean(lognovelty_batch)
             # Central moments are taken about the *running* mean rather than the batch mean, so
             # that they cover the drift of the batch means and not just the within-batch spread.
             # mean((x-c)^2) expands to the law of total variance, and mean((x-c)^4) to its
             # equivalent for the fourth moment, so no cross terms need to be tracked separately.
             # On the first update there is no running mean to center on yet.
-            center = self._avg_novelty if self._n_updates > 1 else novelty_batch_mean
-            novelty_batch_m2 = th.mean((raw_novelty_batch - center)**2.0)
-            novelty_batch_m4 = th.mean((raw_novelty_batch - center)**4.0)
-            self._avg_novelty.copy_(a*self._avg_novelty + (1-a)*novelty_batch_mean)
-            self._avg_novelty_m2.copy_(a*self._avg_novelty_m2 + (1-a)*novelty_batch_m2)
-            self._avg_novelty_m4.copy_(a*self._avg_novelty_m4 + (1-a)*novelty_batch_m4)
-            self._current_kurtosis = self._avg_novelty_m4/th.square(self._avg_novelty_m2)
+            center = self._avg_lognovelty if self._n_updates > 1 else lognovelty_batch_mean
+            lognovelty_batch_m2 = th.mean((lognovelty_batch - center)**2.0)
+            lognovelty_batch_m4 = th.mean((lognovelty_batch - center)**4.0)
+            self._avg_lognovelty.copy_(a*self._avg_lognovelty + (1-a)*lognovelty_batch_mean)
+            self._avg_lognovelty_m2.copy_(a*self._avg_lognovelty_m2 + (1-a)*lognovelty_batch_m2)
+            self._avg_lognovelty_m4.copy_(a*self._avg_lognovelty_m4 + (1-a)*lognovelty_batch_m4)
+            self._current_kurtosis = self._avg_lognovelty_m4/th.square(self._avg_lognovelty_m2)
             self._stats_initialized = True
 
     def current_kurtosis_estimate(self) -> th.Tensor:
         return self._current_kurtosis
     
     def current_avg_novelty(self) -> th.Tensor:
-        return self._avg_novelty
+        return self._avg_lognovelty
 
     def novelty_to_reward_bonuses(self,     raw_novelty_batch : th.Tensor, 
                                             raw_reward_batch : th.Tensor,
@@ -364,12 +389,13 @@ class NoveltyScaler():
             return raw_reward_batch # if we don't have stats yet, we just return the raw reward batch
         # novelty_mean = th.mean(raw_novelty_batch)
         # novelty_std = th.std(raw_novelty_batch)
-        novelty_mean = self._avg_novelty
-        novelty_std = th.sqrt(self._avg_novelty_m2) # 2nd central moment about the running mean, so no cancellation
+        novelty_mean = self._avg_lognovelty
+        novelty_std = th.sqrt(self._avg_lognovelty_m2) # 2nd central moment about the running mean, so no cancellation
         novelty_kurtosis = self._current_kurtosis
 
+        lognovelty_batch = self._scaled_lognovelty(raw_novelty_batch)
         # squash and normalize the bonuses 
-        norm_novelty = th.tanh((raw_novelty_batch - novelty_mean)/(self._hp.reward_novelty_std_squash*novelty_std)) # squash at _novelty_std_squash
+        norm_novelty = th.tanh((lognovelty_batch - novelty_mean)/(self._hp.reward_novelty_std_squash*novelty_std)) # squash at _novelty_std_squash
         norm_novelty = norm_novelty*self._hp.reward_novelty_std_squash/self._hp.reward_novelty_interest_std_threshold # normalize at interest_threshold*sigma
         # now interest_threshold*sigma is at 1
 
@@ -396,7 +422,7 @@ class NoveltyScaler():
             extra_returns[1][:] = th.mean(novelty_reward)
             extra_returns[2][:] = novelty_reward
             extra_returns[3][:] = norm_novelty
-            extra_returns[4][:] = raw_novelty_batch
+            extra_returns[4][:] = lognovelty_batch
         return rewards
     
 
@@ -453,9 +479,15 @@ class SAC_RND_reward_augmentor():
         It uses a RNDNoveltyEstimator and a NoveltyScaler to compute the novelty-based reward bonuses.
         It can be used as a reward augmentor for SAC by passing it to the SAC constructor.
     """
-    def __init__(self, rnd_novelty_estimator : RNDNoveltyEstimator, novelty_scaler : NoveltyScaler):
-        self._rnd_novelty_estimator = rnd_novelty_estimator
-        self._novelty_scaler = novelty_scaler
+    def __init__(self, hyperparams : SAC_RND_reward_hyperparams):
+        self._hyperparams = hyperparams
+        self._rnd_novelty_estimator = RNDNoveltyEstimator(hyperparams=hyperparams.estimator_hyperparams)
+        self._novelty_scaler = NoveltyScaler(hyperparams=hyperparams.scaler_hyperparams)
+        self._train_iteration_count = 0
+
+    def _select_encoding(self, critic_enc_next_obss : th.Tensor, actor_next_enc_obss : th.Tensor) -> th.Tensor:
+        """The encoding novelty is measured over, see SAC_RND_reward_hyperparams.use_actor_encoding."""
+        return actor_next_enc_obss if self._hyperparams.use_actor_encoding else critic_enc_next_obss
 
     def get_augmented_rewards(self,
                             transitions : DictTransitionBatch,
@@ -476,7 +508,8 @@ class SAC_RND_reward_augmentor():
         """
         with th.no_grad():
             raw_reward_batch = transitions.rewards
-            raw_novelty_batch = self._rnd_novelty_estimator(vector_obs_batch=critic_enc_next_obss)
+            enc_next_obss = self._select_encoding(critic_enc_next_obss, actor_next_enc_obss)
+            raw_novelty_batch = self._rnd_novelty_estimator(vector_obs_batch=enc_next_obss)
             augmented_rewards = self._novelty_scaler.novelty_to_reward_bonuses(raw_novelty_batch, raw_reward_batch, update_stats=False)
             return augmented_rewards
 
@@ -495,18 +528,34 @@ class SAC_RND_reward_augmentor():
         losses : tuple[th.Tensor, th.Tensor, th.Tensor]
             The losses computed during the SAC update (q_loss, actor_loss, alpha_loss)
         """
+        self._train_iteration_count += 1
         raw_reward_batch = transitions.rewards
-        critic_enc_next_obss = encoded_obss[3]
-        loss, square_errors = self._rnd_novelty_estimator.train_model(vector_obs_batch=critic_enc_next_obss)
+        # encoded_obss = (actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss)
+        enc_next_obss = self._select_encoding(critic_enc_next_obss=encoded_obss[3], actor_next_enc_obss=encoded_obss[2])
+        loss, square_errors = self._rnd_novelty_estimator.train_model(vector_obs_batch=enc_next_obss)
         self._novelty_scaler.update_stats(raw_novelty_batch=square_errors,
                                           raw_reward_batch=raw_reward_batch)
         augmented_rewards = self._novelty_scaler.novelty_to_reward_bonuses(square_errors, raw_reward_batch, update_stats=False)
+        bonus_vals = augmented_rewards - raw_reward_batch
+        bonus_ratios = th.abs(bonus_vals)/(th.abs(raw_reward_batch) + 1e-8)
         logs = {
-            "rnd/bonus_ratio_mean" : th.mean(th.abs(augmented_rewards - raw_reward_batch)/(th.abs(raw_reward_batch) + 1e-8)),
-            "rnd/bonus_ratio_std" :  th.std(th.abs(augmented_rewards - raw_reward_batch)/(th.abs(raw_reward_batch) + 1e-8)),
+            "rnd/bonus_ratio_mean" : th.mean(bonus_ratios),
+            "rnd/bonus_ratio_std" :  th.std(bonus_ratios),
+            "rnd/bonus_mean" :   th.mean(bonus_vals),
+            "rnd/bonus_median" : th.median(bonus_vals),
+            "rnd/bonus_std" :    th.std(bonus_vals),
             "rnd/loss" : loss,
             "rnd/avg_novelty" : self._novelty_scaler.current_avg_novelty(),
             "rnd/kurtosis" : self._novelty_scaler.current_kurtosis_estimate(),
-            "rnd/square_errors" : square_errors
+            "rnd/square_errors" : square_errors,
+            "rnd/raw_reward" : raw_reward_batch,
+            "rnd/lognovelty" : self._novelty_scaler._scaled_lognovelty(square_errors),
+            "rnd/reward_variance" : self._novelty_scaler._current_reward_variance,
+            "rnd/bonus_ratio_on_variance" : th.mean(th.abs(bonus_vals)/(th.sqrt(self._novelty_scaler._current_reward_variance) + 1e-8))
         }
+        if self._train_iteration_count % 1000 == 0:
+            folder = default_session.log_folder()+"/rnd"
+            # ggLog.info(f"SAC_RND_reward_augmentor.train_postupdate_hook(): Saving RND logs to {folder}/rnd_log.hdf5")
+            os.makedirs(folder, exist_ok=True)
+            hdf5plot.save.save_dict(folder+f"/rnd_log_{self._train_iteration_count:06d}", {k: v.cpu().numpy() for k, v in logs.items()})
         return logs
