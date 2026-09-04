@@ -140,7 +140,9 @@ class Mixed_encoder(nn.Module):
                         combiner_arch = [128],
                         encoders_activation : Callable[[],th.nn.Module] = th.nn.LeakyReLU,
                         use_batchnorm = True,
-                        use_weightnorm : bool = False):
+                        use_weightnorm : bool = False,
+                        vec_layers_init_func : Callable[[nn.Module], None] | None = None,
+                        last_layer_init_func : Callable[[nn.Module], None] | None = None):
         super().__init__()
         self._input_width  = image_width
         self._input_height = image_height
@@ -184,7 +186,8 @@ class Mixed_encoder(nn.Module):
                                                 last_activation_class=self._encoders_activation,
                                                 return_ensemble_mean=True,
                                                 ensemble_size=self._vec_enc_ensemble_size,
-                                                use_weightnorm = use_weightnorm)
+                                                use_weightnorm = use_weightnorm,
+                                                layer_init_func = vec_layers_init_func)
         else:
             self.vec_encoder = lambda vec: th.empty(size = (vec.size()[0],0), device=torchDevice)
 
@@ -194,7 +197,9 @@ class Mixed_encoder(nn.Module):
                                         last_activation_class=th.nn.LeakyReLU,
                                         return_ensemble_mean=True,
                                         ensemble_size=1,
-                                        use_weightnorm = use_weightnorm)
+                                        use_weightnorm = use_weightnorm,
+                                        layer_init_func = vec_layers_init_func,
+                                        last_layer_init_func=last_layer_init_func)
         
         
 
@@ -236,7 +241,6 @@ class DictMixedEncoder(Mixed_encoder):
     def __init__(self, image_dict_key : str | int,
                        vector_dict_key : str | int,
                        **mixed_encoder_kwargs):
-        super().__init__()
         self._image_dict_key = image_dict_key
         self._vector_dict_key = vector_dict_key
         super().__init__(**mixed_encoder_kwargs)

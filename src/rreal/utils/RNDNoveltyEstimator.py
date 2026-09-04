@@ -10,6 +10,14 @@ from rreal.utils.FixedAdamW import AdamW
 import copy
 import hdf5plot.save
 from adarl.utils.session import default_session
+import math
+
+
+def ortho_layer_init_(layer, std=2.0, bias_const : th.Tensor | float = 0.0):
+    th.nn.init.orthogonal_(layer.weight, std)
+    th.nn.init.constant_(layer.bias, 0.0)
+    layer.bias += bias_const.to(device=layer.bias.device) if isinstance(bias_const, th.Tensor) else bias_const
+
 
 @dataclass
 class RNDEstimatorHyperparams:
@@ -77,6 +85,7 @@ class RNDScalerHyperparams:
     kurtosis_max : float = 10.0
     novelty_weight_squash : float = 10.0
     rewards_num : int = 1
+    use_gate : bool = False
 
 @dataclass
 class SAC_RND_reward_hyperparams:
@@ -103,15 +112,19 @@ class RNDNoveltyEstimator(th.nn.Module):
             self._optimizer_step = th.compile(self._optimizer_step)
 
     def _build_net(self):
+        inner_ortho_init_func = lambda layer: ortho_layer_init_(layer, std=math.sqrt(2.0))
+        last_ortho_init_func=lambda l: ortho_layer_init_(l, std=1.0)
         if self._hyperparams.img_encoding_size == 0:
             return build_mlp_net(arch = self._hyperparams.vec_encoder_arch, 
                                 input_size = self._hyperparams.vec_input_size,
                                 output_size = self._hyperparams.feature_size,
                                 ensemble_size=self._hyperparams.ensemble_size,
-                                last_activation_class=th.nn.Tanh,
+                                last_activation_class=th.nn.Identity,
                                 return_ensemble_mean=False,
                                 hidden_activations=th.nn.LeakyReLU,
-                                return_ensemble_std=False).to(device=self._hyperparams.th_device)
+                                return_ensemble_std=False,
+                                layer_init_func = inner_ortho_init_func,
+                                last_layer_init_func=last_ortho_init_func).to(device=self._hyperparams.th_device)
         else:
             from rreal.nets.Mixed_encoder import DictMixedEncoder
             def build_mixed_encoder():
@@ -131,11 +144,14 @@ class RNDNoveltyEstimator(th.nn.Module):
                                         vec_ensemble_size = 1,
                                         output_size = self._hyperparams.feature_size,
                                         combiner_arch = self._hyperparams.combiner_arch,
+                                        last_activation_class=th.nn.Identity,
                                         encoders_activation = th.nn.LeakyReLU,
                                         use_batchnorm = False,
                                         use_weightnorm = False,
                                         image_dict_key=self._hyperparams.dict_obs_image_key,
-                                        vector_dict_key=self._hyperparams.dict_obs_vector_key)
+                                        vector_dict_key=self._hyperparams.dict_obs_vector_key,
+                                        vec_layers_init_func=inner_ortho_init_func,
+                                        last_layer_init_func=last_ortho_init_func)
             mixed_encoder = Parallel([build_mixed_encoder() for _ in range(self._hyperparams.ensemble_size)],
                                      return_mean=False).to(device=self._hyperparams.th_device)
             return mixed_encoder
@@ -217,6 +233,69 @@ class RNDNoveltyEstimator(th.nn.Module):
         return loss.detach(), square_errors.detach()
 
 
+def _l_moment_pwms(batch : th.Tensor) -> th.Tensor:
+    """Probability weighted moments b0..b3 of a 1D sample (Hosking 1990).
+
+    These are plain sample means of the (sorted) batch, so they can be accumulated with the
+    same exponential moving averages as the other statistics, and the L-moment ratios can
+    then be formed from the averaged values. This is what makes L-moments usable here while
+    quantile-based measures are not: an average of batch quantiles does not converge to the
+    population quantile, while an average of batch PWMs does converge to the population PWM.
+
+    Parameters
+    ----------
+    batch : th.Tensor
+        1D tensor with at least 4 elements
+
+    Returns
+    -------
+    th.Tensor
+        Tensor of size (4,) containing b0, b1, b2 and b3
+    """
+    n = batch.numel()
+    sorted_batch, _ = th.sort(batch)
+    i = th.arange(1, n+1, device=batch.device, dtype=batch.dtype)
+    # Weights vanish for the first elements of each order (e.g. w2 is zero for i<=2), so no
+    # masking is needed to keep the combinations well defined.
+    w1 = (i-1)/(n-1)
+    w2 = w1*(i-2)/(n-2)
+    w3 = w2*(i-3)/(n-3)
+    return th.stack([   sorted_batch.mean(),
+                        (w1*sorted_batch).mean(),
+                        (w2*sorted_batch).mean(),
+                        (w3*sorted_batch).mean()])
+
+def _l_moment_ratios(pwms : th.Tensor, epsilon : float) -> tuple[th.Tensor, th.Tensor]:
+    """L-skewness (tau3) and L-kurtosis (tau4) from the probability weighted moments.
+
+    tau4 is the L-moment analogue of the kurtosis: it is built from linear combinations of
+    order statistics instead of fourth powers of the residuals, so its sampling variance
+    depends on the second moment of the distribution instead of the eighth. This makes it
+    usable on the heavy-tailed novelty distribution, where the plain kurtosis is dominated
+    by whichever outliers happen to be in the batch.
+    Reference values for tau4: 0 for a uniform distribution, 0.1226 for a gaussian, 0.1667
+    for an exponential. Values below the gaussian one indicate a flat or multi-modal
+    distribution, values above it indicate heavier tails.
+
+    Parameters
+    ----------
+    pwms : th.Tensor
+        Tensor of size (4,) containing b0..b3, as returned by :func:`_l_moment_pwms`
+    epsilon : float
+        Guard against dividing by a null L-scale
+
+    Returns
+    -------
+    tuple[th.Tensor, th.Tensor]
+        The L-skewness and the L-kurtosis
+    """
+    b0, b1, b2, b3 = pwms[0], pwms[1], pwms[2], pwms[3]
+    l2 = 2*b1 - b0              # L-scale
+    l3 = 6*b2 - 6*b1 + b0
+    l4 = 20*b3 - 30*b2 + 12*b1 - b0
+    return l3/(l2+epsilon), l4/(l2+epsilon)
+
+
 class NoveltyScaler():
     """ To apply RND estimates to enrich rewards or losses, these estimates need to be rescaled appropriately.
         In the case of rewards, we want to generate an additive bonus that is neither too small to be irrelevant nor
@@ -245,13 +324,24 @@ class NoveltyScaler():
         self._n_reward_updates = 0
         self._hp = copy.deepcopy(hyperparams)
         self._stats_initialized = False
-
+    
         self._avg_raw_novelty_floor = th.as_tensor(0.0, device=hyperparams.th_device)
         self._avg_raw_novelty_ceiling = th.as_tensor(0.0, device=hyperparams.th_device)
         self._avg_lognovelty = th.as_tensor(0.0, device=hyperparams.th_device)
         self._avg_lognovelty_m2 = th.as_tensor(0.0, device=hyperparams.th_device) # 2nd central moment, about the running mean
         self._avg_lognovelty_m4 = th.as_tensor(0.0, device=hyperparams.th_device) # 4th central moment, about the running mean
         self._current_kurtosis = th.as_tensor(float("nan"), device=hyperparams.th_device)
+
+        # Probability weighted moments, averaged across batches, used to compute the L-moment
+        # ratios. Tracked both on the raw novelty and on the scaled log-novelty: comparing the
+        # two tells whether the log actually normalizes the distribution (tau4 close to the
+        # gaussian 0.1226) or whether it stays heavy-tailed even in log space.
+        self._avg_lognovelty_pwms = th.zeros(size=(4,), device=hyperparams.th_device)
+        self._avg_rawnovelty_pwms = th.zeros(size=(4,), device=hyperparams.th_device)
+        self._current_lognovelty_l_skewness = th.as_tensor(float("nan"), device=hyperparams.th_device)
+        self._current_lognovelty_l_kurtosis = th.as_tensor(float("nan"), device=hyperparams.th_device)
+        self._current_rawnovelty_l_skewness = th.as_tensor(float("nan"), device=hyperparams.th_device)
+        self._current_rawnovelty_l_kurtosis = th.as_tensor(float("nan"), device=hyperparams.th_device)
 
         self._avg_raw_reward : th.Tensor = th.zeros(size=(hyperparams.rewards_num,), device=hyperparams.th_device)
         self._avg_raw_reward_var = th.zeros(size=(hyperparams.rewards_num,), device=hyperparams.th_device)
@@ -285,7 +375,7 @@ class NoveltyScaler():
                                               )
 
     def _scaled_lognovelty(self, raw_novelty_batch : th.Tensor) -> th.Tensor:
-        return th.log(  ((raw_novelty_batch - self._avg_raw_novelty_floor)/
+        return th.log(  ((raw_novelty_batch)/ # - self._avg_raw_novelty_floor)/
                         (self._avg_raw_novelty_ceiling - self._avg_raw_novelty_floor+self._epsilon))
                         .clamp(min=1e-4))
 
@@ -323,9 +413,10 @@ class NoveltyScaler():
 
             self._n_updates += 1
             a = min(self._hp.avg_alpha, 1.0 - 1.0/self._n_updates)
-            batch_raw_novelty_ceiling = th.quantile(raw_novelty_batch, 0.95)
+            batch_raw_novelty_ceiling = th.quantile(raw_novelty_batch, 0.99)
             self._avg_raw_novelty_ceiling = a*self._avg_raw_novelty_ceiling + (1-a)*batch_raw_novelty_ceiling
-            batch_raw_novelty_floor = th.quantile(raw_novelty_batch, 0.05)
+
+            batch_raw_novelty_floor = th.quantile(raw_novelty_batch, 0.01)
             self._avg_raw_novelty_floor = a*self._avg_raw_novelty_floor + (1-a)*batch_raw_novelty_floor
 
             lognovelty_batch = self._scaled_lognovelty(raw_novelty_batch)
@@ -342,11 +433,29 @@ class NoveltyScaler():
             self._avg_lognovelty_m2.copy_(a*self._avg_lognovelty_m2 + (1-a)*lognovelty_batch_m2)
             self._avg_lognovelty_m4.copy_(a*self._avg_lognovelty_m4 + (1-a)*lognovelty_batch_m4)
             self._current_kurtosis = self._avg_lognovelty_m4/th.square(self._avg_lognovelty_m2)
+
+            if raw_novelty_batch.numel() >= 4: # the b3 weights are undefined for smaller batches
+                self._avg_lognovelty_pwms = (a*self._avg_lognovelty_pwms +
+                                             (1-a)*_l_moment_pwms(lognovelty_batch))
+                self._avg_rawnovelty_pwms = (a*self._avg_rawnovelty_pwms +
+                                             (1-a)*_l_moment_pwms(raw_novelty_batch))
+                (self._current_lognovelty_l_skewness,
+                 self._current_lognovelty_l_kurtosis) = _l_moment_ratios(self._avg_lognovelty_pwms, self._epsilon)
+                (self._current_rawnovelty_l_skewness,
+                 self._current_rawnovelty_l_kurtosis) = _l_moment_ratios(self._avg_rawnovelty_pwms, self._epsilon)
             self._stats_initialized = True
 
     def current_kurtosis_estimate(self) -> th.Tensor:
         return self._current_kurtosis
-    
+
+    def current_lognovelty_l_ratios(self) -> tuple[th.Tensor, th.Tensor]:
+        """L-skewness and L-kurtosis of the scaled log-novelty distribution."""
+        return self._current_lognovelty_l_skewness, self._current_lognovelty_l_kurtosis
+
+    def current_rawnovelty_l_ratios(self) -> tuple[th.Tensor, th.Tensor]:
+        """L-skewness and L-kurtosis of the raw novelty distribution."""
+        return self._current_rawnovelty_l_skewness, self._current_rawnovelty_l_kurtosis
+
     def current_avg_novelty(self) -> th.Tensor:
         return self._avg_lognovelty
 
@@ -378,9 +487,12 @@ class NoveltyScaler():
             _description_
         """
 
-        # We do as if the novelty is gaussian, but it is more of a Chi-squared distribution, as it 
-        # is the mean of squared errors.
-        # it would make more sense to use chi-square quantiles as std thresholds and normalization factors.
+        # For evenly represented states (no actual novelty) the mean squared errors novelties
+        # should be more or less a generalized Chi-squared distribution, as they are the sum
+        # of squared errors, although our MSE are not independent and not distributed
+        # on a standard normal.
+        # Anyway, for a large number of DOF K, a chi-squared distribution is approximately gaussian.
+
 
         if update_stats:
             self.update_stats(raw_novelty_batch, raw_reward_batch)
@@ -393,6 +505,12 @@ class NoveltyScaler():
         novelty_std = th.sqrt(self._avg_lognovelty_m2) # 2nd central moment about the running mean, so no cancellation
         novelty_kurtosis = self._current_kurtosis
 
+        # novelty has a multiplicative, exponential, distribution, probably due
+        # to the exponenial decay of preditcion error under SGD (MSE error decays exponentially
+        # over the visitation count, "NTK, Jacobs 2018")
+        # To move into a betetr behaved additive distribution we take the log of the novelty
+        # And to stay in a manageable range we track the floor and ceiling of the novelty,
+        # and scale the novelty in that range
         lognovelty_batch = self._scaled_lognovelty(raw_novelty_batch)
         # squash and normalize the bonuses 
         norm_novelty = th.tanh((lognovelty_batch - novelty_mean)/(self._hp.reward_novelty_std_squash*novelty_std)) # squash at _novelty_std_squash
@@ -406,7 +524,9 @@ class NoveltyScaler():
         # The min and max should be at ±_novelty_std_squash/_novelty_interest_std_threshold (i.e. ±2 in the default case)
 
         # shrink using kurtosis, assuming kurtosis gets low when exploration is done
-        norm_novelty = norm_novelty*th.clamp((novelty_kurtosis - self._hp.kurtosis_min)/(self._hp.kurtosis_max-self._hp.kurtosis_min), min=0, max=1)
+        if self._hp.use_gate:
+            gate = th.clamp((novelty_kurtosis - self._hp.kurtosis_min)/(self._hp.kurtosis_max-self._hp.kurtosis_min), min=0, max=1)
+            norm_novelty = norm_novelty*gate
 
         # Scale the squashed/normalized bonuses to the reward
         novelty_reward_ratio = self._hp.reward_target_bland_ratio + norm_novelty*self._hp.reward_target_interesting_ratio # This can lead to negative ratios for boring samples!
@@ -538,6 +658,9 @@ class SAC_RND_reward_augmentor():
         augmented_rewards = self._novelty_scaler.novelty_to_reward_bonuses(square_errors, raw_reward_batch, update_stats=False)
         bonus_vals = augmented_rewards - raw_reward_batch
         bonus_ratios = th.abs(bonus_vals)/(th.abs(raw_reward_batch) + 1e-8)
+        bonus_ratios_on_var = th.abs(bonus_vals)/(th.sqrt(self._novelty_scaler._current_reward_variance) + 1e-8)
+        lognovelty_l_skewness, lognovelty_l_kurtosis = self._novelty_scaler.current_lognovelty_l_ratios()
+        rawnovelty_l_skewness, rawnovelty_l_kurtosis = self._novelty_scaler.current_rawnovelty_l_ratios()
         logs = {
             "rnd/bonus_ratio_mean" : th.mean(bonus_ratios),
             "rnd/bonus_ratio_std" :  th.std(bonus_ratios),
@@ -547,15 +670,24 @@ class SAC_RND_reward_augmentor():
             "rnd/loss" : loss,
             "rnd/avg_novelty" : self._novelty_scaler.current_avg_novelty(),
             "rnd/kurtosis" : self._novelty_scaler.current_kurtosis_estimate(),
+            "rnd/lognovelty_l_skewness" : lognovelty_l_skewness,
+            "rnd/lognovelty_l_kurtosis" : lognovelty_l_kurtosis,
+            "rnd/rawnovelty_l_skewness" : rawnovelty_l_skewness,
+            "rnd/rawnovelty_l_kurtosis" : rawnovelty_l_kurtosis,
             "rnd/square_errors" : square_errors,
             "rnd/raw_reward" : raw_reward_batch,
+            "rnd/bonus" : bonus_vals,
+            "rnd/bonus_ratios_on_variance" : bonus_ratios_on_var,
+            "rnd/lognovelty_ceiling" : self._novelty_scaler._avg_raw_novelty_ceiling,
+            "rnd/lognovelty_floor" : self._novelty_scaler._avg_raw_novelty_floor,
             "rnd/lognovelty" : self._novelty_scaler._scaled_lognovelty(square_errors),
+            "rnd/lognovelty_mean" : self._novelty_scaler._scaled_lognovelty(square_errors).mean(),
             "rnd/reward_variance" : self._novelty_scaler._current_reward_variance,
-            "rnd/bonus_ratio_on_variance" : th.mean(th.abs(bonus_vals)/(th.sqrt(self._novelty_scaler._current_reward_variance) + 1e-8))
+            "rnd/bonus_ratio_on_variance_mean" : th.mean(bonus_ratios_on_var)
         }
-        if self._train_iteration_count % 1000 == 0:
+        if (self._train_iteration_count-1) % 10000 == 0:
             folder = default_session.log_folder()+"/rnd"
             # ggLog.info(f"SAC_RND_reward_augmentor.train_postupdate_hook(): Saving RND logs to {folder}/rnd_log.hdf5")
             os.makedirs(folder, exist_ok=True)
-            hdf5plot.save.save_dict(folder+f"/rnd_log_{self._train_iteration_count:06d}", {k: v.cpu().numpy() for k, v in logs.items()})
+            hdf5plot.save.save_dict(folder+f"/rnd_log_{self._train_iteration_count-1:06d}", {k: v.cpu().numpy() for k, v in logs.items()})
         return logs
