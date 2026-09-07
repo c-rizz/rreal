@@ -74,8 +74,8 @@ def cartpole_vrun_builder(  seed : int, run_folder : str, num_envs : int, env_bu
                                 safe_revolute_dof_armature=0.01,
                                 opt_preset=None,
                                 add_ground=False,
-                                render_backend="cpu",
-                                mjx_impl="jax"
+                                render_backend="warp",
+                                mjx_impl="warp"
                                 )
     elif mode == "mjx_jimp":
         from adarl.adapters.MjxJointImpedanceAdapter import MjxJointImpedanceAdapter

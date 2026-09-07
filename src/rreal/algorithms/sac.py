@@ -13,6 +13,7 @@ from rreal.feature_extractors import get_feature_extractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor, StackVectorsFeatureExtractorInitArgs
 from rreal.utils.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay, simplified_clip_grad_norm_, filter_dict_space, get_params_with_decay_mask, filter_dict
+from rreal.utils.rnd_hyperparams import SAC_RND_reward_hyperparams
 from typing import List, Union, Literal, Mapping, Callable
 import rreal.utils.callbacks
 import adarl.utils.dbg.ggLog as ggLog
@@ -220,6 +221,32 @@ class SAC_init_hparams:
     alpha_lr_factor : float = 1.0
     alpha_initial_value : float = 0.1
     independent_entropy_q : bool = False
+    rnd_hyperparams : SAC_RND_reward_hyperparams | None = None
+    """RND exploration configuration. When it is set and it asks for a separate reward channel,
+    SAC appends a novelty channel to its reward vector, so that the bonus gets its own q value and
+    its own discount instead of being added onto the task rewards. This must be part of the
+    hyperparams, rather than applied to the built agent, because the collectors build their own
+    inference copies from the very same hyperparams and their state_dicts have to match.
+    The novelty estimator itself is still attached separately, so that only the trained agent
+    carries one."""
+
+
+def _append_reward_channel(reward_space : spaces.ThBox, name : str, torch_device) -> spaces.ThBox:
+    """Returns a copy of reward_space with one extra unbounded channel appended.
+
+    The channel is unbounded on both sides because the novelty bonus is signed: samples that are
+    less novel than average get a negative one. QNetwork derives its output bounds from the signs
+    of the reward space limits, so finite one-sided limits here would clip the novelty q value.
+    """
+    low = np.concatenate([np.asarray(reward_space.low).reshape(-1), [-np.inf]])
+    high = np.concatenate([np.asarray(reward_space.high).reshape(-1), [np.inf]])
+    labels = getattr(reward_space, "labels", None)
+    if labels is None:
+        labels = np.array([f"reward_r{i:03d}" for i in range(low.shape[0]-1)], dtype=object)
+    labels = np.concatenate([np.asarray(labels, dtype=object).reshape(-1),
+                             np.array([name], dtype=object)])
+    return spaces.ThBox(low=low, high=high, dtype=np.float32,
+                        torch_device=th.device(torch_device), labels=labels)
 
 
 class SignedELUBounding(nn.Module):
@@ -511,6 +538,16 @@ class SAC(RLAgent):
         self._init_args = copy.deepcopy(self._init_args)
         if not isinstance(reward_space, spaces.gym_spaces.Box):
             raise RuntimeError(f"SAC currently only supports ThBox reward spaces, but got {type(reward_space)}")
+        self._env_reward_space = reward_space
+        rnd_hparams = init_hparams.rnd_hyperparams
+        rnd_reward_channel_added = (rnd_hparams is not None and
+                                    rnd_hparams.scaler_hyperparams.separate_reward_channel)
+        if rnd_reward_channel_added:
+            # Widen the reward vector before rewards_num, the gammas and the q names are derived
+            # from it, as those fix the critic's output size for the life of the agent.
+            reward_space = _append_reward_channel(reward_space,
+                                                  name = rnd_hparams.reward_channel_name,
+                                                  torch_device = init_hparams.model_th_device)
         self._reward_space = reward_space
         rewards_num = spaces.get_1d_space_size(reward_space)
         reward_names = reward_space.labels if isinstance(reward_space, spaces.ThBox) else np.array([f"reward_r{i:03d}" for i in range(rewards_num)], dtype=object)
@@ -528,6 +565,12 @@ class SAC(RLAgent):
         ggLog.info(f"reward_names = {reward_names}")
         
         if isinstance(gammas, Mapping):
+            if rnd_reward_channel_added and rnd_hparams.reward_channel_name not in gammas:
+                # The novelty channel is appended by SAC, so the caller's mapping does not know it.
+                gammas = dict(gammas)
+                gammas[rnd_hparams.reward_channel_name] = (rnd_hparams.gamma
+                                                           if rnd_hparams.gamma is not None
+                                                           else max(float(g) for g in gammas.values()))
             gammas = th.as_tensor([gammas[rn] for rn in reward_names], dtype=th.float32)
         elif isinstance(gammas, th.Tensor):
             gammas = gammas.expand(rewards_num).to(device=init_hparams.model_th_device)
@@ -535,7 +578,11 @@ class SAC(RLAgent):
             gammas = th.as_tensor(gammas).expand(rewards_num).to(device=init_hparams.model_th_device)
         else:
             raise RuntimeError(f"Invalid gamma type {type(init_hparams.gamma)}, must be float or th.Tensor or dict")
-        
+        if rnd_reward_channel_added and rnd_hparams.gamma is not None:
+            # Exploration usually wants a shorter horizon than the task.
+            gammas = th.cat([gammas[:-1].clone(),
+                             th.as_tensor([rnd_hparams.gamma], dtype=gammas.dtype, device=gammas.device)])
+
         self._q_names = reward_names.tolist()
         if init_hparams.independent_entropy_q:
             entropy_gamma = th.mean(gammas) # Is this a reasonable choice? maybe expose it as a hyperparameter?

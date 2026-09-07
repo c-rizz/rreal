@@ -19,82 +19,12 @@ def ortho_layer_init_(layer, std=2.0, bias_const : th.Tensor | float = 0.0):
     layer.bias += bias_const.to(device=layer.bias.device) if isinstance(bias_const, th.Tensor) else bias_const
 
 
-@dataclass
-class RNDEstimatorHyperparams:
-    vec_encoder_arch : list[int] | Literal['identity'] = field(default_factory=lambda: [256,256])
-    vec_encoding_size : int = 64
-    vec_input_size : int = 0
-    img_encoder_arch : str = "conv_extrasmall"
-    img_encoding_size : int = 0
-    img_input_size_chw : tuple[int, int, int] = (0,0,0)
-    combiner_arch : list[int] | Literal['identity'] = field(default_factory=list)
-    feature_size : int = 64
-    learning_rate : float = 1e-4
-    ensemble_size : int = 3
-    th_device : th.device = th.device("cuda")
-    dict_obs_image_key : str | int = "image"
-    dict_obs_vector_key : str | int = "vector"
-    use_torch_compile : bool = False
-    weight_decay : float = 0.001
-
-@dataclass
-class RNDScalerHyperparams:
-    """Hyperparameters for :class:`NoveltyScaler`.
-
-    Attributes
-    ----------
-    avg_alpha : float
-        Alpha for the exponential moving averages of the novelty statistics
-    th_device : th.device
-        Torch device to use for the internal tensors
-    reward_bonus_weight : float
-        Final weight of the novelty-based reward bonus
-    reward_novelty_interest_std_threshold : float
-        Threshold, in novelty standard deviations, above which a sample counts as interesting
-    reward_novelty_std_squash : float
-        Squash factor for normalized novelty, in standard deviations, to reduce outlier impact
-    reward_target_bland_ratio : float
-        Target ratio of reward for bland (neither boring nor interesting) samples
-    reward_target_interesting_ratio : float
-        Target ratio of reward for interesting samples
-    reward_max_ratio : float
-        The reward ratio is clamped to +-this value, so that outlying novelties cannot
-        produce an arbitrarily large bonus or penalty
-    reward_range_increment : float
-        Increment added to the reward standard deviation when scaling bonuses, so that a
-        constant reward, whose standard deviation is zero, still yields a bonus
-    kurtosis_min : float
-        Kurtosis at or below which the bonuses are zeroed out
-    kurtosis_max : float
-        Kurtosis at or above which the bonuses are fully applied
-    novelty_weight_squash : float
-        Squash factor for the novelty weights to reduce outlier impact, used when computing weights
-    rewards_num : int
-        Number of reward channels; the statistics are tracked per channel
-    """
-    avg_alpha : float = 0.99
-    th_device : th.device = th.device("cuda")
-    reward_bonus_weight : float = 0.5
-    reward_novelty_interest_std_threshold : float = 1.5
-    reward_novelty_std_squash : float = 3.0
-    reward_target_bland_ratio : float = 0.25
-    reward_target_interesting_ratio : float = 0.9
-    reward_max_ratio : float = 1.5
-    reward_range_increment : float = 0.01
-    kurtosis_min : float = 3.0
-    kurtosis_max : float = 10.0
-    novelty_weight_squash : float = 10.0
-    rewards_num : int = 1
-    use_gate : bool = False
-
-@dataclass
-class SAC_RND_reward_hyperparams:
-    estimator_hyperparams : RNDEstimatorHyperparams = field(default_factory=RNDEstimatorHyperparams)
-    scaler_hyperparams : RNDScalerHyperparams = field(default_factory=RNDScalerHyperparams)
-    use_actor_encoding : bool = False
-    """Compute novelty over the actor's encoding of the next observation instead of the critic's.
-    Needed when the critic does not encode through the representation novelty should be measured in
-    (e.g. a privileged critic, whose encoding is the raw privileged observation)."""
+# Re-exported so that existing `from rreal.utils.RNDNoveltyEstimator import ...` imports keep
+# working. They live in their own module because SAC needs them at import time, and importing
+# this module from sac.py would be circular (see the DictTransitionBatch import below).
+from rreal.utils.rnd_hyperparams import (RNDEstimatorHyperparams,
+                                         RNDScalerHyperparams,
+                                         SAC_RND_reward_hyperparams)
 
 
 def _shallow_copy_dataclass(dc):
@@ -126,32 +56,30 @@ class RNDNoveltyEstimator(th.nn.Module):
                                 layer_init_func = inner_ortho_init_func,
                                 last_layer_init_func=last_ortho_init_func).to(device=self._hyperparams.th_device)
         else:
-            from rreal.nets.Mixed_encoder import DictMixedEncoder
+            from rreal.nets.Mixed_encoder import DictMixedEncoder, Mixed_encoder_hp
             def build_mixed_encoder():
-                return DictMixedEncoder(image_channels = self._hyperparams.img_input_size_chw[0],
-                                        image_width = self._hyperparams.img_input_size_chw[1],
-                                        image_height = self._hyperparams.img_input_size_chw[2],
-                                        img_ensemble_size = 1,
-                                        img_encoding_size = self._hyperparams.img_encoding_size,
-                                        backbone = self._hyperparams.img_encoder_arch,
-                                        checkDimensions = False,
-                                        torchDevice = self._hyperparams.th_device,
-                                        use_coord_conv = True,
-                                        dropout_prob = 0,
-                                        vec_encoder_arch = self._hyperparams.vec_encoder_arch,
-                                        vec_part_size = self._hyperparams.vec_input_size,
-                                        vec_encoding_size = self._hyperparams.vec_encoding_size,
-                                        vec_ensemble_size = 1,
-                                        output_size = self._hyperparams.feature_size,
-                                        combiner_arch = self._hyperparams.combiner_arch,
-                                        last_activation_class=th.nn.Identity,
-                                        encoders_activation = th.nn.LeakyReLU,
-                                        use_batchnorm = False,
-                                        use_weightnorm = False,
-                                        image_dict_key=self._hyperparams.dict_obs_image_key,
+                return DictMixedEncoder(image_dict_key=self._hyperparams.dict_obs_image_key,
                                         vector_dict_key=self._hyperparams.dict_obs_vector_key,
-                                        vec_layers_init_func=inner_ortho_init_func,
-                                        last_layer_init_func=last_ortho_init_func)
+                                        mixed_encoder_hp=Mixed_encoder_hp(
+                                            image_channels = self._hyperparams.img_input_size_chw[0],
+                                            image_width = self._hyperparams.img_input_size_chw[1],
+                                            image_height = self._hyperparams.img_input_size_chw[2],
+                                            img_ensemble_size = 1,
+                                            img_encoding_size = self._hyperparams.img_encoding_size,
+                                            img_backbone = self._hyperparams.img_encoder_arch,
+                                            torchDevice = self._hyperparams.th_device,
+                                            use_coord_conv = True,
+                                            vec_encoder_arch = self._hyperparams.vec_encoder_arch,
+                                            vec_part_size = self._hyperparams.vec_input_size,
+                                            vec_encoding_size = self._hyperparams.vec_encoding_size,
+                                            vec_ensemble_size = 1,
+                                            output_size = self._hyperparams.feature_size,
+                                            combiner_arch = self._hyperparams.combiner_arch,
+                                            encoders_activation = th.nn.LeakyReLU,
+                                            use_batchnorm = False,
+                                            use_weightnorm = False,
+                                            vec_layers_init_func=inner_ortho_init_func,
+                                            last_layer_init_func=last_ortho_init_func))
             mixed_encoder = Parallel([build_mixed_encoder() for _ in range(self._hyperparams.ensemble_size)],
                                      return_mean=False).to(device=self._hyperparams.th_device)
             return mixed_encoder
@@ -445,6 +373,10 @@ class NoveltyScaler():
                  self._current_rawnovelty_l_kurtosis) = _l_moment_ratios(self._avg_rawnovelty_pwms, self._epsilon)
             self._stats_initialized = True
 
+    def emits_separate_reward_channel(self) -> bool:
+        """Whether novelty_to_reward_bonuses appends a channel instead of adding onto the rewards."""
+        return self._hp.separate_reward_channel
+
     def current_kurtosis_estimate(self) -> th.Tensor:
         return self._current_kurtosis
 
@@ -498,6 +430,10 @@ class NoveltyScaler():
             self.update_stats(raw_novelty_batch, raw_reward_batch)
 
         if not self._stats_initialized:
+            # No statistics yet, so no bonus. The width of the returned reward vector must still
+            # match what the critic was built with, as that is fixed at SAC construction time.
+            if self._hp.separate_reward_channel:
+                return th.cat([raw_reward_batch, th.zeros_like(raw_reward_batch[:,:1])], dim=1)
             return raw_reward_batch # if we don't have stats yet, we just return the raw reward batch
         # novelty_mean = th.mean(raw_novelty_batch)
         # novelty_std = th.std(raw_novelty_batch)
@@ -531,12 +467,19 @@ class NoveltyScaler():
         # Scale the squashed/normalized bonuses to the reward
         novelty_reward_ratio = self._hp.reward_target_bland_ratio + norm_novelty*self._hp.reward_target_interesting_ratio # This can lead to negative ratios for boring samples!
         novelty_reward_ratio = th.clamp(novelty_reward_ratio, min=-self._hp.reward_max_ratio, max=self._hp.reward_max_ratio) # clamp to avoid excessive bonuses
-        bonus_range = th.sqrt(self._current_reward_variance) + self._hp.reward_range_increment # this way even if the reward average is zero we still get an exploration bonus
-        novelty_reward = self._reward_bonus_weight*bonus_range*novelty_reward_ratio.unsqueeze(1) # (batch_size, rewards_num)
-        
-        # scaled_exp_bonus = th.clamp(scaled_exp_bonus, min=0)
-        rewards = raw_reward_batch + novelty_reward
-        
+        if self._hp.separate_reward_channel:
+            # The bonus becomes its own reward channel, so there is a single bonus column rather
+            # than one per channel. The actor sums the per-channel q values, so the bonus is
+            # scaled against the magnitude of the summed reward.
+            bonus_range = th.sqrt(self._current_reward_variance.sum()) + self._hp.reward_range_increment
+            novelty_reward = self._reward_bonus_weight*bonus_range*novelty_reward_ratio.unsqueeze(1) # (batch_size, 1)
+            rewards = th.cat([raw_reward_batch, novelty_reward], dim=1) # (batch_size, rewards_num+1)
+        else:
+            bonus_range = th.sqrt(self._current_reward_variance) + self._hp.reward_range_increment # this way even if the reward average is zero we still get an exploration bonus
+            novelty_reward = self._reward_bonus_weight*bonus_range*novelty_reward_ratio.unsqueeze(1) # (batch_size, rewards_num)
+            # scaled_exp_bonus = th.clamp(scaled_exp_bonus, min=0)
+            rewards = raw_reward_batch + novelty_reward
+
         if extra_returns is not None:
             extra_returns[0][:] = novelty_mean
             extra_returns[1][:] = th.mean(novelty_reward)
@@ -656,9 +599,18 @@ class SAC_RND_reward_augmentor():
         self._novelty_scaler.update_stats(raw_novelty_batch=square_errors,
                                           raw_reward_batch=raw_reward_batch)
         augmented_rewards = self._novelty_scaler.novelty_to_reward_bonuses(square_errors, raw_reward_batch, update_stats=False)
-        bonus_vals = augmented_rewards - raw_reward_batch
-        bonus_ratios = th.abs(bonus_vals)/(th.abs(raw_reward_batch) + 1e-8)
-        bonus_ratios_on_var = th.abs(bonus_vals)/(th.sqrt(self._novelty_scaler._current_reward_variance) + 1e-8)
+        if self._novelty_scaler.emits_separate_reward_channel():
+            bonus_vals = augmented_rewards[:,-1:]
+            # The bonus is compared against the summed environment reward, which is what the
+            # actor's sum over the per-channel q values sees.
+            reward_magnitude = th.abs(raw_reward_batch).sum(dim=1, keepdim=True)
+            reward_scale = th.sqrt(self._novelty_scaler._current_reward_variance.sum())
+        else:
+            bonus_vals = augmented_rewards - raw_reward_batch
+            reward_magnitude = th.abs(raw_reward_batch)
+            reward_scale = th.sqrt(self._novelty_scaler._current_reward_variance)
+        bonus_ratios = th.abs(bonus_vals)/(reward_magnitude + 1e-8)
+        bonus_ratios_on_var = th.abs(bonus_vals)/(reward_scale + 1e-8)
         lognovelty_l_skewness, lognovelty_l_kurtosis = self._novelty_scaler.current_lognovelty_l_ratios()
         rawnovelty_l_skewness, rawnovelty_l_kurtosis = self._novelty_scaler.current_rawnovelty_l_ratios()
         logs = {

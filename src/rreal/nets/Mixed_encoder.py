@@ -8,6 +8,30 @@ from typing import Tuple, List, Callable
 
 import adarl.utils.dbg.ggLog as ggLog
 from rreal.utils.utils import build_mlp_net, scale_layer_weights, softclamp
+from dataclasses import dataclass, field
+
+@dataclass
+class Mixed_encoder_hp:
+    image_channels : int = 1
+    image_width : int = 64
+    image_height : int = 64
+    img_ensemble_size : int = 1
+    img_encoding_size : int= 0
+    img_backbone : str | None = "conv"
+    torchDevice : str | th.device = "cuda"
+    use_coord_conv : bool = True
+    vec_encoder_arch : List[int] | str | None = field(default_factory=lambda: [64,64])
+    vec_part_size : int = 0
+    vec_encoding_size : int= 0
+    vec_ensemble_size : int = 1
+    output_size : int = 32
+    combiner_arch : List[int] = field(default_factory=lambda: [128])
+    encoders_activation : Callable[[],th.nn.Module] = th.nn.LeakyReLU
+    use_batchnorm : bool = True
+    use_weightnorm : bool = False
+    vec_layers_init_func : Callable[[nn.Module], None] | None = None
+    last_layer_init_func : Callable[[nn.Module], None] | None = None
+
 
 class Mixed_VAE_encoder(nn.Module):
     def __init__(self,  image_channels : int = 1,
@@ -49,7 +73,7 @@ class Mixed_VAE_encoder(nn.Module):
             combined_size = img_encoding_size + vec_encoding_size
         else:
             combined_size = self._latent_space_size*2
-        self.encoder = Mixed_encoder(  image_channels = image_channels,
+        self.encoder = Mixed_encoder(  Mixed_encoder_hp(image_channels = image_channels,
                                         image_width = image_width,
                                         image_height = image_height,
                                         img_ensemble_size = img_ensemble_size,
@@ -65,7 +89,7 @@ class Mixed_VAE_encoder(nn.Module):
                                         combiner_arch = combiner_arch,
                                         encoders_activation = encoders_activation,
                                         use_batchnorm = use_batchnorm,
-                                        use_weightnorm = use_weightnorm)
+                                        use_weightnorm = use_weightnorm))
         self.fc_mu = build_mlp_net( self._fcs_arch, 
                                     input_size=combined_size,
                                     output_size=self._latent_space_size,
@@ -124,60 +148,42 @@ class Mixed_VAE_encoder(nn.Module):
 
 
 class Mixed_encoder(nn.Module):
-    def __init__(self,  image_channels : int = 1,
-                        image_width : int = 64,
-                        image_height : int = 64,
-                        img_ensemble_size = 1,
-                        img_encoding_size = 0,
-                        img_backbone : str | None = "conv",
-                        torchDevice : str | th.device = "cuda",
-                        use_coord_conv : bool = True,
-                        vec_encoder_arch : List[int] | str | None = [64,64],
-                        vec_part_size = 0,
-                        vec_encoding_size = 0,
-                        vec_ensemble_size = 1,
-                        output_size = 32,
-                        combiner_arch = [128],
-                        encoders_activation : Callable[[],th.nn.Module] = th.nn.LeakyReLU,
-                        use_batchnorm = True,
-                        use_weightnorm : bool = False,
-                        vec_layers_init_func : Callable[[nn.Module], None] | None = None,
-                        last_layer_init_func : Callable[[nn.Module], None] | None = None):
+    def __init__(self,  hp : Mixed_encoder_hp):
         super().__init__()
-        self._input_width  = image_width
-        self._input_height = image_height
-        self._input_channels = image_channels
-        self._img_encoding_size = img_encoding_size
-        self._latent_space_size = output_size
-        self._ensemble_size = img_ensemble_size
-        self._img_ensemble_size = img_ensemble_size
-        self._vec_enc_ensemble_size = vec_ensemble_size
-        self._vec_encoding_size = vec_encoding_size
-        self._vec_part_size = vec_part_size
-        self._vec_encoder_arch = vec_encoder_arch
-        self._combiner_arch = combiner_arch
+        self._input_width  = hp.image_width
+        self._input_height = hp.image_height
+        self._input_channels = hp.image_channels
+        self._img_encoding_size = hp.img_encoding_size
+        self._latent_space_size = hp.output_size
+        self._ensemble_size = hp.img_ensemble_size
+        self._img_ensemble_size = hp.img_ensemble_size
+        self._vec_enc_ensemble_size = hp.vec_ensemble_size
+        self._vec_encoding_size = hp.vec_encoding_size
+        self._vec_part_size = hp.vec_part_size
+        self._vec_encoder_arch = hp.vec_encoder_arch
+        self._combiner_arch = hp.combiner_arch
         self._fcs_ensemble_size = 1
-        self._encoders_activation = encoders_activation
+        self._encoders_activation = hp.encoders_activation
 
         if self._img_encoding_size != 0:
-            self._backbone = img_backbone.lower()
+            self._backbone = hp.img_backbone.lower()
             # if backbone == "mobilenetv3" or backbone == "resnet18" or backbone == "bigconv":
             #     self._conv_ensemble_size = 1
-            self.img_encoder = Parallel([Image_encoder(   image_channels_num = image_channels,
-                                                    net_input_width = image_width,
-                                                    net_input_height = image_height,
-                                                    backbone = img_backbone,
-                                                    torchDevice = torchDevice,
-                                                    use_coord_conv = use_coord_conv,
+            self.img_encoder = Parallel([Image_encoder(   image_channels_num = hp.image_channels,
+                                                    net_input_width = hp.image_width,
+                                                    net_input_height = hp.image_height,
+                                                    backbone = hp.img_backbone,
+                                                    torchDevice = hp.torchDevice,
+                                                    use_coord_conv = hp.use_coord_conv,
                                                     last_activation_class=self._encoders_activation,
                                                     output_size=self._img_encoding_size,
-                                                    use_batchnorm = use_batchnorm,
-                                                    use_weightnorm = use_weightnorm,
+                                                    use_batchnorm = hp.use_batchnorm,
+                                                    use_weightnorm = hp.use_weightnorm,
                                                     fc_net_arch = [])
                                         for _ in range(self._img_ensemble_size)],
                                         return_mean=True)
         else:
-            self.img_encoder = lambda img: th.empty(size = (img.size()[0],0), device=torchDevice)
+            self.img_encoder = lambda img: th.empty(size = (img.size()[0],0), device=hp.torchDevice)
         
         if self._vec_encoding_size != 0:
             self.vec_encoder = build_mlp_net(  self._vec_encoder_arch, 
@@ -186,20 +192,20 @@ class Mixed_encoder(nn.Module):
                                                 last_activation_class=self._encoders_activation,
                                                 return_ensemble_mean=True,
                                                 ensemble_size=self._vec_enc_ensemble_size,
-                                                use_weightnorm = use_weightnorm,
-                                                layer_init_func = vec_layers_init_func)
+                                                use_weightnorm = hp.use_weightnorm,
+                                                layer_init_func = hp.vec_layers_init_func)
         else:
-            self.vec_encoder = lambda vec: th.empty(size = (vec.size()[0],0), device=torchDevice)
+            self.vec_encoder = lambda vec: th.empty(size = (vec.size()[0],0), device=hp.torchDevice)
 
         self.combiner = build_mlp_net(  self._combiner_arch, 
                                         input_size=self._img_encoding_size + self._vec_encoding_size,
-                                        output_size=output_size,
+                                        output_size=hp.output_size,
                                         last_activation_class=th.nn.LeakyReLU,
                                         return_ensemble_mean=True,
                                         ensemble_size=1,
-                                        use_weightnorm = use_weightnorm,
-                                        layer_init_func = vec_layers_init_func,
-                                        last_layer_init_func=last_layer_init_func)
+                                        use_weightnorm = hp.use_weightnorm,
+                                        layer_init_func = hp.vec_layers_init_func,
+                                        last_layer_init_func=hp.last_layer_init_func)
         
         
 
@@ -240,10 +246,10 @@ class Mixed_encoder(nn.Module):
 class DictMixedEncoder(Mixed_encoder):
     def __init__(self, image_dict_key : str | int,
                        vector_dict_key : str | int,
-                       **mixed_encoder_kwargs):
+                       mixed_encoder_hp : Mixed_encoder_hp):
         self._image_dict_key = image_dict_key
         self._vector_dict_key = vector_dict_key
-        super().__init__(**mixed_encoder_kwargs)
+        super().__init__(mixed_encoder_hp)
 
     def forward(self, dict_obs : dict[str | int, th.Tensor]) -> th.Tensor:
         image = dict_obs[self._image_dict_key]

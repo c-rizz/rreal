@@ -468,6 +468,15 @@ def sac_train(  seed : int,
                                 collector_buffer_size = hyperparams.train_freq_vstep*hyperparams.parallel_envs,
                                 session = session,
                                 deterministic_action_ratio=hyperparams.deterministic_collection_ratio)
+    if use_rnd_exploration:
+        if rnd_hyperparams is None:
+            rnd_hyperparams = SAC_RND_reward_hyperparams()
+        rnd_hyperparams.scaler_hyperparams.rewards_num = spaces.get_1d_space_size(collector.reward_space())
+        rnd_hyperparams.scaler_hyperparams.th_device = device
+        rnd_hyperparams.estimator_hyperparams.th_device = device
+        # Must be set before any agent is built: it decides the width of the reward vector, and
+        # the collectors build their inference copies from these same hyperparams.
+        hyperparams.rnd_hyperparams = rnd_hyperparams
     sac_builder = get_build_sac_with_fe_builder( sac_hparams = hyperparams,
                                                 actor_feature_extractor_name = actor_feature_extractor_name,
                                                 critic_feature_extractor_name = critic_feature_extractor_name,
@@ -492,8 +501,10 @@ def sac_train(  seed : int,
         model.set_transition_augmentor(transition_augmentor)
 
     if use_rnd_exploration:
-        if rnd_hyperparams is None:
-            rnd_hyperparams = SAC_RND_reward_hyperparams()
+        # Wired on the trained agent only, not inside the builder: the builder is also used for the
+        # collectors' inference copies, which must not carry their own novelty estimator. Only the
+        # reward space widening, set on the hyperparams above, is shared by both.
+        assert rnd_hyperparams is not None
         from rreal.utils.RNDNoveltyEstimator import SAC_RND_reward_augmentor
         rnd_hyperparams.estimator_hyperparams.vec_input_size = (model.get_actor_encoding_size()
                                                                 if rnd_hyperparams.use_actor_encoding
