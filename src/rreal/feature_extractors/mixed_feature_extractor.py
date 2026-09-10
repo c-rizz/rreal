@@ -54,7 +54,9 @@ class MixedFeatureExtractor(FeatureExtractor):
     """Feature extractor for dict observations containing both vector and image components.
 
     All the non-image entries of the observation dict get concatenated into a single vector
-    (as in :class:`StackVectorsFeatureExtractor`), and the single image entry is kept as is.
+    (as in :class:`StackVectorsFeatureExtractor`), and the image entries are stacked on the channel
+    dimension into a single image (so e.g. a grayscale and a depth observation become a 2-channel
+    image, each channel normalized by its own pixel range).
     The two are then encoded and fused by a :class:`rreal.nets.Mixed_encoder.Mixed_encoder`.
 
     Differently from :class:`StackVectorsFeatureExtractor`, this extractor contains trainable
@@ -104,9 +106,12 @@ class MixedFeatureExtractor(FeatureExtractor):
                                      f"but it is {self._encoding_size}")
 
         img_pixel_low, img_pixel_high = self._obs_converter.getImgPixelRange()
-        self.register_buffer("_img_pixel_low",   th.as_tensor(img_pixel_low,  dtype=th.float32, device=hp.device))
+        # One range per channel, shaped (channels,1,1) so it broadcasts against the (N,C,H,W) image
+        # part. A flat (channels,) buffer would broadcast against the width instead.
+        self.register_buffer("_img_pixel_low",   th.as_tensor(img_pixel_low,  dtype=th.float32,
+                                                              device=hp.device).reshape(-1,1,1))
         self.register_buffer("_img_pixel_scale", th.as_tensor(1.0/(img_pixel_high-img_pixel_low),
-                                                              dtype=th.float32, device=hp.device))
+                                                              dtype=th.float32, device=hp.device).reshape(-1,1,1))
 
         if hp.normalize_input_obs and self._vec_part_size > 0:
             self._normalizer = RunningNormalizer(shape=(self._vec_part_size,),
