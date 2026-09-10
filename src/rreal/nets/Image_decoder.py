@@ -21,7 +21,8 @@ class Image_decoder(nn.Module):
                         use_weightnorm = False,
                         pixel_range_scaling = 1.1,
                         learn_background = True,
-                        fc_head_layer_sizes = []):
+                        fc_head_layer_sizes = [],
+                        use_coord_conv : bool = False):
         super().__init__()
         # ggLog.info(f"recieved learn_background = {learn_background}")
         self._checkDimensions = checkDimensions
@@ -36,6 +37,7 @@ class Image_decoder(nn.Module):
         self._output_shape_chw = (self._output_channels, self._output_height, self._output_width)
         self._pixel_range_scaling = pixel_range_scaling
         self._learn_background = learn_background
+        self._use_coord_conv = use_coord_conv
 
 
         if self._output_height == self._output_width == 0:
@@ -186,7 +188,8 @@ class Image_decoder(nn.Module):
                                         paddings = dec_paddings,
                                         torchDevice = torchDevice,
                                         input_shape_chw = dec_input_shape,
-                                        use_batchnorm=use_batchnorm) 
+                                        use_batchnorm=use_batchnorm,
+                                        use_coord_conv=self._use_coord_conv)
                                 for _ in range(self._ensemble_size)],
                                 return_mean=True)
 

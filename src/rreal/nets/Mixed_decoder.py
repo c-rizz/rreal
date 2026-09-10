@@ -20,7 +20,8 @@ class Mixed_decoder(nn.Module):
                  img_dec_ensemble_size : int,
                  img_dec_fc_layer_sizes : list[int],
                  img_dec_learn_background : bool,
-                 torch_device : th.device):
+                 torch_device : th.device,
+                 img_dec_use_coord_conv : bool = False):
         super().__init__()
         self._input_size = input_size
         self._common_fc_arch = common_fc_layer_arch
@@ -30,6 +31,7 @@ class Mixed_decoder(nn.Module):
         self._img_dec_backbone = img_dec_backbone
         self._img_dec_ensemble_size = img_dec_ensemble_size
         self._img_dec_learn_background = img_dec_learn_background
+        self._img_dec_use_coord_conv = img_dec_use_coord_conv
         self._img_dec_fc_layer_sizes = img_dec_fc_layer_sizes
         self._vec_decoder_arch = vec_decoder_arch
         self._vec_decoder_output_activation = vec_decoder_output_activation
@@ -69,7 +71,8 @@ class Mixed_decoder(nn.Module):
                                 backbone = self._img_dec_backbone,
                                 ensemble_size=self._img_dec_ensemble_size,
                                 learn_background=self._img_dec_learn_background,
-                                fc_head_layer_sizes=self._img_dec_fc_layer_sizes,)
+                                fc_head_layer_sizes=self._img_dec_fc_layer_sizes,
+                                use_coord_conv=self._img_dec_use_coord_conv)
 
     def forward(self, x: th.Tensor):
             common_fc_out = self._common_fc(x)
