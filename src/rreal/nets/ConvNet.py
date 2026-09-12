@@ -1,6 +1,6 @@
 import torch as th
 import torch.nn as nn
-from typing import Tuple, List
+from typing import Tuple, List, Callable, Literal
 from rreal.nets.CoordConv import CoordConv
 # from torchsummary import summary 
 import adarl.utils.dbg.ggLog as ggLog
@@ -15,7 +15,25 @@ class ConvNet(nn.Module):
                         paddings : List[int] = None,
                         torchDevice : str | th.device = "cuda",
                         use_coord_conv = True,
-                        use_batchnorm = True):
+                        use_batchnorm = True,
+                        activation_class : Callable[[],nn.Module] = nn.LeakyReLU,
+                        norm_class : Callable[[int],nn.Module] | None = None,
+                        downsample : Literal["stride","maxpool"] = "stride"):
+        """
+        Parameters
+        ----------
+        activation_class : Callable[[],nn.Module]
+            Activation placed after the normalization of each block.
+        norm_class : Callable[[int],nn.Module] | None
+            Normalization of each block, called with the block's channel count. When None the
+            block falls back to BatchNorm2d if use_batchnorm is set, and to no normalization
+            otherwise, which is the historical behaviour.
+        downsample : Literal["stride","maxpool"]
+            How each block reduces the spatial size. "stride" gives the convolution the block's
+            stride, which is the historical behaviour. "maxpool" instead keeps the convolution at
+            stride 1 and max pools by the block's stride right after it, which is what DreamerV3
+            does when its `strided` option is off (its default). Both give the same spatial sizes.
+        """
         super().__init__()
         self._image_width  = image_width
         self._image_height = image_height
@@ -55,12 +73,17 @@ class ConvNet(nn.Module):
             block = []
             block.append(convClass(in_channels=in_channels, out_channels=ch_num,
                               kernel_size=kernel_sizes[i],
-                              stride=strides[i],
+                              stride=1 if downsample=="maxpool" else strides[i],
                               padding=paddings[i], bias=False,
                               padding_mode=padding_mode)) #Halves width and height
-            if use_batchnorm:
+            if downsample=="maxpool" and strides[i] > 1:
+                # Pooling goes between the convolution and the normalization, as in DreamerV3.
+                block.append(nn.MaxPool2d(kernel_size=strides[i]))
+            if norm_class is not None:
+                block.append(norm_class(ch_num))
+            elif use_batchnorm:
                 block.append(nn.BatchNorm2d(ch_num))
-            block.append(nn.LeakyReLU())
+            block.append(activation_class())
             modules.append(nn.Sequential(*block))
             in_channels = ch_num
 

@@ -9,6 +9,15 @@ from rreal.nets.BigConvNet import BigConvNet
 import adarl.utils.dbg.ggLog as ggLog
 from rreal.nets.ResNet18 import ResNet18
 from rreal.nets.MobileNetV3 import MobileNetV3
+from rreal.nets.norms import ChannelRMSNorm2d
+
+# DreamerV3's cnn depth per model size, from the size presets in its configs.yaml. The stages
+# use these multiplied by its mults of [2,3,4,4], with stride 2 kernel 5 convolutions taking the
+# 64x64 input down to its minres of 4x4.
+DREAMERV3_DEPTHS = {"dreamerv3_12m"  : 16,
+                    "dreamerv3_50m"  : 32,
+                    "dreamerv3_200m" : 64}
+DREAMERV3_MULTS = (2, 3, 4, 4)
 
 class Image_encoder(nn.Module):
     def __init__(self,  image_channels_num : int = 1,
@@ -148,6 +157,34 @@ class Image_encoder(nn.Module):
                                     strides = enc_layers_strides,
                                     use_coord_conv = use_coord_conv,
                                     use_batchnorm = use_batchnorm,
+                                    torchDevice = torchDevice)
+        elif self._backbone in DREAMERV3_DEPTHS:
+            # Copies DreamerV3's convolutional stages: one convolution per stage (it has no
+            # residual blocks), kernel 5, SiLU over an RMS norm of the channels, and the spatial
+            # reduction done by max pooling after the convolution rather than by striding it,
+            # which is what its default `strided: False` does.
+            depth = DREAMERV3_DEPTHS[self._backbone]
+            if self._input_height==64 or self._input_width==64:
+                enc_layers_channels_num = [depth*m for m in DREAMERV3_MULTS]
+                enc_layers_strides      = [2]*len(DREAMERV3_MULTS)
+                enc_layers_kernel_sizes = [5]*len(DREAMERV3_MULTS)
+                enc_layers_paddings     = [2]*len(DREAMERV3_MULTS)
+                #                          64x64 -> 32x32 -> 16x16 -> 8x8 -> 4x4
+            else:
+                raise NotImplementedError(f"Only 64x64 input is supported by {self._backbone}, which is the "
+                                          f"resolution DreamerV3 uses. You asked for height={self._input_height}, "
+                                          f"width={self._input_width}")
+            encoder_head = ConvNet( image_channels = self._input_channels,
+                                    image_width = self._input_width,
+                                    image_height = self._input_height,
+                                    filters_number = enc_layers_channels_num,
+                                    paddings = enc_layers_paddings,
+                                    kernel_sizes = enc_layers_kernel_sizes,
+                                    strides = enc_layers_strides,
+                                    use_coord_conv = use_coord_conv,
+                                    activation_class = th.nn.SiLU,
+                                    norm_class = ChannelRMSNorm2d,
+                                    downsample = "maxpool",
                                     torchDevice = torchDevice)
         elif self._backbone=="bigconv":
             encoder_head =BigConvNet( image_channels = self._input_channels,

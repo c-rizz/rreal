@@ -4,6 +4,8 @@ import torchvision
 from torchvision.transforms.functional import InterpolationMode
 
 from rreal.nets.DeconvNet import DeconvNet
+from rreal.nets.norms import ChannelRMSNorm2d
+from rreal.nets.Image_encoder import DREAMERV3_DEPTHS, DREAMERV3_MULTS
 from rreal.nets.Parallel import Parallel
 from rreal.utils.utils import build_mlp_net
 
@@ -50,6 +52,8 @@ class Image_decoder(nn.Module):
         dec_layers_strides = None
         dec_kernel_sizes = None
         dec_paddings = None
+        dec_activation_class = nn.LeakyReLU
+        dec_norm_class = None
         if self._backbone=="conv":
             if self._output_height==64 and self._output_width==64:
                 dec_layers_channels_num = [256, 128, 64, 32]
@@ -160,6 +164,25 @@ class Image_decoder(nn.Module):
                 dec_input_shape = (dec_layers_channels_num[0],5,5)
             else:
                 raise NotImplementedError(f"Requested network output size is not supported. You asked for backbone='{backbone}' height={self._output_height}, width={self._output_width}")
+        elif self._backbone in DREAMERV3_DEPTHS:
+            # Mirror of the DreamerV3 encoder preset of the same name: the encoder's mults run
+            # [2,3,4,4] going down to 4x4, so the decoder runs them reversed going back up, and
+            # starts from a 4x4 feature map with the deepest channel count.
+            depth = DREAMERV3_DEPTHS[self._backbone]
+            if self._output_height==64 and self._output_width==64:
+                dec_layers_channels_num = [depth*m for m in reversed(DREAMERV3_MULTS)]
+                dec_kernel_sizes =        [5]*len(DREAMERV3_MULTS)
+                dec_paddings =            [2]*len(DREAMERV3_MULTS)
+                dec_layers_scales =       [2]*len(DREAMERV3_MULTS)
+                #                          4x4 -> 8x8 -> 16x16 -> 32x32 -> 64x64
+                dec_activation_class = nn.SiLU
+                dec_norm_class = ChannelRMSNorm2d
+                self._net_output_size = self._output_width
+                dec_input_shape = (dec_layers_channels_num[0],4,4)
+            else:
+                raise NotImplementedError(f"Only 64x64 output is supported by {self._backbone}, which is the "
+                                          f"resolution DreamerV3 uses. You asked for height={self._output_height}, "
+                                          f"width={self._output_width}")
         else:
             raise RuntimeError(f"Unknown backbone {self._backbone}")
 
@@ -175,7 +198,7 @@ class Image_decoder(nn.Module):
                                         input_size=self._latent_space_size,
                                         output_size=linear_out_size,
                                         use_weightnorm=use_weightnorm,
-                                        last_activation_class=nn.LeakyReLU,
+                                        last_activation_class=dec_activation_class,
                                         return_ensemble_mean=True)
         
         deconvNet = Parallel([DeconvNet(output_channels = self._deconv_channels,
@@ -189,7 +212,9 @@ class Image_decoder(nn.Module):
                                         torchDevice = torchDevice,
                                         input_shape_chw = dec_input_shape,
                                         use_batchnorm=use_batchnorm,
-                                        use_coord_conv=self._use_coord_conv)
+                                        use_coord_conv=self._use_coord_conv,
+                                        activation_class=dec_activation_class,
+                                        norm_class=dec_norm_class)
                                 for _ in range(self._ensemble_size)],
                                 return_mean=True)
 

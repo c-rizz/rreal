@@ -4,7 +4,7 @@ import torch.nn as nn
 from typing import List
 import numpy as np
 import adarl.utils.dbg.ggLog as ggLog
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, Callable
 import math
 
 class AppendCoordinates(nn.Module):
@@ -95,7 +95,20 @@ class DeconvNet(nn.Module):
                         scales : List[int] | None = None,
                         torchDevice : str | th.device = "cuda",
                         use_batchnorm = True,
-                        use_coord_conv = False):
+                        use_coord_conv = False,
+                        activation_class : Callable[[],nn.Module] = nn.LeakyReLU,
+                        norm_class : Callable[[int],nn.Module] | None = None):
+        """
+        Parameters
+        ----------
+        activation_class : Callable[[],nn.Module]
+            Activation placed after the normalization of each block. The last block is not
+            affected, as it always ends with the output Tanh.
+        norm_class : Callable[[int],nn.Module] | None
+            Normalization of each block, called with the block's channel count. When None the
+            block falls back to BatchNorm2d if use_batchnorm is set, and to no normalization
+            otherwise, which is the historical behaviour.
+        """
         super().__init__()
         # ggLog.info(f"filters_number = {filters_number}")
         self._output_width  = output_width
@@ -163,10 +176,12 @@ class DeconvNet(nn.Module):
                                                         input_width = block_input_w,
                                                         append_coordinates = use_coord_conv)
             block.append(convLayer)
-            if i > 0: #Normal blocks have batch normalization and leakyRelu
-                if use_batchnorm:
+            if i > 0: #Normal blocks have normalization and an activation
+                if norm_class is not None:
+                    block.append(norm_class(out_channels))
+                elif use_batchnorm:
                     block.append(nn.BatchNorm2d(out_channels))
-                block.append(nn.LeakyReLU())
+                block.append(activation_class())
             else: #Last layer has tanh activation
                 block.append(nn.Tanh())
             blockMod = nn.Sequential(*block)
