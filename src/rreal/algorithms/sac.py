@@ -558,6 +558,8 @@ class SAC(RLAgent):
             init_hparams.target_entropy_factor = -1.0
         actor_observation_space = filter_dict_space(observation_space, init_hparams.actor_observation_filter)
         critic_observation_space = filter_dict_space(observation_space, init_hparams.critic_observation_filter)
+        ggLog.info(f"SAC: actor_observation_space = {actor_observation_space}\n"
+                   f"SAC: critic_observation_space = {critic_observation_space}")
         if init_hparams.action_reference_obs_key is not None:
             action_init = 0.0
 

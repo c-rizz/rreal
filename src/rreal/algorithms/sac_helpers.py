@@ -240,7 +240,7 @@ def build_sac(obs_space : gym.Space, act_space : gym.Space, reward_space : gym.S
                 reward_space=reward_space,
                 action_space=act_space,
                 init_hparams=hyperparams)
-    agent = th.compile(agent, mode="max-autotune", fullgraph=True)
+    # agent = th.compile(agent, mode="max-autotune", fullgraph=True)
     return agent
 
 
@@ -262,12 +262,14 @@ def build_sac_with_fe(obs_space : gym.Space,
     share_feature_extractor: True/False forces sharing on/off, None (the default) shares whenever
     both roles would build the very same extractor over the very same observations.
     """
+    actor_observation_space = filter_dict_space(obs_space, sac_hparams.actor_observation_filter)
+    critic_observation_space = filter_dict_space(obs_space, sac_hparams.critic_observation_filter)
     ggLog.info(f"Building SAC agent with:\n"
                    f"    obs_space: {obs_space}\n"
                    f"    act_space: {act_space}\n"
-                   f"    reward_space: {reward_space}")
-    actor_observation_space = filter_dict_space(obs_space, sac_hparams.actor_observation_filter)
-    critic_observation_space = filter_dict_space(obs_space, sac_hparams.critic_observation_filter)
+                   f"    reward_space: {reward_space}\n"
+                   f"    actor_observation_space: {actor_observation_space}\n"
+                   f"    critic_observation_space: {critic_observation_space}\n")
 
     # A single hparams object can be given and gets used for both roles
     if actor_fe_hparams is None:
@@ -320,7 +322,7 @@ def build_sac_with_fe(obs_space : gym.Space,
                 init_hparams=sac_hparams,
                 actor_feature_extractor=act_fe,
                 critic_feature_extractor=critic_fe)
-    agent = th.compile(agent, mode="max-autotune", fullgraph=True)
+    # agent = th.compile(agent, mode="max-autotune", fullgraph=True)
     return agent
 
 def get_build_sac_with_fe_builder( sac_hparams : SAC_init_hparams,
