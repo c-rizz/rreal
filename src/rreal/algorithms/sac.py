@@ -342,7 +342,7 @@ class QNetwork(nn.Module):
                                      last_layer_init_func= lambda m: scale_layer_weights(m,initial_scale)).to(device=torch_device)
         self._bounding_layer = SignedELUBounding(q_bounds_minmax).to(device=torch_device)
     
-    # @th.compile(mode=compile_mode, fullgraph=fullgraph)
+    # @th_compile_ext(mode=compile_mode, fullgraph=fullgraph)
     def get_min_qval(self, observations, actions):
         qvals = self(observations, actions)
         # ggLog.info(f"qvals.size() = {qvals.size()}")
@@ -352,7 +352,7 @@ class QNetwork(nn.Module):
         # ggLog.info(f"min_q.size() = {min_q.size()}")
         return min_q.view(-1, self._q_size)
     
-    # @th.compile(mode=compile_mode, fullgraph=fullgraph)    
+    # @th_compile_ext(mode=compile_mode, fullgraph=fullgraph)    
     def forward(self, observations, actions):
         qvals = self._q_nets(th.cat([observations, actions], 1))
         qvals = qvals.view(-1, self._nets_num, self._q_size)
@@ -1016,7 +1016,7 @@ class SAC(RLAgent):
         q95 = safe_quantile(batch, 0.95)
         return th.stack([mean, min, max, q05, q95], dim=0)
 
-    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)
+    @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)
     def _compute_critic_loss(self,  transitions : DictTransitionBatch,
                                     get_stats : bool = True,
                                     critic_enc_obss : th.Tensor | None = None,
@@ -1101,7 +1101,7 @@ class SAC(RLAgent):
         encoded_obss = (None, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss)
         return th.sum(per_reward_square_errs), stats, encoded_obss
 
-    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
+    @th_compile_ext(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
     def _critic_opt_step(self, q_loss : th.Tensor):
         simplified_clip_grad_norm_(list(self._q_net.parameters()), self._hp.max_grad_norm)
         self._q_optimizer.step()
@@ -1144,7 +1144,7 @@ class SAC(RLAgent):
         return enc_obss
 
 
-    # @th.compile(mode=compile_mode, fullgraph=fullgraph)
+    # @th_compile_ext(mode=compile_mode, fullgraph=fullgraph)
     def _compute_actor_loss(self,   transitions : DictTransitionBatch,
                                     freeze_critic : bool = False,
                                     get_stats : bool = False,
@@ -1199,7 +1199,7 @@ class SAC(RLAgent):
             actor_stats = None
         return ((self._alpha * act_log_prob) - min_qs_pi).mean(), actor_stats
     
-    # @th.compile(mode=compile_mode, fullgraph=fullgraph)
+    # @th_compile_ext(mode=compile_mode, fullgraph=fullgraph)
     def _alpha_loss(self, act_log_prob : th.Tensor):
         # current_entropy = -act_log_prob.mean()
         # # if current_entropy > target_entropy then alpha goes toward zero (focus on reward maximization)
@@ -1207,7 +1207,7 @@ class SAC(RLAgent):
         # return self._log_alpha.exp() * (current_entropy - self._target_entropy) 
         return (-self._log_alpha.exp() * (act_log_prob + self._target_entropy)).mean()
     
-    # @th.compile(mode=compile_mode, fullgraph=fullgraph)
+    # @th_compile_ext(mode=compile_mode, fullgraph=fullgraph)
     def _alpha_stats(self, act_log_prob : th.Tensor):
         return th.stack([   act_log_prob.mean(),
                             act_log_prob.min(),
@@ -1216,7 +1216,7 @@ class SAC(RLAgent):
                             safe_quantile(act_log_prob, 0.05),
                             -act_log_prob.mean()] )
 
-    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)
+    @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)
     def _compute_alpha_loss(self, transitions : DictTransitionBatch,
                             actor_enc_obss : th.Tensor | None = None):
         with th.no_grad():
@@ -1229,7 +1229,7 @@ class SAC(RLAgent):
         return self._alpha_loss(act_log_prob), stats
     
 
-    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile, dynamic=dynamic_compile)
+    @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile, dynamic=dynamic_compile)
     def _compute_actor_and_alpha_loss(self, transitions : DictTransitionBatch):
         # precompute actor encodings to save time
         actor_enc_obss = self._actor_feature_extractor.extract_features(self.get_actor_subobservation(transitions.observations))
@@ -1266,7 +1266,7 @@ class SAC(RLAgent):
                 actor_enc_next_obss = actor_enc_next_obss.clone()
         return actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss
     
-    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)
+    @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)
     def _compute_all_losses(self, transitions):
         # Precompute encodings to save time
         actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss = self._compute_encodings(transitions)
@@ -1288,7 +1288,7 @@ class SAC(RLAgent):
         encoded_obss = (actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss)
         return loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, (subq_square_errs, q_stats), encoded_obss
     
-    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
+    @th_compile_ext(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
     def _actor_and_alpha_opt_step(self, actor_loss : th.Tensor, alpha_loss : th.Tensor | None):
         simplified_clip_grad_norm_(list(self._actor.parameters()), self._hp.max_grad_norm)
         clipped_log_alpha_grad : th.Tensor = th.clamp(self._log_alpha.grad, -self._hp.log_alpha_grad_clip, self._hp.log_alpha_grad_clip)
@@ -1300,7 +1300,7 @@ class SAC(RLAgent):
             self._last_alpha_loss.copy_(alpha_loss.detach())
 
 
-    @th.compile(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
+    @th_compile_ext(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
     def _all_opt_step(self, q_loss : th.Tensor,
                             actor_loss : th.Tensor,
                             alpha_loss : th.Tensor):
@@ -1367,7 +1367,7 @@ class SAC(RLAgent):
         else:
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
-    @th.compile(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)        
+    @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)        
     def _update_target_nets(self):
         for param, target_param in zip(self._q_net.parameters(), self._q_net_target.parameters()):
             self._target_update(param, target_param, self._hp.target_tau)
