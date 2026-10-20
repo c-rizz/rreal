@@ -514,6 +514,7 @@ class SAC(RLAgent):
         alpha_lr_factor : float
         reward_space : spaces.ThBox
         independent_entropy_q : bool
+        use_biased_analytic_entropy : bool
         perform_multiple_actor_updates : bool
         init_hparams : SAC_init_hparams
 
@@ -630,7 +631,8 @@ class SAC(RLAgent):
                                    reward_space = reward_space,
                                    independent_entropy_q = init_hparams.independent_entropy_q,
                                    init_hparams = init_hparams,
-                                   perform_multiple_actor_updates = True)
+                                   perform_multiple_actor_updates = True,
+                                   use_biased_analytic_entropy = False)
         self._transition_augmentor_func = None
         self._reward_augmentor_func : RewardAugmentorProtocol | None = None
         self._postupdate_hooks : list[PostUpdateHookProtocol] = []
@@ -1200,12 +1202,22 @@ class SAC(RLAgent):
         return ((self._alpha * act_log_prob) - min_qs_pi).mean(), actor_stats
     
     # @th_compile_ext(mode=compile_mode, fullgraph=fullgraph)
-    def _alpha_loss(self, act_log_prob : th.Tensor):
-        # current_entropy = -act_log_prob.mean()
+    def _alpha_loss(self, act_log_prob : th.Tensor, act_mu : th.Tensor | None = None, act_logstd : th.Tensor | None = None):
+        if self._hp.use_biased_analytic_entropy:
+            # Less noisy, but slightly biased
+            if act_mu is None or act_logstd is None:
+                raise ValueError("act_mu and act_logstd must be provided when using biased analytic entropy")
+            log2pi = math.log(2 * math.pi)
+            act_size = act_mu.size(-1)
+            entropy_gauss = act_logstd.sum(-1) + 0.5 * act_size * (1 + log2pi)
+            tanh_corr = (2 * (math.log(2) - act_mu - F.softplus(-2 * act_mu))).sum(-1)
+            current_entropy = (entropy_gauss + tanh_corr).mean()
+        else:
+            current_entropy = -act_log_prob.mean()
         # # if current_entropy > target_entropy then alpha goes toward zero (focus on reward maximization)
         # # if current_entropy < target_entropy then alpha goes toward +inf (focus on entropy maximization) (maybe cap it?)
         # return self._log_alpha.exp() * (current_entropy - self._target_entropy) 
-        return (-self._log_alpha.exp() * (act_log_prob + self._target_entropy)).mean()
+        return self._log_alpha.exp() * (current_entropy - self._target_entropy).detach()
     
     # @th_compile_ext(mode=compile_mode, fullgraph=fullgraph)
     def _alpha_stats(self, act_log_prob : th.Tensor):
@@ -1224,9 +1236,9 @@ class SAC(RLAgent):
             if actor_enc_obss is None:
                 actor_enc_obss = self._actor_feature_extractor.extract_features(actor_obss)
             reference_action = self._get_reference_action(actor_obss)
-            _, act_log_prob, _, _ = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
+            _, act_log_prob, mu, logstd = self._actor.sample_action(actor_enc_obss, reference_action=reference_action)
             stats = self._alpha_stats(act_log_prob)
-        return self._alpha_loss(act_log_prob), stats
+        return self._alpha_loss(act_log_prob, mu, logstd), stats
     
 
     @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile, dynamic=dynamic_compile)
