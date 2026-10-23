@@ -229,6 +229,7 @@ class SAC_init_hparams:
     inference copies from the very same hyperparams and their state_dicts have to match.
     The novelty estimator itself is still attached separately, so that only the trained agent
     carries one."""
+    use_biased_analytic_entropy : bool = False
 
 
 def _append_reward_channel(reward_space : spaces.ThBox, name : str, torch_device) -> spaces.ThBox:
@@ -632,7 +633,7 @@ class SAC(RLAgent):
                                    independent_entropy_q = init_hparams.independent_entropy_q,
                                    init_hparams = init_hparams,
                                    perform_multiple_actor_updates = True,
-                                   use_biased_analytic_entropy = False)
+                                   use_biased_analytic_entropy = init_hparams.use_biased_analytic_entropy)
         self._transition_augmentor_func = None
         self._reward_augmentor_func : RewardAugmentorProtocol | None = None
         self._postupdate_hooks : list[PostUpdateHookProtocol] = []
@@ -873,6 +874,50 @@ class SAC(RLAgent):
                                                os.path.relpath(file_path, reference_data_folder))
                         archive.write(file_path, arcname=arcname)
 
+    def check_env_space(self, observation_space : gym.spaces.Space, action_space : gym.spaces.Box,
+                        check_critic_observations : bool = True):
+        """Checks that the (single-env) spaces of an environment are compatible with the ones this
+        agent was built with: same observation keys, shapes and labels, same action shape and labels.
+
+        Parameters
+        ----------
+        check_critic_observations : bool
+            If False only the observations the actor sees are checked. Running the policy does not
+            need the critic, so its observations (e.g. privileged ones) are free to differ.
+
+        Raises
+        ------
+        RuntimeError
+            Listing all the incompatibilities found.
+        """
+        problems = []
+        expected_obs_space = self._init_args["observation_space"]
+        if not check_critic_observations:
+            expected_obs_space = filter_dict_space(expected_obs_space, self._hp.actor_observation_filter)
+            observation_space = filter_dict_space(observation_space, self._hp.actor_observation_filter)
+        if isinstance(expected_obs_space, gym.spaces.Dict) and isinstance(observation_space, gym.spaces.Dict):
+            expected_keys = set(expected_obs_space.spaces.keys())
+            actual_keys = set(observation_space.spaces.keys())
+            if expected_keys != actual_keys:
+                problems.append(f"observation keys differ: only in model: {sorted(expected_keys - actual_keys)}, "
+                                f"only in env: {sorted(actual_keys - expected_keys)}")
+            for k in sorted(expected_keys & actual_keys):
+                expected_shape = expected_obs_space.spaces[k].shape
+                actual_shape = observation_space.spaces[k].shape
+                if expected_shape != actual_shape:
+                    problems.append(f"observation '{k}' shape is {actual_shape} in env, {expected_shape} in model")
+        elif expected_obs_space.shape != observation_space.shape:
+            problems.append(f"observation shape is {observation_space.shape} in env, {expected_obs_space.shape} in model")
+        problems += [f"observation labels differ at {m}"
+                     for m in spaces.check_space_labels_mismatches(expected_obs_space, observation_space)]
+        expected_action_space = self._init_args["action_space"]
+        if expected_action_space.shape != action_space.shape:
+            problems.append(f"action shape is {action_space.shape} in env, {expected_action_space.shape} in model")
+        problems += [f"action labels differ at {m}"
+                     for m in spaces.check_space_labels_mismatches(expected_action_space, action_space)]
+        if len(problems) > 0:
+            raise RuntimeError("Environment spaces do not match those of the model:\n"+"\n".join(problems))
+
     def load_(self, path : str):
         # Before loading the state dict we try to check that the models are compatible
         with zipfile.ZipFile(path) as archive:
@@ -888,6 +933,13 @@ class SAC(RLAgent):
             ggLog.warn(f"self._init_args = \n{original_yaml_args}")
             ggLog.warn(f"load init_args  = \n{load_yaml_args}")
             ggLog.warn(f"Differing fields: \n{reasons}")
+
+        label_mismatches = spaces.check_space_labels_mismatches(
+                                self._init_args["observation_space"],
+                                extra["init_args"]["observation_space"])
+        if len(label_mismatches) > 0:
+            raise RuntimeError("Observation space labels of loaded model do not match those of self:\n"+
+                               "\n".join(label_mismatches))
 
         self._critic_feature_extractor.check_init_args_match(
                                     extra["critic_feature_extractor_class_name"],
@@ -1217,7 +1269,7 @@ class SAC(RLAgent):
         # # if current_entropy > target_entropy then alpha goes toward zero (focus on reward maximization)
         # # if current_entropy < target_entropy then alpha goes toward +inf (focus on entropy maximization) (maybe cap it?)
         # return self._log_alpha.exp() * (current_entropy - self._target_entropy) 
-        return self._log_alpha.exp() * (current_entropy - self._target_entropy).detach()
+        return (self._log_alpha.exp() * (current_entropy - self._target_entropy).detach()).view(tuple())
     
     # @th_compile_ext(mode=compile_mode, fullgraph=fullgraph)
     def _alpha_stats(self, act_log_prob : th.Tensor):

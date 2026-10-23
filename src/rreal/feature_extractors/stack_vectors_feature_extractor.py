@@ -103,8 +103,8 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         loaded_fe_args_ = loaded_fe_args.copy()
         current_fe_args_["observation_space"].seed(0) # ignore the rng state
         loaded_fe_args_["observation_space"].seed(0) # ignore the rng state
-        loaded_fe_args_["device"] = None # ignore the device
-        current_fe_args_["device"] = None # ignore the device
+        loaded_fe_args_["hp"].device = None # ignore the device
+        current_fe_args_["hp"].device = None # ignore the device
         check_dict_match(current_fe_args_, loaded_fe_args_)
 
 register_feature_extractor_class(StackVectorsFeatureExtractor)
