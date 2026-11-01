@@ -5,13 +5,14 @@ import gymnasium as gym
 from adarl.utils.ObsConverter import ObsConverter
 import torch as th
 from rreal.feature_extractors import register_feature_extractor_class
-from rreal.nets.Mixed_encoder import Mixed_encoder
+from rreal.nets.Mixed_encoder import Mixed_encoder, Mixed_encoder_hp
 import yaml
 import adarl.utils.dbg.ggLog as ggLog
 from typing_extensions import override
 import zipfile
 from adarl.utils.running_mean_std import RunningNormalizer
 from adarl.utils.utils import get_func_input_args, check_dict_match
+from rreal.utils.utils import yaml_load_on_device
 import hashlib
 import math
 import pickle
@@ -121,7 +122,7 @@ class MixedFeatureExtractor(FeatureExtractor):
         else:
             self._normalizer = th.nn.Identity()
 
-        self._encoder = Mixed_encoder(  image_channels = self._img_channels,
+        self._encoder = Mixed_encoder(  Mixed_encoder_hp(image_channels = self._img_channels,
                                         image_width = self._img_width,
                                         image_height = self._img_height,
                                         img_ensemble_size = hp.img_ensemble_size,
@@ -137,7 +138,7 @@ class MixedFeatureExtractor(FeatureExtractor):
                                         combiner_arch = hp.combiner_arch,
                                         encoders_activation = hp.encoders_activation,
                                         use_batchnorm = hp.use_batchnorm,
-                                        use_weightnorm = hp.use_weightnorm)
+                                        use_weightnorm = hp.use_weightnorm))
         self._encoder.to(hp.device)
 
     def _preprocess(self, observation_batch) -> tuple[th.Tensor, th.Tensor, th.Size]:
@@ -190,9 +191,9 @@ class MixedFeatureExtractor(FeatureExtractor):
     def load(cls, file : zipfile.ZipFile | str, name : str = "feature_extractor", device : th.device | None = None) -> MixedFeatureExtractor:
         if isinstance(file,zipfile.ZipFile):
             with file.open(f"{name}.extra.fe.yaml", "r") as init_args_yamlfile:
-                extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+                extra = yaml_load_on_device(init_args_yamlfile, device)
             with file.open(f"{name}.state.fe.pth", "r") as state_file:
-                state_dict = th.load(state_file)
+                state_dict = th.load(state_file, map_location="cpu") # the saving device may not exist here
         else:
             raise RuntimeError(f"Unexpected input type")
         if "class_name" in extra and extra["class_name"] != cls.__name__:

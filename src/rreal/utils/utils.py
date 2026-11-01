@@ -1,5 +1,7 @@
 from __future__ import annotations
 from typing import Callable
+import io
+import yaml
 import torch as th
 from rreal.nets.Parallel import Parallel
 from torch.nn.utils.parametrizations import weight_norm
@@ -19,7 +21,7 @@ def scale_layer_weights(m : th.nn.Module, multiplier, bias_offset : th.Tensor | 
         pass # container, or parameter-free leaf
     else:
         raise RuntimeError(f"Unexpected module type {type(m)}")
-    
+
 def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     last_activation_class : Callable[[],th.nn.Module] = th.nn.Identity,
                     return_ensemble_mean = True,
@@ -30,7 +32,7 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     layer_init_func : Callable[[th.nn.Module],None] | None = None,
                     last_layer_init_func : Callable[[th.nn.Module],None] | None = None,
                     use_jit_fork : bool = True) -> Parallel:
-        
+
     if arch == "identity":
         if input_size != output_size:
             raise AttributeError(f"Requested identity mlp, but input_size!=output_size: {input_size} != {output_size}")
@@ -40,8 +42,8 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
         nets = []
         arch = [int(s) for s in arch]
         for _ in range(ensemble_size):
-            layersizes = ([int(input_size)] + 
-                            list(arch) + 
+            layersizes = ([int(input_size)] +
+                            list(arch) +
                             [int(output_size)])
             layers = []
             for i in range(len(layersizes)-1):
@@ -190,3 +192,36 @@ def softclamp(v,maxval):
     relu_simmclamped = th.nn.functional.relu(simm_clamped)
     negpart = th.clamp(v,max=0)
     return negpart + relu_simmclamped
+
+
+def yaml_load_on_device(stream, device : th.device | str | None = None):
+    """Same as yaml.load(stream, Loader=yaml.CLoader), but with what was saved on an accelerator
+    moved onto device.
+
+    Checkpoints keep their init args as yaml, which holds torch.device objects and pickled tensors:
+    a file saved on cuda then cannot even be parsed where cuda is not available. Every non-cpu
+    torch.device and tensor in the document is mapped onto device, the cpu ones stay on the cpu.
+    With device None nothing is mapped.
+    """
+    if device is None:
+        return yaml.load(stream, Loader=yaml.CLoader)
+    device = th.device(device)
+
+    class _DeviceMappingLoader(yaml.CLoader):
+        pass
+    def construct_device(loader, node):
+        saved = th.device(*_yaml_apply_args(loader, node))
+        return saved if saved.type == "cpu" else device
+    def map_storage(storage, location : str):
+        return storage if location.startswith("cpu") else th.serialization.default_restore_location(storage, str(device))
+    def construct_storage(loader, node):
+        return th.load(io.BytesIO(_yaml_apply_args(loader, node)[0]), map_location=map_storage, weights_only=False)
+    _DeviceMappingLoader.add_constructor("tag:yaml.org,2002:python/object/apply:torch.device", construct_device)
+    _DeviceMappingLoader.add_constructor("tag:yaml.org,2002:python/object/apply:torch.storage._load_from_bytes", construct_storage)
+    return yaml.load(stream, Loader=_DeviceMappingLoader)
+
+def _yaml_apply_args(loader, node) -> list:
+    """The positional args of a !!python/object/apply node, in either of its two forms."""
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    return loader.construct_mapping(node, deep=True)["args"]

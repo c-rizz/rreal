@@ -2,15 +2,15 @@ from __future__ import annotations
 import zipfile
 import torch.nn as nn
 import torch as th
-import yaml
 from adarl.utils.buffers import TransitionBatch, BaseBuffer
+from rreal.utils.utils import yaml_load_on_device
 from abc import abstractmethod, ABC
 
 class RLAgent(nn.Module, ABC):
     @abstractmethod
     def predict_action(self, observation_batch, deterministic = False, extra_returns : dict | None = None):
         raise NotImplementedError()
-    
+
     @abstractmethod
     def get_hidden_state(self):
         raise NotImplementedError()
@@ -19,7 +19,7 @@ class RLAgent(nn.Module, ABC):
         # Mostly for stable-baselines3 compatibility
         hidden_state = self.get_hidden_state()
         return self.predict_action(observation_batch=observation_batch, deterministic=deterministic), hidden_state
-    
+
     @abstractmethod
     def train_model(self, global_step, iterations, buffer : BaseBuffer) -> tuple[float,float,float]:
         raise NotImplementedError()
@@ -35,7 +35,7 @@ class RLAgent(nn.Module, ABC):
     @abstractmethod
     def load_(self, path : str):
         raise NotImplementedError()
-    
+
     @classmethod
     @abstractmethod
     def load(cls,
@@ -43,15 +43,15 @@ class RLAgent(nn.Module, ABC):
                 device : th.device | None = None,
                 init_args_override : dict | None = None) -> RLAgent:
         raise NotImplementedError()
-    
+
     @abstractmethod
     def input_device(self):
         raise NotImplementedError()
-    
+
     def get_reference_init_args(self) -> dict:
         """Return the init args that should be used as reference for loading the agent in a different environment."""
         return {}
-    
+
 
 agents_registry : dict[str, type[RLAgent]] = {}
 
@@ -63,7 +63,7 @@ def load_agent( path : str, device : th.device | None = None,
                ) -> RLAgent:
     with zipfile.ZipFile(path) as archive:
         with archive.open("extra.yaml", "r") as init_args_yamlfile:
-            extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+            extra = yaml_load_on_device(init_args_yamlfile, device)
     if not "class_name" in extra:
         raise RuntimeError(f"File does not contain class information")
     class_name = extra["class_name"]

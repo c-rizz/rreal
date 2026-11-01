@@ -12,11 +12,12 @@ from typing_extensions import override
 import zipfile
 from adarl.utils.running_mean_std import RunningNormalizer
 from adarl.utils.utils import get_func_input_args, check_dict_match
+from rreal.utils.utils import yaml_load_on_device
 import hashlib
 import copy
 import pickle
 from typing import Any
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 @dataclass
 class StackVectorsFeatureExtractorInitArgs:
@@ -47,11 +48,11 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
             # ggLog.info(f"vec_part.devices = {vec_part.device}")
             th.cuda.nvtx.mark("normalize")
             return self._normalizer(vec_part).clone()
-    
+
     def encoding_size(self) -> int:
         return self._obs_converter.vector_part_size()
-    
-    
+
+
     @override
     @classmethod
     def load(cls, file : zipfile.ZipFile | str, name : str = "feature_extractor", device : th.device | None = None) -> StackVectorsFeatureExtractor:
@@ -65,9 +66,9 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
         # elif isinstance(file,zipfile.ZipFile):
         if isinstance(file,zipfile.ZipFile):
             with file.open(f"{name}.extra.fe.yaml", "r") as init_args_yamlfile:
-                extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+                extra = yaml_load_on_device(init_args_yamlfile, device)
             with file.open(f"{name}.state.fe.pth", "r") as state_file:
-                state_dict = th.load(state_file)
+                state_dict = th.load(state_file, map_location="cpu") # the saving device may not exist here
         else:
             raise RuntimeError(f"Unexpected input type")
         if "class_name" in extra and extra["class_name"] != cls.__name__:
@@ -76,7 +77,8 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
             extra["init_args"]["hp"].device = device
         fe = StackVectorsFeatureExtractor(**extra["init_args"])
         fe.load_state_dict(_adapt_compiled_state_dict(state_dict, fe))
-    
+        return fe
+
     @override
     def save_to_archive(self, archive : zipfile.ZipFile, name : str = "feature_extractor"):
         extra = {}
@@ -88,23 +90,25 @@ class StackVectorsFeatureExtractor(FeatureExtractor):
             init_args_yamlfile.write(yaml.dump(extra,default_flow_style=None).encode("utf-8"))
         with archive.open(f"{name}.state.fe.pth", "w") as state_file:
             th.save(self.state_dict(), state_file)
-            
+
 
     def train_extractor(self, global_step, grad_steps, buffer):
         pass
-    
+
     @override
     def check_init_args_match(self : FeatureExtractor, loaded_fe_name : str, loaded_fe_args : dict[str, Any]):
         if self.__class__.__name__ != loaded_fe_name:
             ggLog.warn(f"feature_extractor_class_name of loaded model differs from that of self.\n"
-                       f"loaded = {loaded_fe_name}, self's = {self._critic_feature_extractor.__class__.__name__}")
+                       f"loaded = {loaded_fe_name}, self's = {self.__class__.__name__}")
             raise RuntimeError("Unmatched init_args")
         current_fe_args_ = self.get_init_args().copy()
         loaded_fe_args_ = loaded_fe_args.copy()
         current_fe_args_["observation_space"].seed(0) # ignore the rng state
         loaded_fe_args_["observation_space"].seed(0) # ignore the rng state
-        loaded_fe_args_["hp"].device = None # ignore the device
-        current_fe_args_["hp"].device = None # ignore the device
+        # Ignore the device. copy() above is shallow, so the hparams must be replaced by a
+        # modified copy: assigning to hp.device would corrupt the live init args of both models.
+        current_fe_args_["hp"] = replace(current_fe_args_["hp"], device=None)
+        loaded_fe_args_["hp"] = replace(loaded_fe_args_["hp"], device=None)
         check_dict_match(current_fe_args_, loaded_fe_args_)
 
 register_feature_extractor_class(StackVectorsFeatureExtractor)

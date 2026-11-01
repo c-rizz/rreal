@@ -12,7 +12,7 @@ from rreal.algorithms.rl_agent import RLAgent, register_agent_class
 from rreal.feature_extractors import get_feature_extractor
 from rreal.feature_extractors.feature_extractor import FeatureExtractor
 from rreal.feature_extractors.stack_vectors_feature_extractor import StackVectorsFeatureExtractor, StackVectorsFeatureExtractorInitArgs
-from rreal.utils.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay, simplified_clip_grad_norm_, filter_dict_space, get_params_with_decay_mask, filter_dict
+from rreal.utils.utils import build_mlp_net, scale_layer_weights, split_params_for_weight_decay, simplified_clip_grad_norm_, filter_dict_space, get_params_with_decay_mask, filter_dict, yaml_load_on_device
 from rreal.utils.rnd_hyperparams import SAC_RND_reward_hyperparams
 from typing import List, Union, Literal, Mapping, Callable
 import rreal.utils.callbacks
@@ -922,7 +922,7 @@ class SAC(RLAgent):
         # Before loading the state dict we try to check that the models are compatible
         with zipfile.ZipFile(path) as archive:
             with archive.open("extra.yaml", "r") as init_args_yamlfile:
-                extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+                extra = yaml_load_on_device(init_args_yamlfile, self._hp.torch_device)
         if "class_name" in extra and extra["class_name"] != self.__class__.__name__:
             raise RuntimeError(f"File was not saved by this class")
         equal, reasons = compare_dicts(self._init_args, extra["init_args"])
@@ -949,7 +949,9 @@ class SAC(RLAgent):
                                     extra["actor_feature_extractor_init_args"])
         with zipfile.ZipFile(path) as archive:
             with archive.open("sac.pth", "r") as sac_file:
-                self.load_state_dict(th.load(sac_file))
+                # Mapped to the cpu, as the saving device may not exist here: load_state_dict copies
+                # each tensor onto the device of the parameter it is loaded into.
+                self.load_state_dict(th.load(sac_file, map_location="cpu"))
             self._diff_reference_data(archive)
 
     def _diff_reference_data(self, archive : zipfile.ZipFile):
@@ -996,7 +998,7 @@ class SAC(RLAgent):
                     init_args_override : dict | None = None):
         with zipfile.ZipFile(path) as archive:
             with archive.open("extra.yaml", "r") as init_args_yamlfile:
-                extra = yaml.load(init_args_yamlfile, Loader=yaml.CLoader)
+                extra = yaml_load_on_device(init_args_yamlfile, device)
         if "class_name" in extra and extra["class_name"] != cls.__name__:
             raise RuntimeError(f"File was not saved by this class")
         init_args = extra["init_args"]
@@ -1006,12 +1008,12 @@ class SAC(RLAgent):
             init_args.update(init_args_override)
         with zipfile.ZipFile(path) as archive:
             critic_feature_extractor_class = get_feature_extractor(extra["critic_feature_extractor_class_name"])
-            init_args["critic_feature_extractor"] = critic_feature_extractor_class.load(archive, name="critic_feature_extractor")
+            init_args["critic_feature_extractor"] = critic_feature_extractor_class.load(archive, name="critic_feature_extractor", device=device)
             if extra["share_feature_extractor"]:
                 init_args["actor_feature_extractor"] = init_args["critic_feature_extractor"]
             else:
                 actor_feature_extractor_class = get_feature_extractor(extra["actor_feature_extractor_class_name"])
-                init_args["actor_feature_extractor"] = actor_feature_extractor_class.load(archive, name="actor_feature_extractor")
+                init_args["actor_feature_extractor"] = actor_feature_extractor_class.load(archive, name="actor_feature_extractor", device=device)
         override_struct(init_args, init_args_override)
         ggLog.info(f"SAC.load(): building model with args: \n"+pprint.pformat(init_args))
         model = SAC(**init_args)
