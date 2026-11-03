@@ -337,15 +337,17 @@ class NoveltyScaler():
                 # mean of the batch mean drifts (i.e. the variance of the means)
                 self._raw_reward_means_var.copy_(a*self._raw_reward_means_var + (1-a)*raw_reward_mean_drift)
                 # Law of total variance
-                self._current_reward_variance = self._avg_raw_reward_var + self._raw_reward_means_var
+                self._current_reward_variance.copy_(self._avg_raw_reward_var + self._raw_reward_means_var)
 
+            # All the statistics are updated in place: compiled code reading them (e.g. the critic loss) is
+            # cudagraphed with them as static inputs, a new tensor would force a re-recording at every update
             self._n_updates += 1
             a = min(self._hp.avg_alpha, 1.0 - 1.0/self._n_updates)
             batch_raw_novelty_ceiling = th.quantile(raw_novelty_batch, 0.99)
-            self._avg_raw_novelty_ceiling = a*self._avg_raw_novelty_ceiling + (1-a)*batch_raw_novelty_ceiling
+            self._avg_raw_novelty_ceiling.copy_(a*self._avg_raw_novelty_ceiling + (1-a)*batch_raw_novelty_ceiling)
 
             batch_raw_novelty_floor = th.quantile(raw_novelty_batch, 0.01)
-            self._avg_raw_novelty_floor = a*self._avg_raw_novelty_floor + (1-a)*batch_raw_novelty_floor
+            self._avg_raw_novelty_floor.copy_(a*self._avg_raw_novelty_floor + (1-a)*batch_raw_novelty_floor)
 
             lognovelty_batch = self._scaled_lognovelty(raw_novelty_batch)
             lognovelty_batch_mean = th.mean(lognovelty_batch)
@@ -360,17 +362,19 @@ class NoveltyScaler():
             self._avg_lognovelty.copy_(a*self._avg_lognovelty + (1-a)*lognovelty_batch_mean)
             self._avg_lognovelty_m2.copy_(a*self._avg_lognovelty_m2 + (1-a)*lognovelty_batch_m2)
             self._avg_lognovelty_m4.copy_(a*self._avg_lognovelty_m4 + (1-a)*lognovelty_batch_m4)
-            self._current_kurtosis = self._avg_lognovelty_m4/th.square(self._avg_lognovelty_m2)
+            self._current_kurtosis.copy_(self._avg_lognovelty_m4/th.square(self._avg_lognovelty_m2))
 
             if raw_novelty_batch.numel() >= 4: # the b3 weights are undefined for smaller batches
-                self._avg_lognovelty_pwms = (a*self._avg_lognovelty_pwms +
-                                             (1-a)*_l_moment_pwms(lognovelty_batch))
-                self._avg_rawnovelty_pwms = (a*self._avg_rawnovelty_pwms +
-                                             (1-a)*_l_moment_pwms(raw_novelty_batch))
-                (self._current_lognovelty_l_skewness,
-                 self._current_lognovelty_l_kurtosis) = _l_moment_ratios(self._avg_lognovelty_pwms, self._epsilon)
-                (self._current_rawnovelty_l_skewness,
-                 self._current_rawnovelty_l_kurtosis) = _l_moment_ratios(self._avg_rawnovelty_pwms, self._epsilon)
+                self._avg_lognovelty_pwms.copy_(a*self._avg_lognovelty_pwms +
+                                                (1-a)*_l_moment_pwms(lognovelty_batch))
+                self._avg_rawnovelty_pwms.copy_(a*self._avg_rawnovelty_pwms +
+                                                (1-a)*_l_moment_pwms(raw_novelty_batch))
+                lognovelty_l_skewness, lognovelty_l_kurtosis = _l_moment_ratios(self._avg_lognovelty_pwms, self._epsilon)
+                rawnovelty_l_skewness, rawnovelty_l_kurtosis = _l_moment_ratios(self._avg_rawnovelty_pwms, self._epsilon)
+                self._current_lognovelty_l_skewness.copy_(lognovelty_l_skewness)
+                self._current_lognovelty_l_kurtosis.copy_(lognovelty_l_kurtosis)
+                self._current_rawnovelty_l_skewness.copy_(rawnovelty_l_skewness)
+                self._current_rawnovelty_l_kurtosis.copy_(rawnovelty_l_kurtosis)
             self._stats_initialized = True
 
     def emits_separate_reward_channel(self) -> bool:

@@ -3,37 +3,6 @@ import torch as th
 import torch.nn as nn
 from typing import List
 
-# @th.jit.script
-def _run_efficient(x : th.Tensor, modules : List[th.nn.Module], streams):
-    current_stream = th.cuda.current_stream()
-    outs = [None] * len(modules)
-    inputs_num = x.size()[0]
-    if inputs_num == 1:
-        for i in range(len(modules)):
-            with th.cuda.stream(streams[i]):
-                streams[i].wait_stream(current_stream)
-                outs[i]=modules[i](x[0])
-    else:
-        for i in range(len(modules)): # apparently should use streams or something like that
-            with th.cuda.stream(streams[i]):
-                streams[i].wait_stream(current_stream)
-                outs[i]=modules[i](x[i])
-    for s in streams:
-        current_stream.wait_stream(s)
-    return th.stack( outs, dim=1 )
-
-# @th.jit.script
-def _run_with_fork(x : th.Tensor, modules : List[th.nn.Module]):
-    futures = [th.jit.fork(model, x) for model in modules]
-    results = [th.jit.wait(fut) for fut in futures]
-    return th.stack(results, dim=1)
-
-def _run_simple(x : th.Tensor, modules : List[th.nn.Module]):
-    outs = [None] * len(modules)
-    inputs_num = x.size()[0]
-    for i in range(len(modules)):
-        outs[i]=modules[i](x[i])
-    return th.stack( outs, dim=1 )
 
 class Parallel(nn.ModuleList):
     """

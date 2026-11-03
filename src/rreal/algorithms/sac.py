@@ -1296,9 +1296,10 @@ class SAC(RLAgent):
     
 
     @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile, dynamic=dynamic_compile)
-    def _compute_actor_and_alpha_loss(self, transitions : DictTransitionBatch):
+    def _compute_actor_and_alpha_loss(self, transitions : DictTransitionBatch, actor_enc_obss : th.Tensor | None = None):
         # precompute actor encodings to save time
-        actor_enc_obss = self._actor_feature_extractor.extract_features(self.get_actor_subobservation(transitions.observations))
+        if actor_enc_obss is None:
+            actor_enc_obss = self._actor_feature_extractor.extract_features(self.get_actor_subobservation(transitions.observations))
         actor_loss, actor_stats = self._compute_actor_loss(transitions, get_stats=False,
                                                            actor_enc_obss=actor_enc_obss)
         # self._start_range_nvtx("actor opt")
@@ -1331,7 +1332,8 @@ class SAC(RLAgent):
                 actor_enc_next_obss = self._actor_feature_extractor.extract_features(self.get_actor_subobservation(transitions.next_observations))
                 actor_enc_next_obss = actor_enc_next_obss.clone()
         return actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss
-    
+
+
     @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)
     def _compute_all_losses(self, transitions):
         # Precompute encodings to save time
@@ -1353,7 +1355,8 @@ class SAC(RLAgent):
             loss = actor_loss + q_loss
         encoded_obss = (actor_enc_obss, critic_enc_obss, actor_enc_next_obss, critic_enc_next_obss)
         return loss, q_loss, actor_loss, alpha_loss, alpha_stats, actor_stats, (subq_square_errs, q_stats), encoded_obss
-    
+
+
     @th_compile_ext(mode=compile_mode, fullgraph=True, disable=disable_compile,  dynamic=dynamic_compile)
     def _actor_and_alpha_opt_step(self, actor_loss : th.Tensor, alpha_loss : th.Tensor | None):
         simplified_clip_grad_norm_(list(self._actor.parameters()), self._hp.max_grad_norm)
@@ -1373,12 +1376,13 @@ class SAC(RLAgent):
         self._critic_opt_step(q_loss)
         self._actor_and_alpha_opt_step(actor_loss, alpha_loss)
 
-    def _update_actor_and_alpha(self, transitions : DictTransitionBatch):
+
+    def _update_actor_and_alpha(self, transitions : DictTransitionBatch, actor_enc_obss : th.Tensor | None = None):
         # We aggregate actor and alpha to join the two compilation regions and cuda graphs, so to reduce overhead
         # self._nvtx_start_range("_update_actor_and_alpha")
         self._actor_and_alpha_optimizer.zero_grad(set_to_none=True)
         # self._nvtx_start_range("_compute_actor_and_alpha_loss")
-        actor_alpha_loss, actor_loss, alpha_loss, alpha_stats, actor_stats = self._compute_actor_and_alpha_loss(transitions)
+        actor_alpha_loss, actor_loss, alpha_loss, alpha_stats, actor_stats = self._compute_actor_and_alpha_loss(transitions, actor_enc_obss=actor_enc_obss)
         # self._nvtx_end_range("_compute_actor_and_alpha_loss")
         # self._nvtx_start_range("actor_alpha backward")
         actor_alpha_loss.backward()
@@ -1394,6 +1398,7 @@ class SAC(RLAgent):
         self._alpha_updates += 1
         self._actor_updates += 1
         # self._nvtx_end_range("_update_actor_and_alpha")
+
 
     def _update_all(self, transitions):
         # self._nvtx_start_range("_update_all")
@@ -1425,7 +1430,8 @@ class SAC(RLAgent):
         self._actor_updates += 1
         return encoded_obss
         # self._nvtx_end_range("_update_all")
-        
+
+
     @staticmethod
     def _target_update(param, target_param, tau):
         if tau == 1:
@@ -1433,10 +1439,12 @@ class SAC(RLAgent):
         else:
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
+
     @th_compile_ext(mode=compile_mode, fullgraph=fullgraph, disable=disable_compile,  dynamic=dynamic_compile)        
     def _update_target_nets(self):
         for param, target_param in zip(self._q_net.parameters(), self._q_net_target.parameters()):
             self._target_update(param, target_param, self._hp.target_tau)
+
 
     def _update_feature_extractor(self):
         if self._share_actor_critic_feature_extractor:
@@ -1447,6 +1455,7 @@ class SAC(RLAgent):
                 self._critic_feature_extractor_optimizer.step()
             if self._actor_feature_extractor_optimizer is not None:
                 self._actor_feature_extractor_optimizer.step()
+
 
     def _update_full_merged(self, transitions : DictTransitionBatch):
         th.compiler.cudagraph_mark_step_begin()
@@ -1462,8 +1471,9 @@ class SAC(RLAgent):
         if update_actor_and_alpha:
             encoded_obss = self._update_all(transitions)
             if self._hp.perform_multiple_actor_updates:
+                # actor_enc_obss = encoded_obss[0]
                 for _ in range(self._hp.policy_update_freq-1): # do the remaining updates (twice on the same transition?? This comes from CleanRL)
-                    self._update_actor_and_alpha(transitions=transitions)
+                    self._update_actor_and_alpha(transitions=transitions) #, actor_enc_obss=actor_enc_obss)
         else:
             encoded_obss = self._update_critic(transitions)
 
@@ -1475,7 +1485,8 @@ class SAC(RLAgent):
         # self._nvtx_stop()
         q_act_alpha_losses = (self._last_q_loss, self._last_actor_loss, self._last_alpha_loss)
         return q_act_alpha_losses, encoded_obss
-    
+
+
     def validate(self, buffer : BaseValidatingBuffer, batch_size : int):
         with th.no_grad():
             transitions = buffer.sample_validation(batch_size=batch_size)

@@ -312,10 +312,11 @@ def runFunction(seed, folderName, resumeModelFile, run_id, args):
                         "task" : "balance",
                         "sparse_reward" :  True,
                         "img_obs" : False,
-                        "img_obs_resolution" : (64,64),
+                        "img_obs_resolution" : 64,
                         "img_obs_frame_stacking_size" : 3,
                         "cam_pos_randomization_grid_size_meters" : 0.0,
-                        "cam_pos_randomization_grid_steps" : 1}
+                        "cam_pos_randomization_grid_steps" : 1,
+                        "enable_highres_camera" : True}
     
     # Define the arguments for the evaluation environment(s)
     video_eval_env_builder_args = copy.deepcopy(env_builder_args)

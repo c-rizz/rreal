@@ -31,7 +31,7 @@ def build_mlp_net(arch, input_size, output_size,  ensemble_size=1,
                     weight_init_multiplier = 1.0,
                     layer_init_func : Callable[[th.nn.Module],None] | None = None,
                     last_layer_init_func : Callable[[th.nn.Module],None] | None = None,
-                    use_jit_fork : bool = True) -> Parallel:
+                    use_jit_fork : bool = False) -> Parallel:
 
     if arch == "identity":
         if input_size != output_size:
