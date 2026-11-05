@@ -391,7 +391,8 @@ class AsyncProcessExperienceCollector(ExperienceCollector):
         with th.no_grad():
             session.set_current_session(parent_session)
             self._pipe = pipe
-            pyTorch_makeDeterministic(seed = session.default_session.run_info["seed"])
+            pyTorch_makeDeterministic(seed = session.default_session.run_info["seed"],
+                                      deterministic = session.default_session.run_info["deterministic"])
             while self._running.value:
                 # ggLog.info(f"waiting command")
                 cmd = self._commander.wait_command()
