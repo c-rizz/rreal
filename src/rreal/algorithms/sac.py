@@ -895,6 +895,12 @@ class SAC(RLAgent):
         if not check_critic_observations:
             expected_obs_space = filter_dict_space(expected_obs_space, self._hp.actor_observation_filter)
             observation_space = filter_dict_space(observation_space, self._hp.actor_observation_filter)
+            # Acting does not need what the actor's feature extractor reads only to train, e.g. the
+            # reconstruction targets of a latent extractor, which a real robot may not even produce.
+            training_only = set(self._actor_feature_extractor.training_only_observation_keys())
+            if len(training_only) > 0:
+                expected_obs_space = filter_dict_space(expected_obs_space, [k for k in expected_obs_space.spaces if k not in training_only])
+                observation_space = filter_dict_space(observation_space, [k for k in observation_space.spaces if k not in training_only])
         if isinstance(expected_obs_space, gym.spaces.Dict) and isinstance(observation_space, gym.spaces.Dict):
             expected_keys = set(expected_obs_space.spaces.keys())
             actual_keys = set(observation_space.spaces.keys())

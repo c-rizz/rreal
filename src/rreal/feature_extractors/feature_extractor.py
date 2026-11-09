@@ -12,7 +12,12 @@ class FeatureExtractor(ABC, th.nn.Module):
     @abstractmethod
     def encoding_size(self) -> int:
         raise NotImplementedError()
-    
+
+    def training_only_observation_keys(self) -> tuple[str, ...]:
+        """Observation keys the extractor reads only while training, e.g. reconstruction targets:
+        extract_features works without them."""
+        return ()
+
     @classmethod
     @abstractmethod
     def load(cls, archive : zipfile.ZipFile, name : str = "feature_extractor", device : th.device | None = None) -> FeatureExtractor:
