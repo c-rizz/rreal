@@ -30,6 +30,7 @@ import yaml
 import zipfile
 from difflib import ndiff
 import copy
+import dataclasses
 from typing_extensions import override
 from adarl.utils.async_cuda2cpu_queue import log_async
 import pprint
@@ -72,17 +73,54 @@ class TransitionAugmentorFunction(Protocol):
                      ) -> tuple[DictObs, th.Tensor, DictObs, th.Tensor, th.Tensor]:
             ...
 
+def _fields_dict(e):
+    """The fields of a dataclass instance as a dict, any other value unchanged."""
+    if dataclasses.is_dataclass(e) and not isinstance(e, type):
+        return {f.name : getattr(e, f.name) for f in dataclasses.fields(e)}
+    return e
+
+def _values_equal(e1, e2) -> bool:
+    """Equality that goes into dicts, dataclasses, lists and tuples, and compares arrays and tensors
+    element-wise (their == gives an array, which a dataclass's == cannot turn into a bool)."""
+    if type(e1) != type(e2):
+        return False
+    e1, e2 = _fields_dict(e1), _fields_dict(e2)
+    if isinstance(e1, dict):
+        return compare_dicts(e1, e2)[0]
+    if isinstance(e1, (list, tuple)):
+        return len(e1) == len(e2) and all(_values_equal(a, b) for a, b in zip(e1, e2))
+    if isinstance(e1, (np.ndarray, th.Tensor)):
+        a, b = th.as_tensor(e1).cpu(), th.as_tensor(e2).cpu()
+        return a.shape == b.shape and bool(th.all(a == b))
+    return bool(e1 == e2)
+
 def compare_dicts(d1 : dict, d2 : dict) -> tuple[bool, str]:
+    """Compare two dicts, going into the dicts and dataclasses they contain. Returns whether they are equal
+    and a description of the differing entries."""
     all_keys = set(d1.keys()).union(set(d2.keys()))
     diffs = ""
     equal = True
-    for k in sorted(all_keys):
-        e1 = d1.get(k,None)
-        e2 = d2.get(k,None)
-        d = th.as_tensor(e1 != e2)
-        if th.any(d):
-            equal = False
-            diffs += f"{k}: {e1} != {e2}\n"
+    k = e1 = e2 = None
+    try:
+        for k in sorted(all_keys, key=repr): # the keys can be of different types, e.g. strings and tuples
+            e1 = d1.get(k,None)
+            e2 = d2.get(k,None)
+            if type(e1) != type(e2):
+                equal = False
+                diffs += f"{k}: {e1} (type: {type(e1)}) != {e2} (type: {type(e2)})\n"
+                continue
+            f1, f2 = _fields_dict(e1), _fields_dict(e2)
+            if isinstance(f1, dict):
+                sub_equal, sub_diffs = compare_dicts(f1, f2)
+                if not sub_equal:
+                    equal = False
+                    diffs += f"{k}:\n{sub_diffs}"
+            elif not _values_equal(e1, e2):
+                equal = False
+                diffs += f"{k}: {e1} != {e2}\n"
+    except Exception as e:
+        ggLog.error(f"Error comparing dictionaries at key {k} with values {e1} and {e2}: {e}")
+        raise e
     return equal, diffs
 
 def nop_func(arg1):
